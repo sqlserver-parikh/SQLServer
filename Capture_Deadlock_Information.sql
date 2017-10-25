@@ -38,7 +38,10 @@ EXEC  msdb.dbo.sp_add_jobstep @job_name=N'DBA - Save Deadlock Graph', @step_name
   @os_run_priority=0, @subsystem=N'TSQL',
   @command=N'INSERT INTO master..tblDeadlockEvents 
                 (AlertTime, DeadlockGraph) 
-                VALUES (getdate(), N''$(ESCAPE_SQUOTE(WMI(TextData)))'')',
+                VALUES (getdate(), N''$(ESCAPE_SQUOTE(WMI(TextData)))'')
+				GO
+				DELETE master..tblDeadlockEvents
+WHERE AlertTime < DATEADD(DD,-15,GETDATE());',
   @database_name=N'master',
   @flags=0
 EXEC msdb.dbo.sp_add_jobserver @job_name=N'DBA - Save Deadlock Graph', @server_name = @@SERVERNAME
