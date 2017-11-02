@@ -1,7 +1,7 @@
-USE [msdb]
+USE master
 GO
-IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name LIKE 'tblPerfMonData')
-CREATE TABLE [dbo].[tblPerfMonData](
+IF	OBJECT_ID ('DBATasks..tblPerfMonData')  IS  NULL
+CREATE TABLE DBATasks..tblPerfMonData(
 	[object_name] [nchar](128) NOT NULL,
 	[counter_name] [nchar](128) NOT NULL,
 	[instance_name] [nchar](128) NULL,
@@ -39,7 +39,7 @@ EXEC msdb.dbo.sp_add_jobstep @job_name=N'DBA - Collect Perfmon Data', @step_name
 		@retry_attempts=0, 
 		@retry_interval=0, 
 		@os_run_priority=0, @subsystem=N'TSQL', 
-		@command=N'INSERT INTO tblPerfMonData
+		@command=N'INSERT INTO DBATasks..tblPerfMonData
 SELECT *,
        GETDATE() RunTime
 FROM sys.dm_os_performance_counters
@@ -55,13 +55,13 @@ WITH Duplicates
                                            counter_name,
                                            instance_name,
                                            cntr_value ORDER BY RunTime DESC) rownumber
-     FROM tblPerfMonData
+     FROM DBATasks..tblPerfMonData
      WHERE RunTime > DATEADD(MINUTE, -6, GETDATE()))
      DELETE FROM Duplicates
      WHERE rownumber <> 1;
-	 DELETE tblPerfMonData
+	 DELETE DBATasks..tblPerfMonData
 	 WHERE RunTime < DATEADD(DD,-4,GETDATE())', 
-		@database_name=N'msdb', 
+		@database_name=N'master', 
 		@flags=0
 GO
 USE [msdb]
@@ -97,10 +97,10 @@ EXEC msdb.dbo.sp_add_jobschedule @job_name=N'DBA - Collect Perfmon Data', @name=
 		@active_end_time=235959
 GO
 
---SELECT *
---FROM tblPerfMonData
---ORDER BY 1,
---         2,
---         3,
---         6 DESC;
---TRUNCATE TABLE tblPerfMonData;
+----Rollback
+--IF	OBJECT_ID ('DBATasks..tblPerfMonData')  IS  NULL
+--DROP TABLE DBATasks..tblPerfMonData
+--IF  EXISTS (SELECT job_id FROM msdb.dbo.sysjobs_view WHERE name = N'DBA - Collect Perfmon Data')
+--BEGIN
+--EXEC msdb.dbo.sp_delete_job @job_name = N'DBA - Collect Perfmon Data',  @delete_unused_schedule=1
+--END
