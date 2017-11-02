@@ -1,9 +1,9 @@
-USE msdb;
+USE DBATasks;
 GO
-IF OBJECT_ID(N'vwAdmin_DB_List') IS NOT NULL
-DROP VIEW [dbo].[vwAdmin_DB_List]
+IF OBJECT_ID(N'vwDBList') IS NOT NULL
+DROP VIEW vwDBList
 GO
-CREATE VIEW [dbo].[vwAdmin_DB_List]
+CREATE VIEW vwDBList
 AS
      SELECT sd.[name] AS 'DBName',
             SUBSTRING(SUSER_SNAME(sd.[owner_sid]), 1, 24) AS 'Owner'
@@ -14,9 +14,9 @@ AS
                   AND sd.[user_access_desc] = 'MULTI_USER'
                   AND sd.[is_in_standby] = 0;
 GO
-IF OBJECT_ID(N'Admin_DBGrowthSnapDetail', N'U') IS NULL
+IF OBJECT_ID(N'tblDBGrowthDetail', N'U') IS NULL
 BEGIN   
-CREATE TABLE [dbo].[Admin_DBGrowthSnapDetail]
+CREATE TABLE [dbo].[tblDBGrowthDetail]
 ([DBID]          [INT] NOT NULL,
  [FileID]        [INT] NOT NULL,
  [FileType]      [INT] NOT NULL,
@@ -30,17 +30,14 @@ CREATE TABLE [dbo].[Admin_DBGrowthSnapDetail]
 );
 END
 GO
-
-
---Stored Proc #3
-IF OBJECT_ID(N'spAdmin_DBGrowth') IS NOT NULL
-DROP PROCEDURE dbo.spAdmin_DBGrowth
+IF OBJECT_ID(N'spDBGrowth') IS NOT NULL
+DROP PROCEDURE dbo.spDBGrowth
 GO
-CREATE PROCEDURE dbo.spAdmin_DBGrowth
+CREATE PROCEDURE dbo.spDBGrowth
 AS
 SET NOCOUNT ON
      BEGIN
-         INSERT INTO dbo.Admin_DBGrowthSnapDetail
+         INSERT INTO DBATasks..tblDBGrowthDetail
                 SELECT mf.database_id,
                        mf.file_id,
                        mf.type,
@@ -62,7 +59,7 @@ SET NOCOUNT ON
          FOR SELECT UPPER(name),
                     database_id
              FROM sys.databases sd(NOLOCK)
-                  INNER JOIN dbo.vwAdmin_DB_List vw ON sd.name = vw.DBName;
+                  INNER JOIN vwDBList vw ON sd.name = vw.DBName;
          OPEN cDatabases;
          FETCH NEXT FROM cDatabases INTO @DBNAME, @DBID;
          WHILE @@FETCH_STATUS = 0
@@ -72,7 +69,7 @@ SET NOCOUNT ON
              SET  UsedMB = (ceiling(S.size/128) - ceiling(S.size/128.0 - CAST(FILEPROPERTY(S.name, ''SpaceUsed'') AS int )/128.0))
 			 , FileGroupName = ISNULL(fg.name,''LogFile'')
 			 , DataSpaceID = fg.data_space_id
-			FROM msdb.dbo.Admin_DBGrowthSnapDetail A (NOLOCK) 
+			FROM DBATasks..tblDBGrowthDetail A (NOLOCK) 
 			JOIN sys.database_files S ON
                A.DBID = '+CONVERT(NVARCHAR(10), @DBID)+'
                AND A.FileID = S.file_id LEFT JOIN sys.filegroups fg on fg.data_space_id = S.data_space_id;';
@@ -85,13 +82,15 @@ SET NOCOUNT ON
              END;
          CLOSE cDatabases;
          DEALLOCATE cDatabases;
+		 DELETE tblDBGrowthDetail
+		 WHERE SnapDate < DATEADD(YY,-2,GETDATE())
      END;
 GO
 USE [msdb]
 GO
 
-IF EXISTS (SELECT 1 FROM msdb..sysjobs where name like 'DBA - DBGrowthDetail')
-EXEC msdb.dbo.sp_delete_job @job_name=N'DBA - DBGrowthDetail', @delete_unused_schedule=1
+IF EXISTS (SELECT 1 FROM msdb..sysjobs where name like 'DBA - Collect DB Growth Data')
+EXEC msdb.dbo.sp_delete_job @job_name=N'DBA - Collect DB Growth Data', @delete_unused_schedule=1
 GO
 
 BEGIN TRANSACTION
@@ -105,7 +104,7 @@ IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 END
 
 DECLARE @jobId BINARY(16)
-EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA - DBGrowthDetail', 
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA - Collect DB Growth Data', 
 		@enabled=1, 
 		@notify_level_eventlog=0, 
 		@notify_level_email=0, 
@@ -126,8 +125,8 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'DBGrowth
 		@retry_attempts=0, 
 		@retry_interval=0, 
 		@os_run_priority=0, @subsystem=N'TSQL', 
-		@command=N'spAdmin_DBGrowth', 
-		@database_name=N'msdb', 
+		@command=N'DBATasks..spDBGrowth', 
+		@database_name=N'master', 
 		@flags=0
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
@@ -157,7 +156,8 @@ GO
 
 
 --ROLLBACK
---DROP VIEW [dbo].[vwAdmin_DB_List]
---DROP TABLE [dbo].[Admin_DBGrowthSnapDetail]
---DROP PROCEDURE dbo.spAdmin_DBGrowth
---EXEC msdb.dbo.sp_delete_job @job_name=N'DBA - DBGrowthDetail', @delete_unused_schedule=1
+--USE DBATasks
+--DROP VIEW [dbo].[vwDBList]
+--DROP TABLE [dbo].[tblDBGrowthDetail]
+--DROP PROCEDURE dbo.spDBGrowth
+--EXEC msdb.dbo.sp_delete_job @job_name=N'DBA - Collect DB Growth Data', @delete_unused_schedule=1
