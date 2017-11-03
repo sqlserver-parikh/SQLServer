@@ -1,16 +1,3 @@
-
-/*
-
-Collected the Name of Windows Server Information from the below link
-http://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions
-
-The below script will only work on Windows Server Editions only 
-
-****NOT for the Windows Clinet Version (like Windows 7, Windows 8 etc.,
-
-Script by Satish Kumar Gajula
-*/
-
 CREATE TABLE #WinNames
 (WinID   FLOAT,
  WinName VARCHAR(MAX)
@@ -327,8 +314,7 @@ SELECT SERVERPROPERTY('ServerName') ServerName,
                         SELECT ' ,'+CONVERT(VARCHAR(10), InstName)+','+CONVERT(VARCHAR(5), StaticPort)
                         FROM #SQLInstances FOR xml PATH('')
                     ), 3, 8000)
-) AllInstancesName
-       ,
+) AllInstancesName,
 --, SERVERPROPERTY('machinename') VirtualServerName 
        SERVERPROPERTY('ComputerNamePhysicalNetBIOS') RunningNode,
 (
@@ -365,15 +351,24 @@ SELECT SERVERPROPERTY('ServerName') ServerName,
     FROM sys.sysdatabases
     WHERE dbid > 4
 ) DBCount,
+(SELECT CAST (cntr_value/1024.0 AS decimal(10,2))
+FROM sys.dm_os_performance_counters
+WHERE instance_name LIKE '%_Total%'
+      AND counter_name LIKE 'Data File(s) Size (KB)%') TotalDataSizeMB,
+
+(SELECT CAST (cntr_value/1024.0 AS decimal(10,2))
+FROM sys.dm_os_performance_counters
+WHERE instance_name LIKE '%_Total%'
+      AND counter_name LIKE 'Log File(s) Size (KB)%') TotalLogSizeMB,
+
        SERVERPROPERTY('Collation') ServerCollation,
        @ProcessorCount ProcessorCount,
 (
     SELECT value_in_use
     FROM sys.configurations
     WHERE name LIKE 'max degree of parallelism'
-) MAXDOP
-       ,
---, @AutoUpdate AutoUpdate 
+) MAXDOP,
+--       @AutoUpdate AutoUpdate,
        @memory TotalMemory,
        WN.WinName,
        wn1.OSVersion,
@@ -386,8 +381,7 @@ SELECT SERVERPROPERTY('ServerName') ServerName,
     SELECT value_in_use
     FROM sys.configurations
     WHERE name LIKE 'max server memory (MB)'
-) MaxMemory
-       ,
+) MaxMemory,
 --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
        ISNULL(@SystemManufacturer, 'VMware, Inc.') AS SystemManufacturer,
        CASE
@@ -399,8 +393,7 @@ SELECT SERVERPROPERTY('ServerName') ServerName,
            THEN 'Virtual'
        END AS [Physica/Virtual],
        ISNULL(@SystemProductName, 'VMware Virtual Platform') AS SystemProductName,
-       @CPU_0_Desc AS [CPU Description]
-       ,
+       @CPU_0_Desc AS [CPU Description],
 --, @CPU_0_MHz AS [CPU 0 MHz]
 --, @CPU_1_Desc AS [CPU 1 Description]
 --, @CPU_1_MHz AS [CPU 1 MHz]
@@ -410,17 +403,24 @@ SELECT SERVERPROPERTY('ServerName') ServerName,
            WHEN SERVERPROPERTY('IsClustered') = 1
            THEN 'Yes'
        END IsClustered,
-       @WindowsCluster WindowsCluster
---, SERVERPROPERTY('Collation') ServerCollation
+       @WindowsCluster WindowsCluster,
+       SERVERPROPERTY('Collation') ServerCollation,
+(
+    SELECT create_date
+    FROM sys.databases
+    WHERE name LIKE 'tempdb'
+) SQLStartTime,
+(
+    SELECT DATEADD(s, ((-1) * ([ms_ticks] / 1000)), GETDATE())
+    FROM sys.[dm_os_sys_info]
+) OSRebootTime,
+SYSDATETIME() RunTime
 FROM #WinNames WN
      INNER JOIN #WVer1 wn1 ON wn1.WinID = wn.WinID;
 GO
 DROP TABLE #cpudetails;
 DROP TABLE #memorydetails;
 DROP TABLE #SQLInstances;
-
---select * from sys.dm_exec_connections 
-
 DROP TABLE #WVer1;
 DROP TABLE #WVer;
 DROP TABLE #WinNames;
