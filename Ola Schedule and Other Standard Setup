@@ -302,3 +302,9 @@ ORDER BY Dbname;
 --Dropping the staging table  
 DROP TABLE #ConfigAutoGrowth;
 GO
+USE [msdb]
+GO
+EXEC msdb.dbo.sp_set_sqlagent_properties 
+		@alert_replace_runtime_tokens=1
+GO
+
