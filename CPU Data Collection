@@ -37,7 +37,8 @@ EXEC msdb.dbo.sp_add_jobstep @job_name=N'DBA - Collect CPU Data', @step_name=N'C
 		@retry_attempts=0, 
 		@retry_interval=0, 
 		@os_run_priority=0, @subsystem=N'TSQL', 
-		@command=N'DECLARE @ts_now bigint = (SELECT cpu_ticks/(cpu_ticks/ms_ticks) FROM sys.dm_os_sys_info WITH (NOLOCK)); 
+		@command=N'SET QUOTED_IDENTIFIER ON;
+		DECLARE @ts_now bigint = (SELECT cpu_ticks/(cpu_ticks/ms_ticks) FROM sys.dm_os_sys_info WITH (NOLOCK)); 
 INSERT INTO DBATasks..tblCPUUsage
 SELECT SQLProcessUtilization AS SQLCPUUsage, 
                SystemIdle AS IdleProcess, 
