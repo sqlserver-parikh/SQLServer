@@ -1,0 +1,10 @@
+--https://docs.microsoft.com/en-us/sql/t-sql/database-console-commands/dbcc-traceon-trace-flags-transact-sql
+DBCC TRACEON (
+3226  --Suppress Successful backup message from errorlog.
+,3042 --For large database backup, it will grow as needed.
+,1117 --All files in filegroup will grow, mostly used for tempdb optimization but affects all dbs with multiple files.
+,1118 --Reduce SGAM contention, in 2016 is controlled by SET MIXED_PAGE_ALLOCATION option of ALTER DATABASE and has no effect.
+,4199 --Query Optimizer
+,2371 --Auto update statistics algorithm change, in 2016 it has no effect - enabled by default.
+,-1)
+DBCC TRACESTATUS
