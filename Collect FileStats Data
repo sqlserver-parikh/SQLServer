@@ -61,6 +61,12 @@ GO
 ALTER PROCEDURE [dbo].[spFileStats](@retentiondays INT = 4, @waitfordelaysec int = 30)
 AS
      SET NOCOUNT ON;
+	DECLARE @lastruntime DATETIME;
+     SET @lastruntime = ISNULL(
+                              (
+                                  SELECT MAX(RunTime)
+                                  FROM DBATasks..tblFileStats
+                              ), GETDATE());
      IF OBJECT_ID('tempdb..#io') IS NOT NULL
          DROP TABLE #io;
      SELECT *
@@ -102,7 +108,7 @@ AS
      DELETE FROM DBATasks..tblFileStats
      WHERE NumOfBytesRead = 0
            AND NumOfBytesWritten = 0
-           AND RunTime > DATEADD(MI, -16, GETDATE());
+           AND RunTime > @lastruntime;
      DELETE FROM DBATasks..tblFileStats
      WHERE RunTime < DATEADD(DD, -@retentiondays, GETDATE());
 GO
