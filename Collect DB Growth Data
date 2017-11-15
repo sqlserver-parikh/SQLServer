@@ -90,7 +90,7 @@ GO
 USE [msdb]
 GO
 
-IF EXISTS (SELECT 1 FROM msdb..sysjobs where name like 'DBA - Collect DB Growth Data')
+IF  EXISTS (SELECT job_id FROM msdb.dbo.sysjobs_view WHERE name = N'DBA - Collect DB Growth Data')
 EXEC msdb.dbo.sp_delete_job @job_name=N'DBA - Collect DB Growth Data', @delete_unused_schedule=1
 GO
 
@@ -105,6 +105,9 @@ IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 END
 
 DECLARE @jobId BINARY(16)
+select @jobId = job_id from msdb.dbo.sysjobs where (name = N'DBA - Collect DB Growth Data')
+if (@jobId is NULL)
+BEGIN
 EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA - Collect DB Growth Data', 
 		@enabled=1, 
 		@notify_level_eventlog=0, 
@@ -116,6 +119,9 @@ EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA - Collect DB Growth Data
 		@category_name=N'Data Collector', 
 		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+IF NOT EXISTS (SELECT * FROM msdb.dbo.sysjobsteps WHERE job_id = @jobId and step_id = 1)
 EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'DBGrowth', 
 		@step_id=1, 
 		@cmdexec_success_code=0, 
@@ -132,14 +138,14 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'DBGrowth
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Sunday Schedule', 
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Daily', 
 		@enabled=1, 
-		@freq_type=8, 
+		@freq_type=4, 
 		@freq_interval=1, 
 		@freq_subday_type=1, 
 		@freq_subday_interval=0, 
 		@freq_relative_interval=0, 
-		@freq_recurrence_factor=1, 
+		@freq_recurrence_factor=0, 
 		@active_start_date=20010820, 
 		@active_end_date=99991231, 
 		@active_start_time=223000, 
@@ -152,9 +158,7 @@ GOTO EndSave
 QuitWithRollback:
     IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
 EndSave:
-
 GO
-
 
 --ROLLBACK
 --USE DBATasks
