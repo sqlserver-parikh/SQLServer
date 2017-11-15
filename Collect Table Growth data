@@ -17,10 +17,10 @@ CREATE TABLE [dbo].[tblTableGrowthDetail](
 	[TableCreateDate] [datetime] NOT NULL,
 	[TableModifyDate] [datetime] NOT NULL,
 	[RowsCount] [bigint] NULL,
-	[TotalSize] [bigint] NULL,
-	[DataSize] [bigint] NULL,
-	[IndexSize] [bigint] NULL,
-	[UnusedSize] [bigint] NULL,
+	[TotalSizeKB] [bigint] NULL,
+	[DataSizeKB] [bigint] NULL,
+	[IndexSizeKB] [bigint] NULL,
+	[UnusedSizeKB] [bigint] NULL,
 	[IndexName:Size] [nvarchar](max) NULL,
 	[IndexCount] [int] NULL,
 	[ReportRun] [datetime] NOT NULL
@@ -30,12 +30,10 @@ GO
 USE [DBATasks]
 GO
 
-/****** Object:  StoredProcedure [dbo].[spTableGrowthDetail]    Script Date: 11/14/2017 8:29:44 PM ******/
 IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spTableGrowthDetail]') AND type in (N'P', N'PC'))
 DROP PROCEDURE [dbo].[spTableGrowthDetail]
 GO
 
-/****** Object:  StoredProcedure [dbo].[spTableGrowthDetail]    Script Date: 11/14/2017 8:29:44 PM ******/
 SET ANSI_NULLS ON
 GO
 
