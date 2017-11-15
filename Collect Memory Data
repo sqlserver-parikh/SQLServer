@@ -12,6 +12,39 @@ CREATE TABLE [dbo].[tblMemoryUsage](
 	[RunTime] [datetime2](7) NOT NULL
 ) ON [PRIMARY]
 END
+
+USE [DBATasks]
+GO
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spMemoryUsage]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[spMemoryUsage]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spMemoryUsage]') AND type in (N'P', N'PC'))
+BEGIN
+EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[spMemoryUsage] AS' 
+END
+GO
+
+ALTER PROCEDURE [dbo].[spMemoryUsage](@retaindays INT = 4)
+AS
+     INSERT INTO DBATasks..tblMemoryUsage
+            SELECT total_physical_memory_kb / 1024 AS [PhysicalMemory(MB)],
+                   available_physical_memory_kb / 1024 AS [AvailableMemory(MB)],
+                   total_page_file_kb / 1024 AS [TotalPageFile(MB)],
+                   available_page_file_kb / 1024 AS [AvailablePageFile(MB)],
+                   system_cache_kb / 1024 AS [SystemCache(MB)],
+                   system_memory_state_desc AS [SystemMemoryState],
+                   GETDATE() RunTime
+            FROM sys.dm_os_sys_memory WITH (NOLOCK) OPTION(RECOMPILE);
+     DELETE DBATasks..tblMemoryUsage
+     WHERE RunTime < DATEADD(DD, -@retaindays, GETDATE());
 GO
 USE [msdb]
 GO
@@ -55,19 +88,7 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Memory C
 		@retry_attempts=0, 
 		@retry_interval=0, 
 		@os_run_priority=0, @subsystem=N'TSQL', 
-		@command=N'INSERT INTO DBATasks..tblMemoryUsage
-SELECT total_physical_memory_kb/1024 AS [PhysicalMemory(MB)], 
-       available_physical_memory_kb/1024 AS [AvailableMemory(MB)], 
-       total_page_file_kb/1024 AS [TotalPageFile(MB)], 
-	   available_page_file_kb/1024 AS [AvailablePageFile(MB)], 
-	   system_cache_kb/1024 AS [SystemCache(MB)],
-       system_memory_state_desc AS [SystemMemoryState],
-	   sysdatetime() RunTime
-FROM sys.dm_os_sys_memory  WITH (NOLOCK) OPTION (RECOMPILE);
-GO
-DELETE DBATasks..tblMemoryUsage
-WHERE RunTime < DATEADD(DD,-30,GETDATE())
-', 
+		@command=N'EXEC DBATasks..spMemoryUsage', 
 		@database_name=N'master', 
 		@flags=0
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
