@@ -20,7 +20,84 @@ BEGIN
     )
 END
 GO
+USE [DBATasks]
+GO
 
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spWaitStatsData]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[spWaitStatsData]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spWaitStatsData]') AND type in (N'P', N'PC'))
+BEGIN
+EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[spWaitStatsData] AS' 
+END
+GO
+
+ALTER PROCEDURE [dbo].[spWaitStatsData](@retaindays INT = 4)
+AS
+     SET NOCOUNT ON;
+     DECLARE @CurrentSqlServerStartTime DATETIME, @PreviousSqlServerStartTime DATETIME, @PreviousCollectionTime DATETIME;
+     SELECT @CurrentSqlServerStartTime = sqlserver_start_time
+     FROM sys.dm_os_sys_info;
+
+-- Get the last collection time
+     SELECT @PreviousSqlServerStartTime = MAX(SqlServerStartTime),
+            @PreviousCollectionTime = MAX(CollectionTime)
+     FROM DBATasks.dbo.tblWaitStatsData;
+     IF @CurrentSqlServerStartTime <> ISNULL(@PreviousSqlServerStartTime, 0)
+         BEGIN
+    -- Insert starter values if SQL Server has been recently restarted
+             INSERT INTO DBATasks.dbo.tblWaitStatsData
+                    SELECT @CurrentSqlServerStartTime,
+                           GETDATE(),
+                           DATEDIFF(MS, @CurrentSqlServerStartTime, GETDATE()),
+                           wait_type,
+                           waiting_tasks_count,
+                           0,
+                           wait_time_ms,
+                           0,
+                           max_wait_time_ms,
+                           signal_wait_time_ms,
+                           0
+                    FROM sys.dm_os_wait_stats;
+     END;
+         ELSE
+         BEGIN
+    -- Get the current wait stats
+             WITH CurrentWaitStats
+                  AS (
+                  SELECT GETDATE() AS 'CollectionTime',
+                         *
+                  FROM sys.dm_os_wait_stats)
+    -- Insert the diff values into the history table
+                  INSERT INTO DBATasks.dbo.tblWaitStatsData
+                         SELECT @CurrentSqlServerStartTime,
+                                cws.CollectionTime,
+                                DATEDIFF(MS, @PreviousCollectionTime, cws.CollectionTime),
+                                cws.wait_type,
+                                cws.waiting_tasks_count,
+                                cws.waiting_tasks_count - hist.WaitingTasksCountCumulative,
+                                cws.wait_time_ms,
+                                cws.wait_time_ms - hist.WaitTimeCumulative_ms,
+                                cws.max_wait_time_ms,
+                                cws.signal_wait_time_ms,
+                                cws.signal_wait_time_ms - hist.SignalWaitTimeCumulative_ms
+                         FROM CurrentWaitStats cws
+                              INNER JOIN DBATasks.dbo.tblWaitStatsData hist ON cws.wait_type = hist.WaitType
+                                                                               AND hist.CollectionTime = @PreviousCollectionTime;
+     END;
+     DELETE [DBATasks].[dbo].[tblWaitStatsData]
+     WHERE WaitType NOT IN(N'BROKER_EVENTHANDLER', N'BROKER_RECEIVE_WAITFOR', N'BROKER_TASK_STOP', N'BROKER_TO_FLUSH', N'BROKER_TRANSMITTER', N'CHECKPOINT_QUEUE', N'CHKPT', N'CLR_AUTO_EVENT', N'CLR_MANUAL_EVENT', N'CLR_SEMAPHORE', N'DBMIRROR_DBM_EVENT', N'DBMIRROR_EVENTS_QUEUE', N'DBMIRROR_WORKER_QUEUE', N'DBMIRRORING_CMD', N'DIRTY_PAGE_POLL', N'DISPATCHER_QUEUE_SEMAPHORE', N'EXECSYNC', N'FSAGENT', N'FT_IFTS_SCHEDULER_IDLE_WAIT', N'FT_IFTSHC_MUTEX', N'HADR_CLUSAPI_CALL', N'HADR_FILESTREAM_IOMGR_IOCOMPLETION', N'HADR_LOGCAPTURE_WAIT', N'HADR_NOTIFICATION_DEQUEUE', N'HADR_TIMER_TASK', N'HADR_WORK_QUEUE', N'KSOURCE_WAKEUP', N'LAZYWRITER_SLEEP', N'LOGMGR_QUEUE', N'ONDEMAND_TASK_QUEUE', N'PWAIT_ALL_COMPONENTS_INITIALIZED', N'PREEMPTIVE_OS_AUTHENTICATIONOPS', N'PREEMPTIVE_OS_CREATEFILE', N'PREEMPTIVE_OS_GENERICOPS', N'PREEMPTIVE_OS_LIBRARYOPS', N'PREEMPTIVE_OS_QUERYREGISTRY', N'PREEMPTIVE_HADR_LEASE_MECHANISM', N'PREEMPTIVE_SP_SERVER_DIAGNOSTICS', N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP', N'QDS_SHUTDOWN_QUEUE', N'REQUEST_FOR_DEADLOCK_SEARCH', N'RESOURCE_QUEUE', N'SERVER_IDLE_CHECK', N'SLEEP_BPOOL_FLUSH', N'SLEEP_DBSTARTUP', N'SLEEP_DCOMSTARTUP', N'SLEEP_MASTERDBREADY', N'SLEEP_MASTERMDREADY', N'SLEEP_MASTERUPGRADED', N'SLEEP_MSDBSTARTUP', N'SLEEP_SYSTEMTASK', N'SLEEP_TASK', N'SLEEP_TEMPDBSTARTUP', N'SNI_HTTP_ACCEPT', N'SP_SERVER_DIAGNOSTICS_SLEEP', N'SQLTRACE_BUFFER_FLUSH', N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', N'SQLTRACE_WAIT_ENTRIES', N'WAIT_FOR_RESULTS', N'WAITFOR', N'WAITFOR_TASKSHUTDOWN', N'WAIT_XTP_HOST_WAIT', N'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', N'WAIT_XTP_CKPT_CLOSE', N'XE_DISPATCHER_JOIN', N'XE_DISPATCHER_WAIT', N'XE_TIMER_EVENT')
+     AND WaitingTasksCountCumulative = 0;
+     DELETE [DBATasks].[dbo].[tblWaitStatsData]
+     WHERE CollectionTime < DATEADD(DD, -@retaindays, GETDATE());
+GO
 USE [msdb]
 GO
 IF  EXISTS (SELECT job_id FROM msdb.dbo.sysjobs_view WHERE name = N'DBA - Collect WaitStats Data')
@@ -65,95 +142,7 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'WaitStat
 		@retry_attempts=0, 
 		@retry_interval=0, 
 		@os_run_priority=0, @subsystem=N'TSQL', 
-		@command=N'
-
-DECLARE
-     @CurrentSqlServerStartTime DATETIME
-    ,@PreviousSqlServerStartTime DATETIME
-    ,@PreviousCollectionTime DATETIME;
-
-SELECT @CurrentSqlServerStartTime = sqlserver_start_time FROM sys.dm_os_sys_info;
-
--- Get the last collection time
-SELECT
-     @PreviousSqlServerStartTime = MAX(SqlServerStartTime)
-    ,@PreviousCollectionTime = MAX(CollectionTime)
-FROM DBATasks.dbo.tblWaitStatsData;
-
-IF @CurrentSqlServerStartTime <> ISNULL(@PreviousSqlServerStartTime,0)
-BEGIN
-    -- Insert starter values if SQL Server has been recently restarted
-    INSERT INTO DBATasks.dbo.tblWaitStatsData
-    SELECT
-         @CurrentSqlServerStartTime
-        ,GETDATE()
-        ,DATEDIFF(MS,@CurrentSqlServerStartTime,GETDATE())
-        ,wait_type
-        ,waiting_tasks_count
-        ,0
-        ,wait_time_ms
-        ,0
-        ,max_wait_time_ms
-        ,signal_wait_time_ms
-        ,0
-    FROM sys.dm_os_wait_stats;
-END
-ELSE
-BEGIN
-    -- Get the current wait stats
-    WITH CurrentWaitStats AS
-    (
-        SELECT GETDATE() AS ''CollectionTime'',* FROM sys.dm_os_wait_stats
-    )
-    -- Insert the diff values into the history table
-    INSERT DBATasks.dbo.tblWaitStatsData
-    SELECT
-         @CurrentSqlServerStartTime
-        ,cws.CollectionTime
-        ,DATEDIFF(MS,@PreviousCollectionTime,cws.CollectionTime)
-        ,cws.wait_type
-        ,cws.waiting_tasks_count
-        ,cws.waiting_tasks_count - hist.WaitingTasksCountCumulative
-        ,cws.wait_time_ms
-        ,cws.wait_time_ms - hist.WaitTimeCumulative_ms
-        ,cws.max_wait_time_ms
-        ,cws.signal_wait_time_ms
-        ,cws.signal_wait_time_ms - hist.SignalWaitTimeCumulative_ms
-    FROM CurrentWaitStats cws INNER JOIN DBATasks.dbo.tblWaitStatsData hist
-        ON cws.wait_type = hist.WaitType
-        AND hist.CollectionTime = @PreviousCollectionTime;
-END
-GO
-DELETE [DBATasks].[dbo].[tblWaitStatsData]   
-WHERE WaitType not  IN (
-        N''BROKER_EVENTHANDLER'', N''BROKER_RECEIVE_WAITFOR'', N''BROKER_TASK_STOP'',
-		N''BROKER_TO_FLUSH'', N''BROKER_TRANSMITTER'', N''CHECKPOINT_QUEUE'',
-        N''CHKPT'', N''CLR_AUTO_EVENT'', N''CLR_MANUAL_EVENT'', N''CLR_SEMAPHORE'',
-        N''DBMIRROR_DBM_EVENT'', N''DBMIRROR_EVENTS_QUEUE'', N''DBMIRROR_WORKER_QUEUE'',
-		N''DBMIRRORING_CMD'', N''DIRTY_PAGE_POLL'', N''DISPATCHER_QUEUE_SEMAPHORE'',
-        N''EXECSYNC'', N''FSAGENT'', N''FT_IFTS_SCHEDULER_IDLE_WAIT'', N''FT_IFTSHC_MUTEX'',
-        N''HADR_CLUSAPI_CALL'', N''HADR_FILESTREAM_IOMGR_IOCOMPLETION'', N''HADR_LOGCAPTURE_WAIT'', 
-		N''HADR_NOTIFICATION_DEQUEUE'', N''HADR_TIMER_TASK'', N''HADR_WORK_QUEUE'',
-        N''KSOURCE_WAKEUP'', N''LAZYWRITER_SLEEP'', N''LOGMGR_QUEUE'', N''ONDEMAND_TASK_QUEUE'',
-        N''PWAIT_ALL_COMPONENTS_INITIALIZED'', 
-		N''PREEMPTIVE_OS_AUTHENTICATIONOPS'', N''PREEMPTIVE_OS_CREATEFILE'', N''PREEMPTIVE_OS_GENERICOPS'',
-		N''PREEMPTIVE_OS_LIBRARYOPS'', N''PREEMPTIVE_OS_QUERYREGISTRY'',
-		N''PREEMPTIVE_HADR_LEASE_MECHANISM'', N''PREEMPTIVE_SP_SERVER_DIAGNOSTICS'',
-		N''QDS_PERSIST_TASK_MAIN_LOOP_SLEEP'',
-        N''QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP'', N''QDS_SHUTDOWN_QUEUE'', N''REQUEST_FOR_DEADLOCK_SEARCH'',
-		N''RESOURCE_QUEUE'', N''SERVER_IDLE_CHECK'', N''SLEEP_BPOOL_FLUSH'', N''SLEEP_DBSTARTUP'',
-		N''SLEEP_DCOMSTARTUP'', N''SLEEP_MASTERDBREADY'', N''SLEEP_MASTERMDREADY'',
-        N''SLEEP_MASTERUPGRADED'', N''SLEEP_MSDBSTARTUP'', N''SLEEP_SYSTEMTASK'', N''SLEEP_TASK'',
-        N''SLEEP_TEMPDBSTARTUP'', N''SNI_HTTP_ACCEPT'', N''SP_SERVER_DIAGNOSTICS_SLEEP'',
-		N''SQLTRACE_BUFFER_FLUSH'', N''SQLTRACE_INCREMENTAL_FLUSH_SLEEP'', N''SQLTRACE_WAIT_ENTRIES'',
-		N''WAIT_FOR_RESULTS'', N''WAITFOR'', N''WAITFOR_TASKSHUTDOWN'', N''WAIT_XTP_HOST_WAIT'',
-		N''WAIT_XTP_OFFLINE_CKPT_NEW_LOG'', N''WAIT_XTP_CKPT_CLOSE'', N''XE_DISPATCHER_JOIN'',
-        N''XE_DISPATCHER_WAIT'', N''XE_TIMER_EVENT'')
-    AND WaitingTasksCountCumulative  = 0;
-GO
-DELETE [DBATasks].[dbo].[tblWaitStatsData]   
-WHERE CollectionTime < DATEADD(DD,-7,GETDATE())
-GO', 
+		@command=N'EXEC DBATasks..spWaitStatsData', 
 		@database_name=N'master', 
 		@flags=0
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
@@ -178,4 +167,3 @@ QuitWithRollback:
 EndSave:
 
 GO
-
