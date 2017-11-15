@@ -1,18 +1,16 @@
 USE [DBATasks];
-IF EXISTS
+IF NOT EXISTS
 (
     SELECT *
     FROM sys.objects
     WHERE object_id = OBJECT_ID(N'[dbo].[tblDiskData]')
           AND type IN(N'U')
 )
-    DROP TABLE [dbo].[tblDiskData];
-GO
 CREATE TABLE [dbo].[tblDiskData]
 ([DriveLetter] [VARCHAR](512) NULL,
  [BlockSize]   [VARCHAR](100) NOT NULL,
- [Capacity]    [VARCHAR](100) NULL,
- [FreeSpace]   [VARCHAR](100) NULL,
+ [CapacityMB]    [VARCHAR](100) NULL,
+ [FreeSpaceMB]   [VARCHAR](100) NULL,
  [FreePct]     [VARCHAR](100) NULL,
  [RunDate]     [DATETIME2](7) NULL
                               DEFAULT(GETDATE())
@@ -31,8 +29,8 @@ CREATE VIEW [dbo].[vwDiskData]
 AS
      SELECT [DriveLetter],
             [BlockSize],
-            [Capacity],
-            [FreeSpace],
+            [CapacityMB],
+            [FreeSpaceMB],
             [FreePct]
      FROM [DBATasks].[dbo].[tblDiskData];
 GO
@@ -141,7 +139,8 @@ IF NOT EXISTS
          @retry_interval = 0,
          @os_run_priority = 0,
          @subsystem = N'TSQL',
-         @command = N'BULK INSERT vwDiskData FROM "c:\temp\DiskSpaceReport.csv" WITH(FIELDTERMINATOR = ''","'', FIRSTROW = 2, ROWTERMINATOR = ''"\n'');
+         @command = N'WAITFOR DELAY ''00:00:10''; 
+	    BULK INSERT vwDiskData FROM "c:\temp\DiskSpaceReport.csv" WITH(FIELDTERMINATOR = ''","'', FIRSTROW = 2, ROWTERMINATOR = ''"\n'');
 UPDATE DBATasks.dbo.tblDiskData
   SET
       DriveLetter = REPLACE(DriveLetter, ''"'', '''')
