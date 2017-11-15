@@ -198,12 +198,6 @@ WHILE @file_count < @cpu_count -- Add * 0.25 here to add 1 file for every 4 cpus
         SELECT @file_count = @file_count + 1;
     END;
 
- --Make database owner as SA
-EXEC sp_MSforeachdb
-"IF      '?'     NOT IN ('master','tempdb', 'model')   BEGIN
-        USE [?]; EXEC dbo.sp_changedbowner @loginame = N'sa'
-END";
-
 --AutoGrowth
 
 CREATE TABLE #ConfigAutoGrowth
