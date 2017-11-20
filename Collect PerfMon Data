@@ -62,9 +62,9 @@ AS
                  ROW_NUMBER() OVER(PARTITION BY object_name,
                                                 counter_name,
                                                 instance_name,
-                                                cntr_value ORDER BY RunTime ASC) rownumber
+                                                cntr_value ORDER BY RunTime DESC) rownumber
           FROM DBATasks..tblPerfMonData
-          WHERE RunTime > @lastruntime)
+          WHERE RunTime >= @lastruntime)
           DELETE FROM Duplicates
           WHERE rownumber <> 1;
      DELETE DBATasks..tblPerfMonData
