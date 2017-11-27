@@ -4,21 +4,21 @@ IF
 (
     SELECT total_physical_memory_kb / 1024
     FROM sys.dm_os_sys_memory
-) < 8000
+) <= 8192
     SET @os_memory = 2048;
     ELSE
 IF
 (
     SELECT total_physical_memory_kb / 1024
     FROM sys.dm_os_sys_memory
-) < 33000
+) <= 32768
     SET @os_memory = 4096;
     ELSE
 IF
 (
     SELECT total_physical_memory_kb / 1024
     FROM sys.dm_os_sys_memory
-) < 66000
+) <= 65536
     SET @os_memory = 8192;
     ELSE
 SET @os_memory = 12288;
