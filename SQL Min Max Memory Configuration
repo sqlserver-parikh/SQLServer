@@ -28,31 +28,36 @@ SET @max_memory = (
                       FROM sys.dm_os_sys_memory
                   ) - @os_memory) / @total_instances;
 SET @min_memory = 0.7 * @max_memory;
-SELECT 'Total Server Memory : '+CONVERT(VARCHAR(8), total_physical_memory_kb / 1024) Memory
+SELECT 'Total Server Memory: '+CONVERT(VARCHAR(8), total_physical_memory_kb / 1024) Memory
 FROM sys.dm_os_sys_memory
 UNION ALL
-SELECT 'Max Memory: '+CONVERT(VARCHAR(8), @max_memory)
+SELECT 'Max SQL Memory: '+CONVERT(VARCHAR(8), @max_memory)
 UNION ALL
-SELECT 'Min Memory: '+CONVERT(VARCHAR(8), @min_memory)
+SELECT 'Min SQL Memory: '+CONVERT(VARCHAR(8), @min_memory)
 UNION ALL
 SELECT 'OS Memory: '+CONVERT(VARCHAR(8), @os_memory);
 IF
 (
     SELECT value_in_use
-    FROM SYS.configurations
+    FROM sys.configurations
     WHERE NAME LIKE 'min server memory (MB)'
 ) <> @min_memory
-    EXEC sys.sp_configure
-         N'min server memory (MB)',
-         @min_memory;
+    BEGIN
+        EXEC sys.sp_configure
+             N'min server memory (MB)',
+             @min_memory;
+        RECONFIGURE WITH OVERRIDE;
+END;
 IF
 (
     SELECT value_in_use
-    FROM SYS.configurations
+    FROM sys.configurations
     WHERE NAME LIKE 'max server memory (MB)'
 ) <> @max_memory
-    EXEC sys.sp_configure
-         N'max server memory (MB)',
-         @max_memory;
-RECONFIGURE WITH OVERRIDE;
+    BEGIN
+        EXEC sys.sp_configure
+             N'max server memory (MB)',
+             @max_memory;
+        RECONFIGURE WITH OVERRIDE;
+END;
 GO
