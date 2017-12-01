@@ -38,9 +38,12 @@ EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[spConfigChanges] A
 END
 GO
 
-ALTER PROCEDURE [dbo].[spConfigChanges] 
+ALTER PROCEDURE [dbo].[spConfigChanges] (@retaindays INT = 365)
 AS
+SET NOCOUNT ON;
 BEGIN TRY
+     DELETE DBATasks.dbo.[tblConfigChanges]
+     WHERE ChangeTime < DATEADD(DD, -@retaindays, GETDATE());
     DECLARE @enable INT;
     SELECT @enable = CONVERT(INT, value_in_use)
     FROM sys.configurations
@@ -195,4 +198,3 @@ QuitWithRollback:
     IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
 EndSave:
 GO
-
