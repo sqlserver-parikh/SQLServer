@@ -1,64 +1,109 @@
-USE [master];
+USE [master]
 GO
-DECLARE @cpu_count INT, @file_count INT, @logical_name SYSNAME, @file_name NVARCHAR(520), @physical_name NVARCHAR(520), @size INT, @logsize INT, @percent_free DECIMAL(4, 2), @max_size INT, @growth INT, @alter_command NVARCHAR(MAX), @instance_count INT;
-SET @instance_count = 2; --Total number of instances sharing same tempdb drive
-SET @percent_free = 25.00;  --Percent disk space free
-SELECT @physical_name = physical_name,
-       @size = size / 128,
-       @max_size = max_size / 128,
-       @growth = growth / 128
-FROM tempdb.sys.database_files
-WHERE name = 'tempdev';
-SELECT @file_count = COUNT(*)
-FROM tempdb.sys.database_files
-WHERE type_desc = 'ROWS';
-SELECT @cpu_count = cpu_count
-FROM sys.dm_os_sys_info;
-PRINT 'Total CPU Count: '+CONVERT(VARCHAR(4), @cpu_count);
-PRINT 'Total File Count: '+CONVERT(VARCHAR(4), @file_count);
-IF @cpu_count > 8
-    SET @cpu_count = 8;
-WHILE @file_count < @cpu_count -- Add * 0.25 here to add 1 file for every 4 cpus, * .5 for every 2 etc.
-    BEGIN
-        SELECT @logical_name = 'tempdev'+CAST(@file_count AS NVARCHAR);
-        SELECT @file_name = REPLACE(@physical_name, 'tempdb.mdf', @logical_name+'.ndf');
-        SELECT @alter_command = 'ALTER DATABASE [tempdb] ADD FILE ( NAME =N'''+@logical_name+''', FILENAME =N'''+@file_name+''', SIZE = '+CAST(@size AS NVARCHAR)+'MB, FILEGROWTH = '+CAST(@growth AS NVARCHAR)+'MB )';
-        PRINT @alter_command;
-   -- EXEC    sp_executesql @alter_command
 
-        SELECT @file_count = @file_count + 1;
-    END;
-SELECT @size = total_bytes / 1024 / 1024 / (@file_count + 1) * (100 - @percent_free) / 100 / @instance_count
-FROM sys.dm_os_volume_stats(2, 1);
-DECLARE @name NVARCHAR(128);
-PRINT 'Data file size is '+CONVERT(VARCHAR(8), @size);
-DECLARE db_cursor CURSOR
-FOR
-    SELECT name
-    FROM sys.master_files
-    WHERE database_id = 2
-          AND size / 128.0 <= @size - 1;
-IF(@size > 20000)
-    SET @growth = 4000;
-    ELSE
-SET @growth = 2000;
-IF(@size > 8000)
-    SET @logsize = 8000;
-    ELSE
-SET @logsize = @size;
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @name;
-WHILE @@FETCH_STATUS = 0
-    BEGIN
-        IF @name NOT LIKE '%log%'
-            SELECT @alter_command = 'ALTER DATABASE [tempdb] MODIFY FILE ( NAME =N'''+@name+''', SIZE = '+CAST(@size AS NVARCHAR)+'MB, FILEGROWTH = '+CAST(@growth AS NVARCHAR)+'MB )';
-            ELSE
-        SELECT @alter_command = 'ALTER DATABASE [tempdb] MODIFY FILE ( NAME =N'''+@name+''', SIZE = '+CAST(@logsize AS NVARCHAR)+'MB, FILEGROWTH = '+CAST(@growth AS NVARCHAR)+'MB )';
-        PRINT @alter_command;
-        EXEC sp_executesql
-             @alter_command;
-        FETCH NEXT FROM db_cursor INTO @name;
-    END;
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spTempDBConfig]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[spTempDBConfig]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spTempDBConfig]') AND type in (N'P', N'PC'))
+BEGIN
+EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[spTempDBConfig] AS' 
+END
+GO
+
+ALTER PROCEDURE [dbo].[spTempDBConfig]
+(@InstanceCount INT = 1,
+ @MinPCTFree    INT = 25,
+ @AutoGrowthON  BIT = 1,
+ @PrintOnly     BIT = 0
+)
+AS
+     DECLARE @cpu_count INT, @file_count INT, @name NVARCHAR(128), @logical_name SYSNAME, @file_name NVARCHAR(520), @physical_name NVARCHAR(520), @drivesize INT, @size INT, @logsize INT, @percent_free DECIMAL(4, 2), @max_size INT, @growth INT, @alter_command NVARCHAR(MAX), @instance_count INT;
+     SET @instance_count = @InstanceCount; --Total number of instances sharing same tempdb drive
+     SET @percent_free = @MinPCTFree;  --Percent disk space free
+
+     SELECT @physical_name = physical_name
+     FROM tempdb.sys.database_files
+     WHERE name = 'tempdev';
+     SELECT @file_count = COUNT(*)
+     FROM tempdb.sys.database_files
+     WHERE type_desc = 'ROWS';
+     SELECT @cpu_count = cpu_count
+     FROM sys.dm_os_sys_info;
+     PRINT '--Total CPU Count: '+CONVERT(VARCHAR(4), @cpu_count);
+     PRINT '--Total Current File Count: '+CONVERT(VARCHAR(4), @file_count);
+     IF @cpu_count > 8
+         SET @cpu_count = 8;
+     SELECT @size = total_bytes / 1024 / 1024 / (@cpu_count + 1) * (100 - @percent_free) / 100 / @instance_count,
+            @drivesize = total_bytes / 1024 / 1024
+     FROM sys.dm_os_volume_stats(2, 1);
+     PRINT '--Total Drive size is : '+CONVERT(VARCHAR(20), @drivesize)+' MB';
+     PRINT '--Data file size will be '+CONVERT(VARCHAR(8), @size)+' MB';
+     IF(@size > 20000)
+         SET @growth = 4000;
+         ELSE
+     SET @growth = 2000;
+     IF(@size > 8000)
+         SET @logsize = 8000;
+         ELSE
+     SET @logsize = @size;
+     IF @AutoGrowthON = 0
+         SET @growth = 0;
+     PRINT '--Log File size will be '+CONVERT(VARCHAR(20), @logsize);
+     PRINT '--Data/Log File Growth will be '+CONVERT(VARCHAR(20), @growth);
+     PRINT '--Free Disk Space will be '+CONVERT(VARCHAR(20), @drivesize - @cpu_count * @size - @logsize);
+     WHILE @file_count < @cpu_count -- Add * 0.25 here to add 1 file for every 4 cpus, * .5 for every 2 etc.
+         BEGIN
+             SELECT @logical_name = 'tempdev'+CAST(@file_count AS NVARCHAR);
+             SELECT @file_name = REPLACE(@physical_name, 'tempdb.mdf', @logical_name+'.ndf');
+             SELECT @alter_command = 'ALTER DATABASE [tempdb] ADD FILE ( NAME =N'''+@logical_name+''', FILENAME =N'''+@file_name+''', SIZE = '+CAST(@size AS NVARCHAR)+'MB, FILEGROWTH = '+CAST(@growth AS NVARCHAR)+'MB )';
+             IF @PrintOnly = 1
+                 BEGIN
+                     PRINT @alter_command;
+                 END;
+                 ELSE
+                 BEGIN
+                     PRINT @alter_command;
+                     EXEC sp_executesql
+                          @alter_command;
+                 END;
+             SELECT @file_count = @file_count + 1;
+         END;
+     DECLARE db_cursor CURSOR
+     FOR SELECT name
+         FROM sys.master_files
+         WHERE database_id = 2 AND size <> @size AND growth <> @growth AND type = 0
+	    UNION 
+	    SELECT name
+         FROM sys.master_files
+         WHERE database_id = 2 AND size <> @logsize AND growth <> @growth AND type = 1
+
+     OPEN db_cursor;
+     FETCH NEXT FROM db_cursor INTO @name;
+     WHILE @@FETCH_STATUS = 0
+         BEGIN
+             IF @name NOT LIKE '%log%'
+                 SELECT @alter_command = 'ALTER DATABASE [tempdb] MODIFY FILE ( NAME =N'''+@name+''', SIZE = '+CAST(@size AS NVARCHAR)+'MB, FILEGROWTH = '+CAST(@growth AS NVARCHAR)+'MB )';
+                 ELSE
+             SELECT @alter_command = 'ALTER DATABASE [tempdb] MODIFY FILE ( NAME =N'''+@name+''', SIZE = '+CAST(@logsize AS NVARCHAR)+'MB, FILEGROWTH = '+CAST(@growth AS NVARCHAR)+'MB )';
+             IF @PrintOnly = 1
+                 BEGIN
+                     PRINT @alter_command;
+                 END;
+                 ELSE
+                 BEGIN
+                     PRINT @alter_command;
+                     EXEC sp_executesql
+                          @alter_command;
+                 END;
+             FETCH NEXT FROM db_cursor INTO @name;
+         END;
+     CLOSE db_cursor;
+     DEALLOCATE db_cursor;
 GO
