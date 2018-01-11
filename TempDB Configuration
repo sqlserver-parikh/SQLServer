@@ -19,9 +19,9 @@ GO
 
 ALTER PROCEDURE [dbo].[spTempDBConfig]
 (@InstanceCount INT = 1,
- @MinPCTFree    INT = 25,
+ @MinPCTFree    INT = 30,
  @AutoGrowthON  BIT = 1,
- @PrintOnly     BIT = 0
+ @PrintOnly     BIT = 1
 )
 AS
      DECLARE @cpu_count INT, @file_count INT, @name NVARCHAR(128), @logical_name SYSNAME, @file_name NVARCHAR(520), @physical_name NVARCHAR(520), @drivesize INT, @size INT, @logsize INT, @percent_free DECIMAL(4, 2), @max_size INT, @growth INT, @alter_command NVARCHAR(MAX), @instance_count INT;
@@ -43,7 +43,7 @@ AS
      SELECT @size = total_bytes / 1024 / 1024 / (@cpu_count + 1) * (100 - @percent_free) / 100 / @instance_count,
             @drivesize = total_bytes / 1024 / 1024
      FROM sys.dm_os_volume_stats(2, 1);
-     PRINT '--Total Drive size is : '+CONVERT(VARCHAR(20), @drivesize)+' MB';
+     PRINT '--Total Drive size is: '+CONVERT(VARCHAR(20), @drivesize)+' MB';
      PRINT '--Data file size will be '+CONVERT(VARCHAR(8), @size)+' MB';
      IF(@size > 20000)
          SET @growth = 4000;
@@ -55,9 +55,9 @@ AS
      SET @logsize = @size;
      IF @AutoGrowthON = 0
          SET @growth = 0;
-     PRINT '--Log File size will be '+CONVERT(VARCHAR(20), @logsize);
-     PRINT '--Data/Log File Growth will be '+CONVERT(VARCHAR(20), @growth);
-     PRINT '--Free Disk Space will be '+CONVERT(VARCHAR(20), @drivesize - @cpu_count * @size - @logsize);
+     PRINT '--Log File size will be '+CONVERT(VARCHAR(20), @logsize) + ' MB';
+     PRINT '--Data/Log File Growth will be '+CONVERT(VARCHAR(20), @growth) + ' MB';
+     PRINT '--Free Disk Space will be '+CONVERT(VARCHAR(20), @drivesize - @cpu_count * @size - @logsize) + ' MB';
      WHILE @file_count < @cpu_count -- Add * 0.25 here to add 1 file for every 4 cpus, * .5 for every 2 etc.
          BEGIN
              SELECT @logical_name = 'tempdev'+CAST(@file_count AS NVARCHAR);
@@ -78,12 +78,11 @@ AS
      DECLARE db_cursor CURSOR
      FOR SELECT name
          FROM sys.master_files
-         WHERE database_id = 2 AND size <> @size AND growth <> @growth AND type = 0
+         WHERE database_id = 2 AND (size <> @size*128.0 OR growth <> @growth*128.0) AND type = 0
 	    UNION 
 	    SELECT name
          FROM sys.master_files
-         WHERE database_id = 2 AND size <> @logsize AND growth <> @growth AND type = 1
-
+         WHERE database_id = 2 AND (size > @logsize*128.0 OR growth <> @growth*128.0) AND type = 1
      OPEN db_cursor;
      FETCH NEXT FROM db_cursor INTO @name;
      WHILE @@FETCH_STATUS = 0
