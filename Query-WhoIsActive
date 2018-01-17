@@ -1,0 +1,38 @@
+SELECT collection_time,
+       [dd hh:mm:ss.mss],
+ --     ,Left(cast(sql_text as varchar(max)),50) SQLText 
+       sql_text,
+       sql_command,
+     -- , Left(cast(sql_command as varchar(max)),50)SQLCommand 
+       [session_id],
+       [login_name],
+       [wait_info],
+       [tran_log_writes],
+       [CPU],
+       [tempdb_allocations],
+       [tempdb_current],
+       [blocking_session_id],
+       [blocked_session_count],
+       [reads],
+       [writes],
+       [physical_reads],
+       [query_plan],
+       [used_memory],
+       [status],
+       [tran_start_time],
+       [open_tran_count],
+       [percent_complete],
+       [host_name],
+       [database_name],
+       [program_name],
+       [start_time],
+       [login_time]
+FROM dbo.WhoIsActive WITH (nolock)
+WHERE 1 = 1
+      --AND database_name LIKE 'MYDB'
+      --AND CAST(sql_text AS VARCHAR(MAX)) LIKE '%--sp_myproc%'
+      --AND (blocking_session_id IS NOT NULL OR blocked_session_count > 0)
+      AND collection_time > DATEADD(HH, -14, GETDATE())
+ORDER BY 1 DESC;
+ 
+
