@@ -5,10 +5,18 @@ SELECT
 	ag.name AS AGName, 
 	drs.synchronization_state_desc SyncStateDesc, 
 	drs.synchronization_health_desc SyncHealthDesc, 
-	drs.last_sent_time LastSentTime, 
-	drs.last_received_time LastReceiveTime, 
-	drs.last_hardened_time LastHardenedTime, 
-	drs.last_redone_time LastRedoneTime, 
+	CASE WHEN DATEDIFF(SS,drs.last_sent_time,GETDATE()) < 30 then 'Now'
+	else convert(varchar(10),last_sent_time,112) end  LastSentTime, 
+
+	CASE WHEN DATEDIFF(SS,drs.last_received_time,GETDATE()) < 30 then 'Now'
+	else convert(varchar(10),last_received_time,112) end  LastReceiveTime, 
+
+	CASE WHEN DATEDIFF(SS,drs.last_hardened_time,GETDATE()) < 30 then 'Now'
+	else convert(varchar(10),last_hardened_time,112) end  LastHardenedTime, 
+
+	CASE WHEN DATEDIFF(SS,drs.last_redone_time,GETDATE()) < 30 then 'Now'
+	else convert(varchar(120),last_redone_time) end  LastRedoneTime, 
+
 	Format( drs.log_send_queue_size, '##,##0') LogSendQueueSize_KB, 
 	FORMAT(drs.log_send_rate, '##,##0')  LogSendRate_KBperSec, 
 	DATEADD(SS,drs.log_send_queue_size/drs.log_send_rate,GETDATE()) LogSendFinishTime,
