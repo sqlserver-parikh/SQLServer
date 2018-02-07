@@ -70,10 +70,9 @@ BEGIN TRY
             @rootkey = 'HKEY_LOCAL_MACHINE',
             @key = 'SOFTWARE\Microsoft\Microsoft SQL Server',
             @value_name = 'InstalledInstances';
-
---select substring((select ' ,' + CONVERT(varchar(188), serverproperty('ComputerNamePhysicalNetBIOS') )+ '\' + convert(varchar(10),InstName) + ','+ convert(varchar(5),StaticPort ) 
---from #SQLInstances 
---for xml path ('')),3,8000) 
+    UPDATE #InstanceName
+      SET
+          InstanceName = REPLACE(InstanceName, 'MSSQLSERVER', 'Default');
     DECLARE @Ret_Value INT, @CPU_0_Desc VARCHAR(500), @CPU_0_MHz INTEGER, @CPU_1_Desc VARCHAR(500), @CPU_1_MHz INTEGER, @SystemManufacturer VARCHAR(500), @SystemFamily VARCHAR(100), @SystemProductName VARCHAR(100), @AutoUpdate VARCHAR(100);
     CREATE TABLE #memorydetails
 (indexs INT,
