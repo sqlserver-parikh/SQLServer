@@ -1,50 +1,50 @@
 SET NOCOUNT ON;
 BEGIN TRY
     CREATE TABLE #WinNames
-    (WinID   VARCHAR(128),
-     WinName VARCHAR(MAX)
-    );
+(WinID   VARCHAR(128),
+ WinName VARCHAR(MAX)
+);
     INSERT INTO #WinNames
     VALUES
-    ('5.2 (3790)',
-     'Windows Server 2003 R2'
-    );
+('5.2 (3790)',
+ 'Windows Server 2003 R2'
+);
     INSERT INTO #WinNames
     VALUES
-    ('5.2 ()',
-     'Windows Server 2003 R2'
-    );
+('5.2 ()',
+ 'Windows Server 2003 R2'
+);
     INSERT INTO #WinNames
     VALUES
-    ('6.0 (6002)',
-     'Windows Server 2008'
-    );
+('6.0 (6002)',
+ 'Windows Server 2008'
+);
     INSERT INTO #WinNames
     VALUES
-    ('6.1 (7601)',
-     'Windows Server 2008 R2'
-    );
+('6.1 (7601)',
+ 'Windows Server 2008 R2'
+);
     INSERT INTO #WinNames
     VALUES
-    ('6.2 (9200)',
-     'Windows Server 2012'
-    );
+('6.2 (9200)',
+ 'Windows Server 2012'
+);
     INSERT INTO #WinNames
     VALUES
-    ('6.3 (9600)',
-     'Windows Server 2012 R2'
-    );
+('6.3 (9600)',
+ 'Windows Server 2012 R2'
+);
     INSERT INTO #WinNames
     VALUES
-    ('10.0',
-     'Windows Server 2016'
-    );
+('10.0',
+ 'Windows Server 2016'
+);
     DECLARE @Plat TABLE
-    (Id             INT,
-     Name           VARCHAR(180),
-     InternalValue  VARCHAR(50),
-     Charactervalue VARCHAR(50)
-    );
+(Id             INT,
+ Name           VARCHAR(180),
+ InternalValue  VARCHAR(50),
+ Charactervalue VARCHAR(50)
+);
     DECLARE @Platform VARCHAR(100), @WinName VARCHAR(128);
     INSERT INTO @Plat
     EXEC xp_msver
@@ -55,136 +55,32 @@ BEGIN TRY
     DELETE @PLAT;
     DECLARE @CurrID INT, @ExistValue INT, @MaxID INT, @SQL NVARCHAR(1000);
     DECLARE @TCPPorts TABLE
-    (PortType NVARCHAR(180),
-     Port     INT
-    );
-    DECLARE @SQLInstances TABLE
-    (InstanceID  INT IDENTITY(1, 1) NOT NULL PRIMARY KEY,
-     InstName    NVARCHAR(180),
-     Folder      NVARCHAR(50),
-     StaticPort  INT NULL,
-     DynamicPort INT NULL,
-     Platform    INT NULL
-    );
-    INSERT INTO @Plat
-    EXEC xp_msver
-         platform;
-    SELECT @Platform =
-    (
-        SELECT 1
-        FROM @plat
-        WHERE charactervalue LIKE '%86%'
-    );
-    IF @Platform IS NULL
-        BEGIN
-            INSERT INTO @SQLInstances
-            (InstName,
-             Folder
-            )
-            EXEC xp_regenumvalues
-                 N'HKEY_LOCAL_MACHINE',
-                 N'SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL';
-            UPDATE @SQLInstances
-              SET
-                  Platform = 64;
-    END;
-        ELSE
-        BEGIN
-            INSERT INTO @SQLInstances
-            (InstName,
-             Folder
-            )
-            EXEC xp_regenumvalues
-                 N'HKEY_LOCAL_MACHINE',
-                 N'SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL';
-            UPDATE @SQLInstances
-              SET
-                  Platform = 32;
-    END;
-    DECLARE @Keyexist TABLE(Keyexist INT);
-    INSERT INTO @Keyexist
-    EXEC xp_regread
-         'HKEY_LOCAL_MACHINE',
-         N'SOFTWARE\Wow6432Node\Microsoft\Microsoft SQL Server\Instance Names\SQL';
-    SELECT @ExistValue = Keyexist
-    FROM @Keyexist;
-    IF @ExistValue = 1
-        INSERT INTO @SQLInstances
-        (InstName,
-         Folder
-        )
-        EXEC xp_regenumvalues
-             N'HKEY_LOCAL_MACHINE',
-             N'SOFTWARE\Wow6432Node\Microsoft\Microsoft SQL Server\Instance Names\SQL';
-    UPDATE @SQLInstances
-      SET
-          Platform = 32
-    WHERE Platform IS NULL;
-    SELECT @MaxID = MAX(InstanceID),
-           @CurrID = 1
-    FROM @SQLInstances;
-    WHILE @CurrID <= @MaxID
-        BEGIN
-            DELETE FROM @TCPPorts;
-            SELECT @SQL = 'Exec xp_instance_regread N''HKEY_LOCAL_MACHINE'',
-N''SOFTWARE\Microsoft\\Microsoft SQL Server\'+Folder+'\MSSQLServer\SuperSocketNetLib\Tcp\IPAll'',
-N''TCPDynamicPorts'''
-            FROM @SQLInstances
-            WHERE InstanceID = @CurrID;
-            INSERT INTO @TCPPorts
-            EXEC sp_executesql
-                 @SQL;
-            SELECT @SQL = 'Exec xp_instance_regread N''HKEY_LOCAL_MACHINE'',
-N''SOFTWARE\Microsoft\\Microsoft SQL Server\'+Folder+'\MSSQLServer\SuperSocketNetLib\Tcp\IPAll'',
-N''TCPPort'''
-            FROM @SQLInstances
-            WHERE InstanceID = @CurrID;
-            INSERT INTO @TCPPorts
-            EXEC sp_executesql
-                 @SQL;
-            SELECT @SQL = 'Exec xp_instance_regread N''HKEY_LOCAL_MACHINE'',
-N''SOFTWARE\Wow6432Node\Microsoft\\Microsoft SQL Server\'+Folder+'\MSSQLServer\SuperSocketNetLib\Tcp\IPAll'',
-N''TCPDynamicPorts'''
-            FROM @SQLInstances
-            WHERE InstanceID = @CurrID;
-            INSERT INTO @TCPPorts
-            EXEC sp_executesql
-                 @SQL;
-            SELECT @SQL = 'Exec xp_instance_regread N''HKEY_LOCAL_MACHINE'',
-N''SOFTWARE\Wow6432Node\Microsoft\\Microsoft SQL Server\'+Folder+'\MSSQLServer\SuperSocketNetLib\Tcp\IPAll'',
-N''TCPPort'''
-            FROM @SQLInstances
-            WHERE InstanceID = @CurrID;
-            INSERT INTO @TCPPorts
-            EXEC sp_executesql
-                 @SQL;
-            UPDATE SI
-              SET
-                  StaticPort = P.Port,
-                  DynamicPort = DP.Port
-            FROM @SQLInstances SI
-                 INNER JOIN @TCPPorts DP ON DP.PortType = 'TCPDynamicPorts'
-                 INNER JOIN @TCPPorts P ON P.PortType = 'TCPPort'
-            WHERE InstanceID = @CurrID;
-            SET @CurrID = @CurrID + 1;
-        END;
-    SELECT InstName,
-           StaticPort,
-           DynamicPort,
-           Platform
-    INTO #SQLInstances
-    FROM @SQLInstances;
+(PortType NVARCHAR(180),
+ Port     INT
+);
+    IF OBJECT_ID('tempdb..#InstanceName') IS NOT NULL
+        DROP TABLE #InstanceName;
+    CREATE TABLE #InstanceName
+(Data1        VARCHAR(128),
+ InstanceName VARCHAR(128),
+ Data3        VARCHAR(128)
+);
+    INSERT INTO #InstanceName
+    EXECUTE xp_regread
+            @rootkey = 'HKEY_LOCAL_MACHINE',
+            @key = 'SOFTWARE\Microsoft\Microsoft SQL Server',
+            @value_name = 'InstalledInstances';
 
 --select substring((select ' ,' + CONVERT(varchar(188), serverproperty('ComputerNamePhysicalNetBIOS') )+ '\' + convert(varchar(10),InstName) + ','+ convert(varchar(5),StaticPort ) 
 --from #SQLInstances 
 --for xml path ('')),3,8000) 
     DECLARE @Ret_Value INT, @CPU_0_Desc VARCHAR(500), @CPU_0_MHz INTEGER, @CPU_1_Desc VARCHAR(500), @CPU_1_MHz INTEGER, @SystemManufacturer VARCHAR(500), @SystemFamily VARCHAR(100), @SystemProductName VARCHAR(100), @AutoUpdate VARCHAR(100);
     CREATE TABLE #memorydetails
-    (indexs INT,
-     name   VARCHAR(30),
-     Value  NVARCHAR(30),
-     CValue NVARCHAR(30)
-    );
+(indexs INT,
+ name   VARCHAR(30),
+ Value  NVARCHAR(30),
+ CValue NVARCHAR(30)
+);
     INSERT INTO #memorydetails
     EXEC xp_msver
          PhysicalMemory;
@@ -192,11 +88,11 @@ N''TCPPort'''
     SELECT @memory = Value
     FROM #memorydetails;
     CREATE TABLE #cpudetails
-    (indexs INT,
-     name   VARCHAR(30),
-     Value  NVARCHAR(30),
-     CValue NVARCHAR(30)
-    );
+(indexs INT,
+ name   VARCHAR(30),
+ Value  NVARCHAR(30),
+ CValue NVARCHAR(30)
+);
     INSERT INTO #cpudetails
     EXEC xp_msver
          ProcessorCount;
@@ -269,7 +165,7 @@ N''TCPPort'''
             '~MHz',
             @param = @CPU_1_MHz OUTPUT;
     SELECT SERVERPROPERTY('ServerName') ServerName,
-           ISNULL(SERVERPROPERTY('InstanceName'), 'Default') InstanceName,
+           CONNECTIONPROPERTY('local_tcp_port') PortNumber,
            CASE
                WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '8%'
                THEN 'SQL Server 2000'
@@ -289,89 +185,80 @@ N''TCPPort'''
            END SQLVersionDesc,
            SERVERPROPERTY(N'ProductVersion') SQLVersion,
            SERVERPROPERTY('ProductLevel') ServicePack,
-    (
-        SELECT COUNT(*)
-        FROM #SQLInstances
-    ) TotalNoOfInstances,
-    (
-        SELECT SUBSTRING(
-                        (
-                            SELECT ' ,'+CONVERT(VARCHAR(10), InstName)+','+CONVERT(VARCHAR(5), StaticPort)
-                            FROM #SQLInstances FOR xml PATH('')
-                        ), 3, 8000)
-    ) AllInstancesName,
+(
+    SELECT COUNT(*)
+    FROM #InstanceName
+) TotalNoOfInstances,
+(
+    SELECT SUBSTRING(
+(
+    SELECT ', '+CONVERT(VARCHAR(10), InstanceName)
+    FROM #InstanceName FOR xml PATH('')
+), 3, 8000)
+) AllInstancesName,
 --, SERVERPROPERTY('machinename') VirtualServerName 
            SERVERPROPERTY('ComputerNamePhysicalNetBIOS') RunningNode,
-    (
-        SELECT DISTINCT TOP (1) CONVERT(VARCHAR(20), local_net_address)
-        FROM sys.dm_exec_connections
-        WHERE local_net_address IS NOT NULL
-    ) IPAddress,
+           CONNECTIONPROPERTY('local_net_address') IPAddress,
            @Domain DomainName,
            CASE
                WHEN SERVERPROPERTY('IsClustered') = 1
                THEN
-    (
-        SELECT SUBSTRING(
-                        (
-                            SELECT ' ,'+NodeName
-                            FROM sys.dm_os_cluster_nodes FOR xml PATH('')
-                        ), 3, 8000)
-    )
+(
+    SELECT SUBSTRING(
+(
+    SELECT ' ,'+NodeName
+    FROM sys.dm_os_cluster_nodes FOR xml PATH('')
+), 3, 8000)
+)
                WHEN SERVERPROPERTY('IsClustered') = 0
                THEN 'Not Clustered'
            END AllNodes,
            SERVERPROPERTY(N'Edition') Edition,
            SERVERPROPERTY('ErrorLogFileName') ErrorLogLocation,
-    --(
-    --    SELECT SUBSTRING(
-    --                    (
-    --                        SELECT ' ,'+QUOTENAME(name)
-    --                        FROM sys.sysdatabases
-    --                        WHERE dbid > 4 FOR XML PATH('')
-    --                    ), 3, 8000)
-    --) DBNames,
-
-    (
-        SELECT COUNT(*)
-        FROM sys.sysdatabases
-        WHERE dbid > 4
-    ) DBCount,
-    (
-        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
-        FROM sys.dm_os_performance_counters
-        WHERE instance_name LIKE '%_Total%'
-              AND counter_name LIKE 'Data File(s) Size (KB)%'
-    ) TotalDataSizeMB,
-    (
-        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
-        FROM sys.dm_os_performance_counters
-        WHERE instance_name LIKE '%_Total%'
-              AND counter_name LIKE 'Log File(s) Size (KB)%'
-    ) TotalLogSizeMB,
+(
+    SELECT COUNT(*)
+    FROM sys.sysdatabases
+    WHERE dbid > 4
+) DBCount,
+(
+    SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
+    FROM sys.dm_os_performance_counters
+    WHERE instance_name LIKE '%_Total%'
+          AND counter_name LIKE 'Data File(s) Size (KB)%'
+) TotalDataSizeMB,
+(
+    SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
+    FROM sys.dm_os_performance_counters
+    WHERE instance_name LIKE '%_Total%'
+          AND counter_name LIKE 'Log File(s) Size (KB)%'
+) TotalLogSizeMB,
            SERVERPROPERTY('Collation') ServerCollation,
+(
+    SELECT COUNT(*)
+    FROM sys.master_files
+    WHERE database_id = 2
+          AND type = 0
+) TempDBDataFileCount,
            @ProcessorCount ProcessorCount,
-    (
-        SELECT value_in_use
-        FROM sys.configurations
-        WHERE name LIKE 'max degree of parallelism'
-    ) MAXDOP,
+(
+    SELECT value_in_use
+    FROM sys.configurations
+    WHERE name LIKE 'max degree of parallelism'
+) MAXDOP,
 --       @AutoUpdate AutoUpdate,
            @memory TotalMemory,
-           [DBEngineLogin] = @DBEngineLogin,
-           [AgentLogin] = @AgentLogin,
-           @WinName WindowsName,
-    (
-        SELECT value_in_use
-        FROM sys.configurations
-        WHERE name LIKE 'min server memory (MB)'
-    ) MinMemory,
-    (
-        SELECT value_in_use
-        FROM sys.configurations
-        WHERE name LIKE 'max server memory (MB)'
-    ) MaxMemory,
+(
+    SELECT value_in_use
+    FROM sys.configurations
+    WHERE name LIKE 'min server memory (MB)'
+) MinMemory,
+(
+    SELECT value_in_use
+    FROM sys.configurations
+    WHERE name LIKE 'max server memory (MB)'
+) MaxMemory,
 --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
+           @WinName WindowsName,
            ISNULL(@SystemManufacturer, 'VMware, Inc.') AS SystemManufacturer,
            CASE
                WHEN @SystemManufacturer <> 'VMware, Inc.'
@@ -392,21 +279,30 @@ N''TCPPort'''
                WHEN SERVERPROPERTY('IsClustered') = 1
                THEN 'Yes'
            END IsClustered,
-           @WindowsCluster WindowsCluster,
-           SERVERPROPERTY('Collation') ServerCollation,
-    (
-        SELECT create_date
-        FROM sys.databases
-        WHERE name LIKE 'tempdb'
-    ) SQLStartTime,
-    (
-        SELECT DATEADD(s, ((-1) * ([ms_ticks] / 1000)), GETDATE())
-        FROM sys.[dm_os_sys_info]
-    ) OSRebootTime,
+           ISNULL(@WindowsCluster, 'Not Cluster') WindowsCluster,
+           [DBEngineLogin] = @DBEngineLogin,
+           [AgentLogin] = @AgentLogin,
+(
+    SELECT create_date
+    FROM sys.databases
+    WHERE name LIKE 'tempdb'
+) SQLStartTime,
+(
+    SELECT DATEADD(s, ((-1) * ([ms_ticks] / 1000)), GETDATE())
+    FROM sys.[dm_os_sys_info]
+) OSRebootTime,
+    --(
+    --    SELECT SUBSTRING(
+    --                    (
+    --                        SELECT ' ,'+QUOTENAME(name)
+    --                        FROM sys.sysdatabases
+    --                        WHERE dbid > 4 FOR XML PATH('')
+    --                    ), 3, 8000)
+    --) DBNames,
            GETDATE() RunTime;
 END TRY
 BEGIN CATCH
-    PRINT 'Didn''t work';
+    PRINT 'Didn''t work for '+@@SERVERNAME;
 END CATCH;
 GO
 IF OBJECT_ID('tempdb..#cpudetails') IS NOT NULL
