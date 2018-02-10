@@ -36,7 +36,7 @@ BEGIN TRY
 );
     INSERT INTO #WinNames
     VALUES
-('10.0',
+('6.3 (14393)',
  'Windows Server 2016'
 );
     DECLARE @Plat TABLE
