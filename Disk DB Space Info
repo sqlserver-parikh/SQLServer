@@ -174,8 +174,12 @@ IF(@version >= 10.502200)
                NULL,
                NULL
         FROM #tmpfixeddrives
-	   WHERE drive NOT IN (SELECT LEFT(volume_mount_point,1)  FROM sys.master_files AS f
-             CROSS APPLY sys.dm_os_volume_stats(f.database_id, f.file_id) AS s)
+        WHERE drive NOT IN
+        (
+            SELECT LEFT(volume_mount_point, 1)
+            FROM sys.master_files AS f
+                 CROSS APPLY sys.dm_os_volume_stats(f.database_id, f.file_id) AS s
+        )
         ORDER BY 9 DESC;
         DROP TABLE #tmpspaceusedR2;
 END;
@@ -214,9 +218,9 @@ IF(@version >= 9.00)
                        c.drive,
                        '?' AS TotalDiskSpace,
                        CASE
-                           WHEN c.MBfree > 1000
-                           THEN CAST(CAST(c.MBfree / 1024.0 AS DECIMAL(18, 2)) AS VARCHAR(20))+' GB'
-                           ELSE CAST(CAST(c.MBfree AS DECIMAL(18, 2)) AS VARCHAR(20))+' MB'
+                           WHEN CAST(c.MBfree AS DECIMAL(18, 2)) > 1000
+                           THEN CAST(CAST(CAST(c.MBfree AS DECIMAL(18, 2)) / 1024.0 AS DECIMAL(18, 2)) AS VARCHAR(20))+' GB'
+                           ELSE CAST(CAST(CAST(c.MBfree AS DECIMAL(18, 2)) AS DECIMAL(18, 2)) AS VARCHAR(20))+' MB'
                        END AS DiskSpaceFree,
                        a.name AS databasename,
                        b.name AS filename,
@@ -254,6 +258,29 @@ IF(@version >= 9.00)
                      INNER JOIN #log_file_info fi ON fi.database_name = a.name
                      LEFT JOIN #tmpspaceused AS d ON a.name = d.dbname
                                                      AND b.name = d.filenme
+                UNION
+                SELECT @@SERVERNAME,
+                       drive,
+                       NULL,
+                       MBfree,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL
+                FROM #tmpfixeddrives
+                WHERE drive NOT IN
+                (
+                    SELECT LEFT(b.filename, 1)
+                    FROM sysaltfiles AS b
+                )
                 ORDER BY 9 DESC;
         END;
             ELSE
@@ -262,9 +289,9 @@ IF(@version >= 9.00)
                        c.drive AS Drive,
                        '?' AS TotalDiskSpace,
                        CASE
-                           WHEN c.MBfree > 1000
-                           THEN CAST(CAST(c.MBfree / 1024.0 AS DECIMAL(18, 2)) AS VARCHAR(20))+' GB'
-                           ELSE CAST(CAST(c.MBfree AS DECIMAL(18, 2)) AS VARCHAR(20))+' MB'
+                           WHEN CAST(c.MBfree AS DECIMAL(18, 2)) > 1000
+                           THEN CAST(CAST(CAST(c.MBfree AS DECIMAL(18, 2)) / 1024.0 AS DECIMAL(18, 2)) AS VARCHAR(20))+' GB'
+                           ELSE CAST(CAST(CAST(c.MBfree AS DECIMAL(18, 2)) AS DECIMAL(18, 2)) AS VARCHAR(20))+' MB'
                        END AS DiskSpaceFree,
                        a.name AS databasename,
                        b.name AS filename,
@@ -279,8 +306,8 @@ IF(@version >= 9.00)
                            ELSE CONVERT(VARCHAR(5), fi.vlf_count)
                        END VLFInfo,
                        b.size / 128.0 AS size,
-                       CAST(b.size / 128.0 - (d.spaceused / 128.0) AS DECIMAL(15, 2)) AS spacefree,
-                       CONVERT(DECIMAL(15, 2), (100 * CAST(b.size * 8 / 1024.0 - (d.spaceused / 128.0) AS DECIMAL(15, 2))) / (b.size * 8 / 1024.0)) AS DBPercentFree,
+                       CAST(b.size / 128.0 - (d.spaceused / 128.0) AS DECIMAL(19, 2)) AS spacefree,
+                       CONVERT(DECIMAL(19, 2), (100 * CAST(b.size * 8 / 1024.0 - (d.spaceused / 128.0) AS DECIMAL(19, 2))) / (b.size * 8 / 1024.0)) AS DBPercentFree,
                        '-' AS DrivePercentFree,
                        CASE
                            WHEN b.is_percent_growth = 0
@@ -302,13 +329,42 @@ IF(@version >= 9.00)
                      LEFT JOIN #tmpfixeddrives AS c ON LEFT(b.physical_name, 1) = c.drive
                      LEFT JOIN #tmpspaceused AS d ON a.name = d.dbname
                                                      AND b.name = d.filenme
+                UNION
+                SELECT @@SERVERNAME,
+                       drive,
+                       NULL,
+                       MBfree,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL,
+                       NULL
+                FROM #tmpfixeddrives
+                WHERE drive NOT IN
+                (
+                    SELECT LEFT(b.physical_name, 1)
+                    FROM sys.master_files AS b
+                )
                 ORDER BY 9 DESC
         END;
-        DROP TABLE #tmpspaceused;
-        DROP TABLE #tmpspaceusedR2;
 END;
 GO
-DROP TABLE #dbcc_log_info_2008;
-DROP TABLE #dbcc_log_info_2012;
-DROP TABLE #log_file_info;
-DROP TABLE #tmpfixeddrives;
+IF OBJECT_ID('tempdb..#dbcc_log_info_2008') IS NOT NULL
+    DROP TABLE #dbcc_log_info_2008;
+IF OBJECT_ID('tempdb..#dbcc_log_info_2012') IS NOT NULL
+    DROP TABLE #dbcc_log_info_2012;
+IF OBJECT_ID('tempdb..#log_file_info') IS NOT NULL
+    DROP TABLE #log_file_info;
+IF OBJECT_ID('tempdb..#tmpfixeddrives') IS NOT NULL
+    DROP TABLE #tmpfixeddrives;
+IF OBJECT_ID('tempdb..#tmpspaceused') IS NOT NULL
+    DROP TABLE #tmpspaceused;
+IF OBJECT_ID('tempdb..#tmpspaceusedR2') IS NOT NULL
+    DROP TABLE #tmpspaceusedR2;
