@@ -11,5 +11,8 @@ SELECT @@SERVERNAME CurrentServerName,
 FROM RestoreHistory h
      INNER JOIN BackupSet b ON h.backup_set_id = b.backup_set_id
      INNER JOIN BackupFile f ON f.backup_set_id = b.backup_set_id
-WHERE restore_date > DATEADD(DD, -1, GETDATE())
+WHERE 1 = 1
+      --AND restore_date > DATEADD(DD, -30, GETDATE())
+      --AND destination_database_name LIKE 'DBName'
+      --AND h.user_name LIKE 'domain\username'
 ORDER BY RestoreDate DESC;
