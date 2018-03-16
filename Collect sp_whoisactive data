@@ -1,5 +1,7 @@
 --You can download latest code from http://whoisactive.com
 --I have just created one table in msdb to log sp_whoisactive output every min and keep it in spWhoisactive table for 5 days for troubleshooting.
+--Ref: https://www.brentozar.com/responder/log-sp_whoisactive-to-a-table/ 
+--Running job every 5 min and logging data every 1 min. 
 
 SET QUOTED_IDENTIFIER ON;
 SET ANSI_PADDING ON;
