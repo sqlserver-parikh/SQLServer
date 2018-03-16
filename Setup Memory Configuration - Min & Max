@@ -1,5 +1,3 @@
---Script not tested in server with standard edition and more than 128GB memory, it will set max memory to 128GB if SQL is standard edition 
-
 USE DBATasks;
 GO
 IF EXISTS
