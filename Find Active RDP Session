@@ -1,4 +1,4 @@
-# Account lock out issue when password is changed? Run below script to find out where you are logged in
+# Account getting lock out when password changed? Run below script to find out where you are logged in
 # Import the Active Directory module for the Get-ADComputer CmdLet
 #Import-Module ActiveDirectory
 #net group sqldba /domain
