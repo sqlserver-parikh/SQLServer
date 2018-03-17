@@ -1,3 +1,4 @@
+--https://stackoverflow.com/questions/7070053/convert-a-sql-query-result-table-to-an-html-table-for-email
 USE [master]
 GO
 IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spQueryToHtmlTable]') AND type in (N'P', N'PC'))
