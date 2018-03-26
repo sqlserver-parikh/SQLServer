@@ -1,50 +1,50 @@
 SET NOCOUNT ON;
 BEGIN TRY
     CREATE TABLE #WinNames
-(WinID   VARCHAR(128),
- WinName VARCHAR(MAX)
-);
+    (WinID   VARCHAR(128),
+     WinName VARCHAR(MAX)
+    );
     INSERT INTO #WinNames
     VALUES
-('5.2 (3790)',
- 'Windows Server 2003 R2'
-);
+    ('5.2 (3790)',
+     'Windows Server 2003 R2'
+    );
     INSERT INTO #WinNames
     VALUES
-('5.2 ()',
- 'Windows Server 2003 R2'
-);
+    ('5.2 ()',
+     'Windows Server 2003 R2'
+    );
     INSERT INTO #WinNames
     VALUES
-('6.0 (6002)',
- 'Windows Server 2008'
-);
+    ('6.0 (6002)',
+     'Windows Server 2008'
+    );
     INSERT INTO #WinNames
     VALUES
-('6.1 (7601)',
- 'Windows Server 2008 R2'
-);
+    ('6.1 (7601)',
+     'Windows Server 2008 R2'
+    );
     INSERT INTO #WinNames
     VALUES
-('6.2 (9200)',
- 'Windows Server 2012'
-);
+    ('6.2 (9200)',
+     'Windows Server 2012'
+    );
     INSERT INTO #WinNames
     VALUES
-('6.3 (9600)',
- 'Windows Server 2012 R2'
-);
+    ('6.3 (9600)',
+     'Windows Server 2012 R2'
+    );
     INSERT INTO #WinNames
     VALUES
-('6.3 (14393)',
- 'Windows Server 2016'
-);
+    ('6.3 (14393)',
+     'Windows Server 2016'
+    );
     DECLARE @Plat TABLE
-(Id             INT,
- Name           VARCHAR(180),
- InternalValue  VARCHAR(50),
- Charactervalue VARCHAR(50)
-);
+    (Id             INT,
+     Name           VARCHAR(180),
+     InternalValue  VARCHAR(50),
+     Charactervalue VARCHAR(50)
+    );
     DECLARE @Platform VARCHAR(100), @WinName VARCHAR(128);
     INSERT INTO @Plat
     EXEC xp_msver
@@ -55,16 +55,16 @@ BEGIN TRY
     DELETE @PLAT;
     DECLARE @CurrID INT, @ExistValue INT, @MaxID INT, @SQL NVARCHAR(1000);
     DECLARE @TCPPorts TABLE
-(PortType NVARCHAR(180),
- Port     INT
-);
+    (PortType NVARCHAR(180),
+     Port     INT
+    );
     IF OBJECT_ID('tempdb..#InstanceName') IS NOT NULL
         DROP TABLE #InstanceName;
     CREATE TABLE #InstanceName
-(Data1        VARCHAR(128),
- InstanceName VARCHAR(128),
- Data3        VARCHAR(128)
-);
+    (Data1        VARCHAR(128),
+     InstanceName VARCHAR(128),
+     Data3        VARCHAR(128)
+    );
     INSERT INTO #InstanceName
     EXECUTE xp_regread
             @rootkey = 'HKEY_LOCAL_MACHINE',
@@ -75,11 +75,11 @@ BEGIN TRY
           InstanceName = REPLACE(InstanceName, 'MSSQLSERVER', 'Default');
     DECLARE @Ret_Value INT, @CPU_0_Desc VARCHAR(500), @CPU_0_MHz INTEGER, @CPU_1_Desc VARCHAR(500), @CPU_1_MHz INTEGER, @SystemManufacturer VARCHAR(500), @SystemFamily VARCHAR(100), @SystemProductName VARCHAR(100), @AutoUpdate VARCHAR(100);
     CREATE TABLE #memorydetails
-(indexs INT,
- name   VARCHAR(30),
- Value  NVARCHAR(30),
- CValue NVARCHAR(30)
-);
+    (indexs INT,
+     name   VARCHAR(30),
+     Value  NVARCHAR(30),
+     CValue NVARCHAR(30)
+    );
     INSERT INTO #memorydetails
     EXEC xp_msver
          PhysicalMemory;
@@ -87,11 +87,11 @@ BEGIN TRY
     SELECT @memory = Value
     FROM #memorydetails;
     CREATE TABLE #cpudetails
-(indexs INT,
- name   VARCHAR(30),
- Value  NVARCHAR(30),
- CValue NVARCHAR(30)
-);
+    (indexs INT,
+     name   VARCHAR(30),
+     Value  NVARCHAR(30),
+     CValue NVARCHAR(30)
+    );
     INSERT INTO #cpudetails
     EXEC xp_msver
          ProcessorCount;
@@ -184,17 +184,17 @@ BEGIN TRY
            END SQLVersionDesc,
            SERVERPROPERTY(N'ProductVersion') SQLVersion,
            SERVERPROPERTY('ProductLevel') ServicePack,
-(
-    SELECT COUNT(*)
-    FROM #InstanceName
-) TotalNoOfInstances,
-(
-    SELECT SUBSTRING(
-(
-    SELECT ', '+CONVERT(VARCHAR(10), InstanceName)
-    FROM #InstanceName FOR xml PATH('')
-), 3, 8000)
-) AllInstancesName,
+    (
+        SELECT COUNT(*)
+        FROM #InstanceName
+    ) TotalNoOfInstances,
+    (
+        SELECT SUBSTRING(
+                        (
+                            SELECT ', '+CONVERT(VARCHAR(10), InstanceName)
+                            FROM #InstanceName FOR xml PATH('')
+                        ), 3, 8000)
+    ) AllInstancesName,
 --, SERVERPROPERTY('machinename') VirtualServerName 
            SERVERPROPERTY('ComputerNamePhysicalNetBIOS') RunningNode,
            CONNECTIONPROPERTY('local_net_address') IPAddress,
@@ -202,60 +202,60 @@ BEGIN TRY
            CASE
                WHEN SERVERPROPERTY('IsClustered') = 1
                THEN
-(
-    SELECT SUBSTRING(
-(
-    SELECT ' ,'+NodeName
-    FROM sys.dm_os_cluster_nodes FOR xml PATH('')
-), 3, 8000)
-)
+    (
+        SELECT SUBSTRING(
+                        (
+                            SELECT ' ,'+NodeName
+                            FROM sys.dm_os_cluster_nodes FOR xml PATH('')
+                        ), 3, 8000)
+    )
                WHEN SERVERPROPERTY('IsClustered') = 0
                THEN 'Not Clustered'
            END AllNodes,
            SERVERPROPERTY(N'Edition') Edition,
            SERVERPROPERTY('ErrorLogFileName') ErrorLogLocation,
-(
-    SELECT COUNT(*)
-    FROM sys.sysdatabases
-    WHERE dbid > 4
-) DBCount,
-(
-    SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
-    FROM sys.dm_os_performance_counters
-    WHERE instance_name LIKE '%_Total%'
-          AND counter_name LIKE 'Data File(s) Size (KB)%'
-) TotalDataSizeMB,
-(
-    SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
-    FROM sys.dm_os_performance_counters
-    WHERE instance_name LIKE '%_Total%'
-          AND counter_name LIKE 'Log File(s) Size (KB)%'
-) TotalLogSizeMB,
+    (
+        SELECT COUNT(*)
+        FROM sys.sysdatabases
+        WHERE dbid > 4
+    ) DBCount,
+    (
+        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
+        FROM sys.dm_os_performance_counters
+        WHERE instance_name LIKE '%_Total%'
+              AND counter_name LIKE 'Data File(s) Size (KB)%'
+    ) TotalDataSizeMB,
+    (
+        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
+        FROM sys.dm_os_performance_counters
+        WHERE instance_name LIKE '%_Total%'
+              AND counter_name LIKE 'Log File(s) Size (KB)%'
+    ) TotalLogSizeMB,
            SERVERPROPERTY('Collation') ServerCollation,
-(
-    SELECT COUNT(*)
-    FROM sys.master_files
-    WHERE database_id = 2
-          AND type = 0
-) TempDBDataFileCount,
+    (
+        SELECT COUNT(*)
+        FROM sys.master_files
+        WHERE database_id = 2
+              AND type = 0
+    ) TempDBDataFileCount,
            @ProcessorCount ProcessorCount,
-(
-    SELECT value_in_use
-    FROM sys.configurations
-    WHERE name LIKE 'max degree of parallelism'
-) MAXDOP,
+    (
+        SELECT value_in_use
+        FROM sys.configurations
+        WHERE name LIKE 'max degree of parallelism'
+    ) MAXDOP,
 --       @AutoUpdate AutoUpdate,
            @memory TotalMemory,
-(
-    SELECT value_in_use
-    FROM sys.configurations
-    WHERE name LIKE 'min server memory (MB)'
-) MinMemory,
-(
-    SELECT value_in_use
-    FROM sys.configurations
-    WHERE name LIKE 'max server memory (MB)'
-) MaxMemory,
+    (
+        SELECT value_in_use
+        FROM sys.configurations
+        WHERE name LIKE 'min server memory (MB)'
+    ) MinMemory,
+    (
+        SELECT value_in_use
+        FROM sys.configurations
+        WHERE name LIKE 'max server memory (MB)'
+    ) MaxMemory,
 --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
            @WinName WindowsName,
            ISNULL(@SystemManufacturer, 'VMware, Inc.') AS SystemManufacturer,
@@ -281,15 +281,20 @@ BEGIN TRY
            ISNULL(@WindowsCluster, 'Not Cluster') WindowsCluster,
            [DBEngineLogin] = @DBEngineLogin,
            [AgentLogin] = @AgentLogin,
-(
-    SELECT create_date
-    FROM sys.databases
-    WHERE name LIKE 'tempdb'
-) SQLStartTime,
-(
-    SELECT DATEADD(s, ((-1) * ([ms_ticks] / 1000)), GETDATE())
-    FROM sys.[dm_os_sys_info]
-) OSRebootTime,
+    (
+        SELECT create_date
+        FROM sys.databases
+        WHERE name LIKE 'tempdb'
+    ) SQLStartTime,
+    (
+        SELECT DATEADD(s, ((-1) * ([ms_ticks] / 1000)), GETDATE())
+        FROM sys.[dm_os_sys_info]
+    ) OSRebootTime,
+    (
+        SELECT create_date
+        FROM sys.server_principals
+        WHERE sid = 0x010100000000000512000000
+    ) SQLInstallDate,
     --(
     --    SELECT SUBSTRING(
     --                    (
