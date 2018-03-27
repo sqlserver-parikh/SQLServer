@@ -1,0 +1,633 @@
+----===============================================================================================
+----Start: Database Mail Setup 
+----===============================================================================================
+USE [master]
+DECLARE @emailaddress varchar(30)
+DECLARE @smtpservername varchar(128)
+DECLARE @operatoremailaddress varchar(1000)
+set @emailaddress = 'DBPMail@domain.com' --Email will come from this email address, change it as appropriate, i keep it DBPMail@domain.com so I can easily filter DBMail alerts.
+set @smtpservername = 'smtp.gmail.com'  -- Change smtp server name
+set @operatoremailaddress = 'SQLDBATeam@domain.com' -- Change This to SQL DBA Team Distribution List.
+
+--Crate new Database Mail Profile
+IF EXISTS (SELECT name FROM msdb..sysmail_profile WHERE name = N'Default Profile')
+EXECUTE msdb.dbo.sysmail_delete_profile_sp
+@profile_name = N'Default Profile' 
+
+EXECUTE msdb.dbo.sysmail_add_profile_sp
+@profile_name = 'Default Profile',
+@description = 'Profile for sending Automated DBA Notifications'
+
+
+--Set the New Profile as the Default
+EXECUTE msdb.dbo.sysmail_add_principalprofile_sp
+@profile_name = 'Default Profile',
+@principal_name = 'public',
+@is_default = 1 ;
+
+--Create an Account for the Notifications
+IF EXISTS (SELECT name FROM msdb..sysmail_account WHERE name = N'SQL Alerts')
+EXECUTE msdb.dbo.sysmail_delete_account_sp
+@account_name = 'SQL Alerts' 
+
+EXECUTE msdb.dbo.sysmail_add_account_sp
+@account_name = 'SQL Alerts',
+@description = 'SQL Alerts',
+@email_address = @emailaddress, -- Change This
+@display_name = 'SQLDatabase-eMail',
+@mailserver_name = @smtpservername, -- Change This to Exchange Name
+@port = 25, --Use Port 25 for Exchange
+--,@username = @username, --Please comment this out for Exchange
+--@password = @password, --Please comment this out for Exchange
+@enable_ssl = 0 --This should be 0 for Exchange
+
+-- Add the Account to the Profile
+EXECUTE msdb.dbo.sysmail_add_profileaccount_sp
+@profile_name = 'Default Profile',
+@account_name = 'SQL Alerts',
+@sequence_number = 1
+
+----===============================================================================================
+----Complete: Database Mail Setup
+----===============================================================================================
+
+
+----===============================================================================================
+----Start: Modify SQL Agent Property to send email
+----===============================================================================================
+USE [msdb]
+
+EXEC msdb.dbo.sp_set_sqlagent_properties @email_save_in_sent_folder=1, 
+@alert_replace_runtime_tokens=1
+EXEC master.dbo.xp_instance_regwrite N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\SQLServerAgent', N'UseDatabaseMail', N'REG_DWORD', 1
+
+EXEC master.dbo.xp_instance_regwrite N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\SQLServerAgent', N'DatabaseMailProfile', N'REG_SZ', N'Default Profile'
+----===============================================================================================
+---- Complete: Modify SQL Agent Property to send email
+----===============================================================================================
+
+
+----===============================================================================================
+----Start: Add New Mail Operator SQLDBATeam
+----===============================================================================================
+USE [msdb]
+
+/****** Object: Operator [SQLDBATeam] Script Date: 08/29/2010 10:47:10 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysoperators WHERE name = N'SQLDBATeam')
+EXEC msdb.dbo.sp_delete_operator @name=N'SQLDBATeam'
+
+USE [msdb]
+
+/****** Object: Operator [SQLDBATeam] Script Date: 08/29/2010 10:47:10 ******/
+EXEC msdb.dbo.sp_add_operator @name=N'SQLDBATeam',
+@enabled=1, 
+@weekday_pager_start_time=90000, 
+@weekday_pager_end_time=180000, 
+@saturday_pager_start_time=90000, 
+@saturday_pager_end_time=180000, 
+@sunday_pager_start_time=90000, 
+@sunday_pager_end_time=180000, 
+@pager_days=0, 
+@email_address=@operatoremailaddress, 
+@category_name=N'[Uncategorized]'
+GO
+----===============================================================================================
+----Complete: Adding New Mail Operator SQLDBATeam
+----===============================================================================================
+
+
+----===============================================================================================
+----Start: Add Alerts from Severity 16 to Severity 25
+----===============================================================================================
+USE [msdb]
+GO
+
+/****** Object: Alert [Severity 16] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 16')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 16'
+GO
+
+/****** Object: Alert [Severity 17] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 17')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 17'
+GO
+
+/****** Object: Alert [Severity 18] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 18')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 18'
+GO
+
+/****** Object: Alert [Severity 19] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 19')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 19'
+GO
+
+/****** Object: Alert [Severity 20] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 20')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 20'
+GO
+
+/****** Object: Alert [Severity 21] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 21')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 21'
+GO
+
+/****** Object: Alert [Severity 22] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 22')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 22'
+GO
+
+/****** Object: Alert [Severity 23] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 23')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 23'
+GO
+
+/****** Object: Alert [Severity 24] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 24')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 24'
+GO
+
+/****** Object: Alert [Severity 25] Script Date: 08/29/2010 10:43:32 ******/
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 25')
+EXEC msdb.dbo.sp_delete_alert @name=N'Severity 25'
+GO
+
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Error Number 823')
+EXEC msdb.dbo.sp_delete_alert @name=N'Error Number 823'
+GO
+
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Error Number 824')
+EXEC msdb.dbo.sp_delete_alert @name=N'Error Number 824'
+GO
+
+IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Error Number 825')
+EXEC msdb.dbo.sp_delete_alert @name=N'Error Number 825'
+GO
+
+
+
+USE [msdb]
+GO
+
+/****** Object: Alert [Severity 16] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 16', 
+@message_id=0, 
+@severity=16, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 16', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+/****** Object: Alert [Severity 17] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 17', 
+@message_id=0, 
+@severity=17, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 17', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+/****** Object: Alert [Severity 18] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 18', 
+@message_id=0, 
+@severity=18, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 18', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+/****** Object: Alert [Severity 19] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 19', 
+@message_id=0, 
+@severity=19, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 19', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+
+/****** Object: Alert [Severity 20] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 20', 
+@message_id=0, 
+@severity=20, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 20', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+
+/****** Object: Alert [Severity 21] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 21', 
+@message_id=0, 
+@severity=21, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 21', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+
+/****** Object: Alert [Severity 22] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 22', 
+@message_id=0, 
+@severity=22, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 22', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+
+/****** Object: Alert [Severity 23] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 23', 
+@message_id=0, 
+@severity=23, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 23', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+
+/****** Object: Alert [Severity 24] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 24', 
+@message_id=0, 
+@severity=24, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 24', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+
+/****** Object: Alert [Severity 25] Script Date: 08/29/2010 10:43:32 ******/
+EXEC msdb.dbo.sp_add_alert @name=N'Severity 25', 
+@message_id=0, 
+@severity=25, 
+@enabled=1, 
+@delay_between_responses=60, 
+@include_event_description_in=1, 
+@category_name=N'[Uncategorized]', 
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Severity 25', @operator_name=N'SQLDBATeam', @notification_method = 1
+GO
+
+EXEC msdb.dbo.sp_add_alert @name=N'Error Number 823',
+@message_id=823,
+@severity=0,
+@enabled=1,
+@delay_between_responses=60,
+@include_event_description_in=1,
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Error Number 823', @operator_name=N'SQLDBATeam', @notification_method = 1;
+GO
+EXEC msdb.dbo.sp_add_alert @name=N'Error Number 824',
+@message_id=824,
+@severity=0,
+@enabled=1,
+@delay_between_responses=60,
+@include_event_description_in=1,
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Error Number 824', @operator_name=N'SQLDBATeam', @notification_method = 1;
+GO
+EXEC msdb.dbo.sp_add_alert @name=N'Error Number 825',
+@message_id=825,
+@severity=0,
+@enabled=1,
+@delay_between_responses=60,
+@include_event_description_in=1,
+@job_id=N'00000000-0000-0000-0000-000000000000'
+GO
+EXEC msdb.dbo.sp_add_notification @alert_name=N'Error Number 825', @operator_name=N'SQLDBATeam', @notification_method = 1;
+GO
+----===============================================================================================
+----Complete: Adding Alerts from Severity 16 to Severity 25
+----===============================================================================================
+
+
+----===============================================================================================
+----Start: Restart SQL Server Agent
+----Attention: Below Command will Restart SQL Server Agent 
+----===============================================================================================
+/*
+WAITFOR DELAY '00:00:05'
+GO
+EXEC master.dbo.xp_servicecontrol 'STOP', 'SQLServerAgent'
+GO
+WAITFOR DELAY '00:00:05'
+GO
+EXEC master.dbo.xp_servicecontrol 'START', 'SQLServerAgent'
+GO
+WAITFOR DELAY '00:00:05'
+GO
+*/
+----===============================================================================================
+----Complete: Stop and Start SQL Server Agent
+----===============================================================================================
+
+----===============================================================================================
+----Start: Enable Database Mail Advanced option
+----===============================================================================================
+IF EXISTS (SELECT * FROM sys.configurations WHERE name = 'Database Mail XPs' and value_in_use = 0)
+BEGIN 
+IF EXISTS (SELECT * FROM sys.configurations WHERE name = 'show advanced options' and value_in_use = 0)
+BEGIN
+EXEC sp_configure 'show advanced options',1
+RECONFIGURE WITH OVERRIDE
+END
+EXEC sp_configure 'Database Mail XPs',1
+RECONFIGURE WITH OVERRIDE
+EXEC sp_configure 'show advanced options',0
+RECONFIGURE WITH OVERRIDE
+END
+----===============================================================================================
+----End: Enable Database Mail Advanced option
+----===============================================================================================
+
+
+----===============================================================================================
+---- Start: Test Database Mail Configuration
+----===============================================================================================
+/*
+EXECUTE msdb.dbo.sp_send_dbmail
+@recipients = 'DBATEAM@domain.com', -- Change This
+@Subject = 'Test Message generated from SQL Server DatabaseMail',
+@Body = 'This is a test message from SQL Server DatabaseMail'
+*/
+----===============================================================================================
+---- Complete: test Database Mail Configuration
+----===============================================================================================
+
+
+----===============================================================================================
+----Start: Job Failed Alert Stored Procedure
+----===============================================================================================
+USE master;
+GO
+IF EXISTS
+(
+    SELECT *
+    FROM sys.objects
+    WHERE object_id = OBJECT_ID('[dbo].[spJobFailedAlert]')
+          AND type IN('p', 'pc')
+)
+    DROP PROCEDURE dbo.spJobFailedAlert;
+GO
+CREATE PROCEDURE dbo.spJobFailedAlert @job_id UNIQUEIDENTIFIER
+WITH ENCRYPTION
+AS
+     SET NOCOUNT ON;
+     DECLARE @today DATETIME, @crlf VARCHAR(10), @stat_failed TINYINT, @stat_succeeded TINYINT, @stat_retry TINYINT, @stat_canceled TINYINT, @stat_in_progress TINYINT, @email_to NVARCHAR(100), @subject VARCHAR(200), @body VARCHAR(8000), @job_name SYSNAME, @step_name SYSNAME, @err_severity INT, @run_datetime DATETIME, @rundurationsec VARCHAR(10), @command VARCHAR(3200), @errmessage VARCHAR(2048);
+     SET @body = '';
+     SET @crlf = CHAR(10);
+     SET @stat_failed = 0;
+     SET @stat_succeeded = 1;
+     SET @stat_retry = 2;
+     SET @stat_canceled = 3;
+     SET @stat_in_progress = 4;
+     SET @today = GETDATE();
+     SELECT @email_to = email_address
+     FROM msdb..sysoperators
+     WHERE NAME LIKE 'SQLDBATeam';
+     SELECT TOP 1 @job_name = sj.name,
+                  @step_name = CONVERT(VARCHAR(2), sjh.step_id)+'.'+sjh.step_name,
+                  @rundurationsec = run_duration / 10000 * 3600 + run_duration / 100 % 100 * 69 + run_duration % 100,
+                  @run_datetime = CONVERT(VARCHAR, sjh.run_date)+' '+STUFF(STUFF(RIGHT('000000'+CONVERT(VARCHAR, sjh.run_time), 6), 5, 0, ':'), 3, 0, ':'),
+                  @command = sjs.command,
+                  @errmessage = sjh.message
+     FROM msdb.dbo.sysjobs sj
+          INNER JOIN msdb..sysjobhistory sjh ON sj.job_id = sjh.job_id
+          INNER JOIN msdb..sysjobsteps sjs ON sj.job_id = sjs.job_id
+     WHERE sj.job_id = @job_id
+           AND sjh.step_id = 0 --exclude the job outcome step
+           AND sjh.run_status IN(@stat_failed) --filter for only failed status
+     ORDER BY sjh.run_date DESC,
+              sjh.run_time DESC;
+     SELECT TOP 1 @step_name = @step_name+' & '+CONVERT(VARCHAR(2), sjh.step_id)+'.'+sjh.step_name+@crlf,
+                  @errmessage = @errmessage + @crlf + @crlf + sjh.message + @crlf
+     FROM msdb.dbo.sysjobs sj
+          INNER JOIN msdb..sysjobhistory sjh ON sj.job_id = sjh.job_id
+          INNER JOIN msdb..sysjobsteps sjs ON sj.job_id = sjs.job_id
+     WHERE sj.job_id = @job_id
+           AND sjh.step_id <> 0 --exclude the job outcome step
+           AND sjh.run_status IN(@stat_failed) --filter for only failed status
+     ORDER BY sjh.run_date DESC,
+              sjh.run_time DESC;
+
+-- build the email body
+     SET @body = @body+'Step Name= '+@step_name+@crlf+'Run Date = '+CONVERT(VARCHAR(50), @run_datetime)+@crlf+'Run Duration = '+CONVERT(VARCHAR(50), isnull(@rundurationsec, ''))+@crlf;
+     IF(@err_severity <> 0)
+         SET @body = @body+'Severity = '+CONVERT(VARCHAR(10), @err_severity)+@crlf;
+     SET @body = @body+'Error = '+isnull(@errmessage, '')+@crlf+@crlf+'Command = '+isnull(@command, '')+@crlf; 
+
+-- send the email
+     IF(RTRIM(@body) <> '')
+         BEGIN
+             SET @subject = @job_name+' failed on \\'+@@servername;
+             SET @body = -- 'server= ' + @@servername + @crlf +
+             'Job Name = '+@job_name+@crlf+'--------------------------------------'+@crlf+@body;
+
+-- print 'message length = ' + convert(varchar(20),len(@body))
+             PRINT @body;
+             EXEC msdb.dbo.sp_send_dbmail
+                  @recipients = @email_to,
+                  @subject = @subject,
+                  @body = @body; --sql2005+
+     END;
+GO
+----===============================================================================================
+----End: Job Failed Alert Stored Procedure
+----===============================================================================================
+
+
+----===============================================================================================
+----Start: Job Alert Trigger
+----===============================================================================================
+USE [msdb];
+GO
+IF EXISTS
+(
+    SELECT *
+    FROM sys.triggers
+    WHERE object_id = OBJECT_ID(N'[dbo].[trJobHistory]')
+)
+    DROP TRIGGER [dbo].[trJobHistory];
+GO
+USE [msdb];
+GO
+SET ANSI_NULLS ON;
+GO
+SET QUOTED_IDENTIFIER ON;
+GO
+CREATE TRIGGER [dbo].[trJobHistory] ON [dbo].[sysjobhistory]
+AFTER INSERT
+AS
+     BEGIN
+         SET NOCOUNT ON;
+         DECLARE @job_id VARCHAR(100);
+         IF EXISTS
+         (
+             SELECT 1
+             FROM inserted
+             WHERE run_status IN(0, 2, 3)
+         )
+             BEGIN
+                 SELECT @job_id = job_id
+                 FROM inserted
+                 WHERE run_status IN(0, 2, 3)
+                 AND step_id = 0;
+                 EXEC master..spJobFailedAlert
+                      @job_id;
+         END;
+     END;
+GO
+----===============================================================================================
+----End: Job Alert Trigger
+----===============================================================================================
+
+----===============================================================================================
+----Start: Remove Alerts
+----===============================================================================================
+--USE [msdb]
+--GO
+
+--/****** Object: Alert [Severity 16] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 16')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 16'
+--GO
+
+--/****** Object: Alert [Severity 17] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 17')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 17'
+--GO
+
+--/****** Object: Alert [Severity 18] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 18')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 18'
+--GO
+
+--/****** Object: Alert [Severity 19] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 19')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 19'
+--GO
+
+--/****** Object: Alert [Severity 20] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 20')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 20'
+--GO
+
+--/****** Object: Alert [Severity 21] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 21')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 21'
+--GO
+
+--/****** Object: Alert [Severity 22] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 22')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 22'
+--GO
+
+--/****** Object: Alert [Severity 23] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 23')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 23'
+--GO
+
+--/****** Object: Alert [Severity 24] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 24')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 24'
+--GO
+
+--/****** Object: Alert [Severity 25] Script Date: 08/29/2010 10:44:53 ******/
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Severity 25')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Severity 25'
+--GO
+
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Error Number 823')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Error Number 823'
+--GO
+
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Error Number 824')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Error Number 824'
+--GO
+
+--IF EXISTS (SELECT name FROM msdb.dbo.sysalerts WHERE name = N'Error Number 825')
+--EXEC msdb.dbo.sp_delete_alert @name=N'Error Number 825'
+--GO
+
+----===============================================================================================
+----Complete: Remove Alerts
+----===============================================================================================
+
+
+----===============================================================================================
+----Start: Remove Operator
+----===============================================================================================
+--USE [msdb]
+--GO
+--IF EXISTS (SELECT name FROM msdb.dbo.sysoperators WHERE name = N'SQLDBATeam')
+--EXEC msdb.dbo.sp_delete_operator @name=N'SQLDBATeam'
+--GO
+----===============================================================================================
+----Complete: Remove Operator
+----===============================================================================================
+
+
+----===============================================================================================
+----Start: Remove Database Mail Profile
+----===============================================================================================
+--EXECUTE msdb.dbo.sysmail_delete_profile_sp
+-- @profile_name = N'Default Profile' 
+--GO
+--EXECUTE msdb.dbo.sysmail_delete_account_sp
+-- @account_name = 'SQL Alerts' 
+----===============================================================================================
+----Complete: Remove Database Mail Profile
+----===============================================================================================
+
+----===============================================================================================
+----Start: Remove Job Failed Alert Stored Procedure
+----===============================================================================================
+--use master
+--go
+--if exists (select * from sys.objects where object_id = object_id(n'[dbo].[spJobFailedAlert]') and type in (n'p', n'pc'))
+--drop procedure dbo.spJobFailedAlert
+----===============================================================================================
+----End: Remove Job Failed Alert Stored Procedure
+----===============================================================================================
+
+
+----===============================================================================================
+----Start: Remove Job Alert Trigger
+----===============================================================================================
+--USE [msdb]
+--GO
+--IF EXISTS (SELECT * FROM sys.triggers WHERE object_id = OBJECT_ID(N'[dbo].[trJobHistory]'))
+--DROP TRIGGER [dbo].[trJobHistory]
+----===============================================================================================
+----End: Remove Job Alert Trigger
+----===============================================================================================
