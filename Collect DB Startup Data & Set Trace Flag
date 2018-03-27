@@ -30,6 +30,7 @@ CREATE TABLE [dbo].[tblStartupDetail](
 	[IsClustered] [varchar](3) NULL,
 	[SQLStartTime] [datetime] NULL,
 	[OSRebootTime] [datetime] NULL,
+	[SQLInstallDate] [datetime] NULL, 
 	[ReportRunTime] [datetime] NOT NULL
 ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
 END
@@ -176,7 +177,12 @@ INSERT INTO DBATasks..tblStartupDetail
            SELECT DATEADD(s, ((-1) * ([ms_ticks] / 1000)), GETDATE())
            FROM sys.[dm_os_sys_info]
        ) OSRebootTime,
-              GETDATE() ReportRunTime;
+	  	  (
+        SELECT create_date
+        FROM sys.server_principals
+        WHERE sid = 0x010100000000000512000000
+	   ) SQLInstallDate,
+        GETDATE() ReportRunTime;
 ', 
 		@database_name=N'master', 
 		@flags=0
