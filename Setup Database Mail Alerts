@@ -5,9 +5,9 @@ USE [master]
 DECLARE @emailaddress varchar(30)
 DECLARE @smtpservername varchar(128)
 DECLARE @operatoremailaddress varchar(1000)
-set @emailaddress = 'DBPMail@domain.com' --Email will come from this email address, change it as appropriate, i keep it DBPMail@domain.com so I can easily filter DBMail alerts.
-set @smtpservername = 'smtp.gmail.com'  -- Change smtp server name
-set @operatoremailaddress = 'SQLDBATeam@domain.com' -- Change This to SQL DBA Team Distribution List.
+set @emailaddress = 'DBPMail@xyz.com' --Email will come from this email address, change it as appropriate, i keep it DBPMail@domain.com so I can easily filter DBMail alerts.
+set @smtpservername = 'smtp.xyz.com'  -- Change smtp server name
+set @operatoremailaddress = 'DBATeam@xyz.com' -- Change This to SQL DBA Team Distribution List.
 
 --Crate new Database Mail Profile
 IF EXISTS (SELECT name FROM msdb..sysmail_profile WHERE name = N'Default Profile')
@@ -507,9 +507,9 @@ AS
          END;
      END;
 GO
-----===============================================================================================
-----End: Job Alert Trigger
-----===============================================================================================
+--===============================================================================================
+--End: Job Alert Trigger
+--===============================================================================================
 
 ----===============================================================================================
 ----Start: Remove Alerts
@@ -600,11 +600,15 @@ GO
 ----===============================================================================================
 ----Start: Remove Database Mail Profile
 ----===============================================================================================
+--IF EXISTS (SELECT name FROM msdb..sysmail_profile WHERE name = N'Default Profile')
 --EXECUTE msdb.dbo.sysmail_delete_profile_sp
--- @profile_name = N'Default Profile' 
---GO
+--@profile_name = N'Default Profile' 
+
+----Create an Account for the Notifications
+--IF EXISTS (SELECT name FROM msdb..sysmail_account WHERE name = N'SQL Alerts')
 --EXECUTE msdb.dbo.sysmail_delete_account_sp
--- @account_name = 'SQL Alerts' 
+--@account_name = 'SQL Alerts' 
+
 ----===============================================================================================
 ----Complete: Remove Database Mail Profile
 ----===============================================================================================
@@ -614,7 +618,7 @@ GO
 ----===============================================================================================
 --use master
 --go
---if exists (select * from sys.objects where object_id = object_id(n'[dbo].[spJobFailedAlert]') and type in (n'p', n'pc'))
+--if exists (select * from sys.objects where object_id = object_id(N'[dbo].[spJobFailedAlert]') and type in (N'p', N'pc'))
 --drop procedure dbo.spJobFailedAlert
 ----===============================================================================================
 ----End: Remove Job Failed Alert Stored Procedure
