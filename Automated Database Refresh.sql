@@ -7,7 +7,7 @@
 /*
 Please insert records in RefreshDBs table with ServerName, DatabaseName, and FreshBackup (1 - Take fresh backup or 0 - Utilize last full backup)
 INSERT INTO master..RefreshDBs
-       SELECT 'ServerName\InstanceName', 'DBName', 1;
+       SELECT 'ServerName\InstanceName', 'SourceDBName','DestinationDBName, 1;
 */
 USE master
 GO
@@ -17,19 +17,23 @@ DROP TABLE master..RefreshDBs
 GO
 CREATE TABLE master..[RefreshDBs](
  [SourceServer] [sysname] NOT NULL,
- [DBName] [sysname] NOT NULL,
- [FreshBackup] bit NOT NULL --Yes or No
+ [SourceDBName] [sysname] NOT NULL,
+ [FreshBackup] bit NOT NULL DEFAULT 0, --Yes or No
+ [DestDBName] [sysname] DEFAULT 'Same',
+ [BackupBeforeRefresh] bit DEFAULT 0
 ) ON [PRIMARY]
 
 GO
-
+INSERT INTO master..RefreshDBs (SourceServer,SourceDBName,DestDBName)
+SELECT 'Servername','Inventory','Same'
+select * from master..RefreshDBs
 USE [master]
 GO
 IF EXISTS (SELECT 1 FROM sys.credentials WHERE name LIKE 'RefreshDBs')
 DROP CREDENTIAL [RefreshDBs]
 GO
 --Please modify below with your domain account and password
-CREATE CREDENTIAL [RefreshDBs] WITH IDENTITY = N'domain\parikh', SECRET = N'TopSecretPassword1!'
+CREATE CREDENTIAL [RefreshDBs] WITH IDENTITY = N'domain\parikhni', SECRET = N'1TopSecretP@ssword'
 GO
 
 USE [master]
@@ -342,7 +346,7 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Backup D
   @retry_attempts=0,
   @retry_interval=0,
   @os_run_priority=0, @subsystem=N'PowerShell',
-  @command=N'$databases = invoke-sqlcmd -ServerInstance  $(ESCAPE_SQUOTE(SRVR)) -Database master -Query "SELECT SourceServer, DBName, FreshBackup from master..RefreshDBs;"
+  @command=N'$databases = invoke-sqlcmd -ServerInstance  $(ESCAPE_SQUOTE(SRVR)) -Database master -Query "SELECT SourceServer, SourceDBName, FreshBackup from master..RefreshDBs;"
 
 $databases
 
@@ -350,12 +354,12 @@ foreach ($database in $databases) #for each separate server / database pair in $
 {
 # This lets us pick out each instance ($inst) and database ($name) as we iterate through each pair of server / database.
 $Inst = $database.SourceServer #instance from the select query
-$DBname = $database.DBName #databasename from the select query
+$DBname = $database.SourceDBName #databasename from the select query
 $FBackup = $database.FreshBackup
 
 if ( $FBackup -match "True")
 {
-sqlcmd -E  -S $Inst -d master -Q "EXECUTE [dbo].[DatabaseBackup] @Databases = $DBName, @Directory = NULL, @BackupType = ''FULL'', @Compress = ''Y'', @Verify = ''Y'', @CleanupTime = 48, @CheckSum = ''Y'', @LogToTable = ''Y''"
+sqlcmd -E  -S $Inst -d master -Q "EXECUTE master..[DatabaseBackup] @Databases = $DBName, @Directory = NULL, @BackupType = ''FULL'', @Compress = ''Y'', @Verify = ''Y'', @CleanupTime = 36, @CheckSum = ''Y'', @LogToTable = ''Y''"
 }
 
 $Inst
@@ -412,7 +416,7 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Restore 
   @retry_attempts=0,
   @retry_interval=0,
   @os_run_priority=0, @subsystem=N'TSQL',
-  @command= N'DECLARE @name SYSNAME, @defaultdatapath VARCHAR(1024), @defaultlogpath VARCHAR(1024), @DefaultBackupDirectory VARCHAR(1024);
+  @command=N'DECLARE @name SYSNAME, @SourceDBName SYSNAME, @defaultdatapath VARCHAR(1024), @defaultlogpath VARCHAR(1024), @DefaultBackupDirectory VARCHAR(1024);
 SET @defaultdatapath = CONVERT(VARCHAR(1024), SERVERPROPERTY(''InstanceDefaultDataPath''));
 SET @defaultlogpath = CONVERT(VARCHAR(1024), SERVERPROPERTY(''InstanceDefaultLogPath''));
 EXECUTE master.dbo.xp_instance_regread
@@ -422,34 +426,64 @@ EXECUTE master.dbo.xp_instance_regread
         @DefaultBackupDirectory OUTPUT;
 DECLARE db_cursor CURSOR
 FOR
-    SELECT DBName
+    SELECT CASE
+               WHEN DestDBName = ''Same''
+               THEN SourceDBName
+               ELSE DestDBName
+           END DBName,
+           SourceDBName
     FROM master..RefreshDBs;
 OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @name;
+FETCH NEXT FROM db_cursor INTO @name, @SourceDBName;
 WHILE @@FETCH_STATUS = 0
     BEGIN
+        IF EXISTS
+        (
+            SELECT 1
+            FROM master..RefreshDBs
+            WHERE BackupBeforeRefresh = 1
+                  AND DestDBName = @name
+        )
+            BEGIN
+                EXECUTE master..DatabaseBackup
+                        @Databases = @name,
+                        @Directory = NULL,
+                        @BackupType = ''FULL'',
+                        @CleanupMode = ''BEFORE_BACKUP'',
+                        @CleanupTime = 36,
+                        @Verify = ''Y'',
+                        @Compress = ''Y'',
+                        @CheckSum = ''Y'',
+                        @LogToTable = ''Y'';
+        END;
         DECLARE @sql VARCHAR(255);
-  IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @name)
-  BEGIN
-   SET @sql = ''ALTER DATABASE ''+@name+'' SET SINGLE_USER WITH ROLLBACK IMMEDIATE'';
-   EXEC (@sql);
-   WAITFOR DELAY ''00:00:15'';
-   SET @sql = ''ALTER DATABASE ''+@name+'' SET MULTI_USER'';
-   EXEC (@sql);
-  END
+        IF EXISTS
+        (
+            SELECT 1
+            FROM sys.databases
+            WHERE name = @name
+        )
+            BEGIN
+                SET @sql = ''ALTER DATABASE ''+@name+'' SET SINGLE_USER WITH ROLLBACK IMMEDIATE'';
+                EXEC (@sql);
+                WAITFOR DELAY ''00:00:05'';
+                SET @sql = ''ALTER DATABASE ''+@name+'' SET MULTI_USER'';
+                EXEC (@sql);
+        END;
         EXEC master..sp_DatabaseRestore
-             @Database = @name,
+             @Database = @SourceDBName,
+             @RestoreDatabaseName = @name,
              @BackupPathFull = @DefaultBackupDirectory,
-             --@MoveDataDrive = @defaultdatapath,
-             --@MoveLogDrive = @defaultlogpath,
-             --@MoveFiles = 1,
+             @MoveDataDrive = @defaultdatapath,
+             @MoveLogDrive = @defaultlogpath,
+             @MoveFiles = 1,
              @RunRecovery = 1;
-        FETCH NEXT FROM db_cursor INTO @name;
+        FETCH NEXT FROM db_cursor INTO @name, @SourceDBName;
     END;
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
 GO
-',
+', 
   @database_name=N'master',
   @flags=0
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
@@ -490,7 +524,12 @@ IF NOT EXISTS
     EXEC master.dbo.xp_create_subdir @DBPermissions;
  SELECT @DBPermissions DBPermissions;"
 
-$databases = invoke-sqlcmd -ServerInstance $(ESCAPE_SQUOTE(SRVR)) -Database master -Query "SELECT DBName FROM master..RefreshDBs;"
+$databases = invoke-sqlcmd -ServerInstance $(ESCAPE_SQUOTE(SRVR)) -Database master -Query "SELECT CASE
+           WHEN DestDBName = ''Same''
+           THEN SourceDBName
+           ELSE DestDBName
+       END DBName
+FROM master..RefreshDBs;"
 
 foreach ($db in $databases) #for each separate server / database pair in $databases
 {
@@ -540,7 +579,12 @@ EXEC sp_MSforeachdb
 DECLARE FixUser CURSOR
 FOR SELECT OU.UserName,
            OU.DBName
-    FROM #OrphanUsers OU INNER JOIN master..RefreshDBs RD on OU.DBName = RD.DBName ;
+    FROM #OrphanUsers OU INNER JOIN (SELECT CASE
+           WHEN DestDBName = ''Same''
+           THEN SourceDBName
+           ELSE DestDBName
+       END DBName
+FROM master..RefreshDBs) RD on OU.DBName = RD.DBName ;
 OPEN FixUser;
 FETCH NEXT FROM FixUser INTO @userid, @DBName;
 WHILE @@FETCH_STATUS = 0
