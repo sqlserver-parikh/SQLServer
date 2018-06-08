@@ -9,91 +9,154 @@ Please insert records in RefreshDBs table with ServerName, DatabaseName, and Fre
 INSERT INTO master..RefreshDBs
        SELECT 'ServerName\InstanceName', 'SourceDBName','DestinationDBName, 1;
 */
-USE master
-GO
 
+USE master;
+GO
 IF OBJECT_ID('master..RefreshDBs', 'U') IS NOT NULL
-DROP TABLE master..RefreshDBs
+    DROP TABLE master..RefreshDBs;
 GO
-CREATE TABLE master..[RefreshDBs](
- [SourceServer] [sysname] NOT NULL,
- [SourceDBName] [sysname] NOT NULL,
- [FreshBackup] bit NOT NULL DEFAULT 0, --Yes or No
- [DestDBName] [sysname] DEFAULT 'Same',
- [BackupBeforeRefresh] bit DEFAULT 0
-) ON [PRIMARY]
-
+CREATE TABLE master..[RefreshDBs]
+([SourceServer]        [SYSNAME] NOT NULL,
+ [SourceDBName]        [SYSNAME] NOT NULL,
+ [FreshBackup]         BIT NOT NULL
+                           DEFAULT 0, --Yes or No
+ [DestDBName]          [SYSNAME] DEFAULT 'Same',
+ [BackupBeforeRefresh] BIT DEFAULT 0
+)
+ON [PRIMARY];
 GO
-INSERT INTO master..RefreshDBs (SourceServer,SourceDBName,DestDBName)
-SELECT 'Servername','Inventory','Same'
-select * from master..RefreshDBs
-USE [master]
+INSERT INTO master..RefreshDBs
+(SourceServer,
+ SourceDBName,
+ DestDBName
+)
+       SELECT 'Servername',
+              'Inventory';
+SELECT *
+FROM master..RefreshDBs;
+USE [master];
 GO
-IF EXISTS (SELECT 1 FROM sys.credentials WHERE name LIKE 'RefreshDBs')
-DROP CREDENTIAL [RefreshDBs]
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.credentials
+    WHERE name LIKE 'RefreshDBs'
+)
+    DROP CREDENTIAL [RefreshDBs];
 GO
 --Please modify below with your domain account and password
-CREATE CREDENTIAL [RefreshDBs] WITH IDENTITY = N'domain\parikhni', SECRET = N'1TopSecretP@ssword'
+CREATE CREDENTIAL [RefreshDBs] WITH IDENTITY = N'domain\parikhni', SECRET = N'1TopSecretP@ssword';
 GO
+USE [master];
+GO
+IF EXISTS
+(
+    SELECT 1
+    FROM msdb..sysproxies
+    WHERE name LIKE 'RefreshDBs'
+)
+    BEGIN
+        DECLARE @Version NUMERIC(18, 10);
+        SET @Version = CAST(LEFT(CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(MAX)), CHARINDEX('.', CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(MAX)))-1)+'.'+REPLACE(RIGHT(CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(MAX)), LEN(CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(MAX)))-CHARINDEX('.', CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(MAX)))), '.', '') AS NUMERIC(18, 10));
+        IF @Version < 10.9
+            BEGIN
+                UPDATE msdb..sysjobsteps
+                  SET
+                      proxy_id = N''
+                WHERE proxy_id IN
+                (
+                    SELECT proxy_id
+                    FROM msdb..sysproxies
+                    WHERE name LIKE 'RefreshDBs'
+                );
+        END;
+            ELSE
+            BEGIN
+                EXEC msdb.dbo.sp_reassign_proxy
+                     @current_proxy_name = N'RefreshDBs',
+                     @target_proxy_name = N'';
+        END;
+        EXEC msdb.dbo.sp_delete_proxy
+             @proxy_name = N'RefreshDBs';
+END;
+GO
+EXEC msdb.dbo.sp_add_proxy
+     @proxy_name = N'RefreshDBs',
+     @credential_name = N'RefreshDBs',
+     @enabled = 1;
+GO
+EXEC msdb.dbo.sp_grant_proxy_to_subsystem
+     @proxy_name = N'RefreshDBs',
+     @subsystem_id = 12;
+GO
+USE [msdb];
+GO
+BEGIN TRANSACTION;
+DECLARE @ReturnCode INT;
+SELECT @ReturnCode = 0;
 
-USE [master]
-GO
-IF EXISTS (SELECT 1 FROM msdb..sysproxies WHERE name LIKE 'RefreshDBs')
-BEGIN
-EXEC msdb.dbo.sp_reassign_proxy @current_proxy_name=N'RefreshDBs', @target_proxy_name=N''
-
-EXEC msdb.dbo.sp_delete_proxy @proxy_name=N'RefreshDBs'
-END
-GO
-EXEC msdb.dbo.sp_add_proxy @proxy_name=N'RefreshDBs',@credential_name=N'RefreshDBs',
-  @enabled=1
-GO
-EXEC msdb.dbo.sp_grant_proxy_to_subsystem @proxy_name=N'RefreshDBs', @subsystem_id=12
-GO
-
-
-USE [msdb]
-GO
-
-BEGIN TRANSACTION
-DECLARE @ReturnCode INT
-SELECT @ReturnCode = 0
 /****** Object:  JobCategory [Database Maintenance]    Script Date: 10/12/2017 4:05:50 PM ******/
-IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'Database Maintenance' AND category_class=1)
-BEGIN
-EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'Database Maintenance'
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 
-END
-IF EXISTS (SELECT 1 FROM msdb..sysjobs WHERE name LIKE N'Automated Database Refresh')
-BEGIN
-EXEC msdb.dbo.sp_delete_job @job_name = N'Automated Database Refresh',  @delete_unused_schedule=1
-END
+IF NOT EXISTS
+(
+    SELECT name
+    FROM msdb.dbo.syscategories
+    WHERE name = N'Database Maintenance'
+          AND category_class = 1
+)
+    BEGIN
+        EXEC @ReturnCode = msdb.dbo.sp_add_category
+             @class = N'JOB',
+             @type = N'LOCAL',
+             @name = N'Database Maintenance';
+        IF(@@ERROR <> 0
+           OR @ReturnCode <> 0)
+            GOTO QuitWithRollback;
+END;
+IF EXISTS
+(
+    SELECT 1
+    FROM msdb..sysjobs
+    WHERE name LIKE N'Automated Database Refresh'
+)
+    BEGIN
+        EXEC msdb.dbo.sp_delete_job
+             @job_name = N'Automated Database Refresh',
+             @delete_unused_schedule = 1;
+END;
+DECLARE @jobId BINARY(16);
+EXEC @ReturnCode = msdb.dbo.sp_add_job
+     @job_name = N'Automated Database Refresh',
+     @enabled = 1,
+     @notify_level_eventlog = 0,
+     @notify_level_email = 0,
+     @notify_level_netsend = 0,
+     @notify_level_page = 0,
+     @delete_level = 0,
+     @description = N'No description available.',
+     @category_name = N'Database Maintenance',
+     @owner_login_name = N'sa',
+     @job_id = @jobId OUTPUT;
+IF(@@ERROR <> 0
+   OR @ReturnCode <> 0)
+    GOTO QuitWithRollback;
 
-DECLARE @jobId BINARY(16)
-EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'Automated Database Refresh',
-  @enabled=1,
-  @notify_level_eventlog=0,
-  @notify_level_email=0,
-  @notify_level_netsend=0,
-  @notify_level_page=0,
-  @delete_level=0,
-  @description=N'No description available.',
-  @category_name=N'Database Maintenance',
-  @owner_login_name=N'sa', @job_id = @jobId OUTPUT
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 /****** Object:  Step [Script Permission]    Script Date: 10/12/2017 4:05:50 PM ******/
-EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Script Permission',
-  @step_id=1,
-  @cmdexec_success_code=0,
-  @on_success_action=3,
-  @on_success_step_id=0,
-  @on_fail_action=2,
-  @on_fail_step_id=0,
-  @retry_attempts=0,
-  @retry_interval=0,
-  @os_run_priority=0, @subsystem=N'PowerShell',
-  @command=N'# $databases grabs list of production databases from the SQL_DATABASES table on your Database
+
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep
+     @job_id = @jobId,
+     @step_name = N'Script Permission',
+     @step_id = 1,
+     @cmdexec_success_code = 0,
+     @on_success_action = 3,
+     @on_success_step_id = 0,
+     @on_fail_action = 2,
+     @on_fail_step_id = 0,
+     @retry_attempts = 0,
+     @retry_interval = 0,
+     @os_run_priority = 0,
+     @subsystem = N'PowerShell',
+     @command = N'# $databases grabs list of production databases from the SQL_DATABASES table on your Database
 $PermissionsFolder = invoke-sqlcmd -ServerInstance $(ESCAPE_SQUOTE(SRVR))  -Database master -Query "DECLARE @DefaultBackupDirectory VARCHAR(200);
 DECLARE @DBPermissions VARCHAR(300);
 DECLARE @DirTree TABLE
@@ -332,21 +395,28 @@ DEALLOCATE tmp" | Format-Table -HideTableHeaders | out-file -width 260 -filepath
 } #end foreach loop
 
 ',
-  @database_name=N'master',
-  @flags=0
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+     @database_name = N'master',
+     @flags = 0;
+IF(@@ERROR <> 0
+   OR @ReturnCode <> 0)
+    GOTO QuitWithRollback;
+
 /****** Object:  Step [Backup Databases]    Script Date: 10/12/2017 4:05:50 PM ******/
-EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Backup Databases',
-  @step_id=2,
-  @cmdexec_success_code=0,
-  @on_success_action=3,
-  @on_success_step_id=0,
-  @on_fail_action=2,
-  @on_fail_step_id=0,
-  @retry_attempts=0,
-  @retry_interval=0,
-  @os_run_priority=0, @subsystem=N'PowerShell',
-  @command=N'$databases = invoke-sqlcmd -ServerInstance  $(ESCAPE_SQUOTE(SRVR)) -Database master -Query "SELECT SourceServer, SourceDBName, FreshBackup from master..RefreshDBs;"
+
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep
+     @job_id = @jobId,
+     @step_name = N'Backup Databases',
+     @step_id = 2,
+     @cmdexec_success_code = 0,
+     @on_success_action = 3,
+     @on_success_step_id = 0,
+     @on_fail_action = 2,
+     @on_fail_step_id = 0,
+     @retry_attempts = 0,
+     @retry_interval = 0,
+     @os_run_priority = 0,
+     @subsystem = N'PowerShell',
+     @command = N'$databases = invoke-sqlcmd -ServerInstance  $(ESCAPE_SQUOTE(SRVR)) -Database master -Query "SELECT SourceServer, SourceDBName, FreshBackup from master..RefreshDBs;"
 
 $databases
 
@@ -401,22 +471,29 @@ $CopyFolder.DBBackupFile
 #copy-item -Path "$BackupLocation.BackupPath" -Destination "$CopyFolder.DBBackupFile"
 Robocopy $BackupLoation.BackupFolder $CopyFolder.DBBackupFile $BackupLoation.BackupFileName
 }',
-  @database_name=N'master',
-  @flags=0,
-  @proxy_name=N'RefreshDBs'
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+     @database_name = N'master',
+     @flags = 0,
+     @proxy_name = N'RefreshDBs';
+IF(@@ERROR <> 0
+   OR @ReturnCode <> 0)
+    GOTO QuitWithRollback;
+
 /****** Object:  Step [Restore Databases]    Script Date: 10/12/2017 4:05:50 PM ******/
-EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Restore Databases',
-  @step_id=3,
-  @cmdexec_success_code=0,
-  @on_success_action=3,
-  @on_success_step_id=0,
-  @on_fail_action=2,
-  @on_fail_step_id=0,
-  @retry_attempts=0,
-  @retry_interval=0,
-  @os_run_priority=0, @subsystem=N'TSQL',
-  @command=N'DECLARE @name SYSNAME, @SourceDBName SYSNAME, @defaultdatapath VARCHAR(1024), @defaultlogpath VARCHAR(1024), @DefaultBackupDirectory VARCHAR(1024);
+
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep
+     @job_id = @jobId,
+     @step_name = N'Restore Databases',
+     @step_id = 3,
+     @cmdexec_success_code = 0,
+     @on_success_action = 3,
+     @on_success_step_id = 0,
+     @on_fail_action = 2,
+     @on_fail_step_id = 0,
+     @retry_attempts = 0,
+     @retry_interval = 0,
+     @os_run_priority = 0,
+     @subsystem = N'TSQL',
+     @command = N'DECLARE @name SYSNAME, @SourceDBName SYSNAME, @defaultdatapath VARCHAR(1024), @defaultlogpath VARCHAR(1024), @DefaultBackupDirectory VARCHAR(1024);
 SET @defaultdatapath = CONVERT(VARCHAR(1024), SERVERPROPERTY(''InstanceDefaultDataPath''));
 SET @defaultlogpath = CONVERT(VARCHAR(1024), SERVERPROPERTY(''InstanceDefaultLogPath''));
 EXECUTE master.dbo.xp_instance_regread
@@ -483,22 +560,29 @@ WHILE @@FETCH_STATUS = 0
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
 GO
-', 
-  @database_name=N'master',
-  @flags=0
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+',
+     @database_name = N'master',
+     @flags = 0;
+IF(@@ERROR <> 0
+   OR @ReturnCode <> 0)
+    GOTO QuitWithRollback;
+
 /****** Object:  Step [Apply Permissions]    Script Date: 10/12/2017 4:05:50 PM ******/
-EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Apply Permissions',
-  @step_id=4,
-  @cmdexec_success_code=0,
-  @on_success_action=3,
-  @on_success_step_id=0,
-  @on_fail_action=2,
-  @on_fail_step_id=0,
-  @retry_attempts=0,
-  @retry_interval=0,
-  @os_run_priority=0, @subsystem=N'PowerShell',
-  @command=N'# $databases grabs list of production databases from the SQL_DATABASES table on your Database
+
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep
+     @job_id = @jobId,
+     @step_name = N'Apply Permissions',
+     @step_id = 4,
+     @cmdexec_success_code = 0,
+     @on_success_action = 3,
+     @on_success_step_id = 0,
+     @on_fail_action = 2,
+     @on_fail_step_id = 0,
+     @retry_attempts = 0,
+     @retry_interval = 0,
+     @os_run_priority = 0,
+     @subsystem = N'PowerShell',
+     @command = N'# $databases grabs list of production databases from the SQL_DATABASES table on your Database
 $PermissionsFolder = invoke-sqlcmd -ServerInstance $(ESCAPE_SQUOTE(SRVR))  -Database master -Query "DECLARE @DefaultBackupDirectory VARCHAR(200);
 DECLARE @DBPermissions VARCHAR(300);
 DECLARE @DirTree TABLE
@@ -543,21 +627,28 @@ if (Test-Path $DBPermissionScript) {
 invoke-sqlcmd -ServerInstance $(ESCAPE_SQUOTE(SRVR)) -Database master -InputFIle $DBPermissionScript
 }
 }',
-  @database_name=N'master',
-  @flags=0
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+     @database_name = N'master',
+     @flags = 0;
+IF(@@ERROR <> 0
+   OR @ReturnCode <> 0)
+    GOTO QuitWithRollback;
+
 /****** Object:  Step [Fix Orphan User]    Script Date: 10/12/2017 4:05:50 PM ******/
-EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Fix Orphan User',
-  @step_id=5,
-  @cmdexec_success_code=0,
-  @on_success_action=1,
-  @on_success_step_id=0,
-  @on_fail_action=2,
-  @on_fail_step_id=0,
-  @retry_attempts=0,
-  @retry_interval=0,
-  @os_run_priority=0, @subsystem=N'TSQL',
-  @command=N'--Below script will loop through all database and generate script to map user and drop user.
+
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep
+     @job_id = @jobId,
+     @step_name = N'Fix Orphan User',
+     @step_id = 5,
+     @cmdexec_success_code = 0,
+     @on_success_action = 1,
+     @on_success_step_id = 0,
+     @on_fail_action = 2,
+     @on_fail_step_id = 0,
+     @retry_attempts = 0,
+     @retry_interval = 0,
+     @os_run_priority = 0,
+     @subsystem = N'TSQL',
+     @command = N'--Below script will loop through all database and generate script to map user and drop user.
 
 SET NOCOUNT ON;
 DECLARE @userid VARCHAR(255);
@@ -619,17 +710,27 @@ WHILE @@FETCH_STATUS = 0
 CLOSE FixUser;
 DEALLOCATE FixUser;
 DROP TABLE #OrphanUsers;',
-  @database_name=N'master',
-  @flags=0
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-COMMIT TRANSACTION
-GOTO EndSave
+     @database_name = N'master',
+     @flags = 0;
+IF(@@ERROR <> 0
+   OR @ReturnCode <> 0)
+    GOTO QuitWithRollback;
+EXEC @ReturnCode = msdb.dbo.sp_update_job
+     @job_id = @jobId,
+     @start_step_id = 1;
+IF(@@ERROR <> 0
+   OR @ReturnCode <> 0)
+    GOTO QuitWithRollback;
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver
+     @job_id = @jobId,
+     @server_name = N'(local)';
+IF(@@ERROR <> 0
+   OR @ReturnCode <> 0)
+    GOTO QuitWithRollback;
+COMMIT TRANSACTION;
+GOTO EndSave;
 QuitWithRollback:
-    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+IF(@@TRANCOUNT > 0)
+    ROLLBACK TRANSACTION;
 EndSave:
-
 GO
