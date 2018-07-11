@@ -1,0 +1,93 @@
+
+SELECT b.name LoginName,
+       Isnull(c.name, 'Public') ServerRole,
+       b.create_date CreateDate,
+       b.modify_date ModifyDate,
+       b.is_disabled Disabled,
+       CASE
+           WHEN d.is_policy_checked = 1
+           THEN 'Yes'
+           ELSE 'No'
+       END PolicyChecked,
+       CASE
+           WHEN d.is_expiration_checked = 1
+           THEN 'Yes'
+           ELSE 'No'
+       END ExpirationChecked
+INTO #cte
+FROM sys.server_role_members a
+     RIGHT JOIN sys.server_principals b ON a.member_principal_id = b.principal_id
+     LEFT JOIN sys.server_principals c ON a.role_principal_id = c.principal_id
+     LEFT JOIN sys.sql_logins d ON b.name = d.name;
+SET NOCOUNT ON;
+DECLARE @WeakPwdList TABLE(WeakPwd NVARCHAR(255));
+--Define weak password list
+--Use @@Name if users password contain their name
+INSERT INTO @WeakPwdList(WeakPwd)
+       SELECT ''
+       UNION
+       SELECT '123'
+       UNION
+       SELECT '1234'
+       UNION
+       SELECT '12345'
+       UNION
+       SELECT 'abc'
+       UNION
+       SELECT 'default'
+       UNION
+       SELECT 'guest'
+       UNION
+       SELECT '123456'
+       UNION
+       SELECT '@@Name123'
+       UNION
+       SELECT '@@Name'
+       UNION
+       SELECT '@@Name@@Name'
+       UNION
+       SELECT 'admin'
+       UNION
+       SELECT 'Password'
+       UNION
+       SELECT '12345'
+       UNION
+       SELECT 'Welcome#1';
+CREATE TABLE #TEMP
+(DBName    VARCHAR(128),
+ UserName  VARCHAR(1280),
+ LoginName VARCHAR(1000),
+ RoleName  VARCHAR(2000)
+);
+INSERT INTO #TEMP
+EXEC sp_MSforeachdb
+'with cte1
+as 
+(
+select ''["?"]'' DBName, b.name as UserName, c.name as RoleName , suser_sname(b.sid) LoginName
+from [?].dbo.sysmembers a 
+join [?].dbo.sysusers b 
+on a.memberuid = b.uid join [?].dbo.sysusers c
+on a.groupuid = c.uid
+) 
+select DISTINCT DBName, UserName,LoginName, RoleName = substring((select ( '', '' + RoleName)
+from cte1 b
+where a.UserName = b.UserName
+FOR XML PATH ('''')
+),3,8000) FROM cte1 a';
+SELECT DISTINCT
+       @@sERVERNAME ServerName,
+       t1.name [Login Name],
+       REPLACE(t2.WeakPwd, '@@Name', t1.name) AS [Password],
+       #TEMP.RoleName DBRoleName,
+       #cte.ServerRole
+FROM sys.sql_logins t1
+     INNER JOIN @WeakPwdList t2 ON(PWDCOMPARE(t2.WeakPwd, password_hash) = 1
+                                   OR PWDCOMPARE(REPLACE(t2.WeakPwd, '@@Name', t1.name), password_hash) = 1)
+     LEFT JOIN #temp ON t1.name = #TEMP.LoginName
+     LEFT JOIN #cte ON #cte.LoginName = #temp.LoginName
+--WHERE t1.name = 'sa';
+GO
+DROP TABLE #TEMP;
+GO
+DROP TABLE #cte;
