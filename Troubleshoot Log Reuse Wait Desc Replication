@@ -1,0 +1,25 @@
+--First verify database name having log reuse wait description as Replication
+
+SELECT log_reuse_wait_desc,
+       *
+FROM sys.databases
+WHERE log_reuse_wait_desc LIKE '%Replication%';
+
+--Check if any active replication transaction, if no long running replication transactions than run sp_repldone procedure to reset replication flag for log reuse wait description.
+--If CDC is enabled it will also show replication as log reuse wait desc https://www.sqlskills.com/blogs/paul/replication-preventing-log-reuse-but-no-replication-configured/
+
+DBCC OPENTRAN()
+GO
+
+USE ReplicationDBName;
+GO
+EXEC sp_repldone
+     @xactid = NULL,
+     @xact_sgno = NULL,
+     @numtrans = 0,
+     @time = 0,
+     @reset = 1;
+GO
+--Check log reuse wait desc again to see if it still shows replication, if yes, run below to flush it, below should work.
+EXEC sp_replflush;
+GO
