@@ -1,13 +1,14 @@
 --Below script can be used to Shrink data file in chunks of 500MB, it will either shrink data file to 30% or keep 30% free space, which ever is higher. Its not recommended to Shrink data files but we all need to do it as we fight for space :)
 --Its not recommended to Shrink data files but I still do it :-) https://www.sqlskills.com/blogs/paul/why-you-should-not-shrink-your-data-files/ 
 
-USE DBNAME --Change it to appropriate database.
+USE master --Change it to appropriate database.
 
 SET NOCOUNT ON;
 GO
 DECLARE @filename VARCHAR(128);
 DECLARE @CurrentSize DECIMAL(20, 2);
 DECLARE @SpaceUsed DECIMAL(20, 2);
+DECLARE @ShrinkByMB int = 1500
 DECLARE ShrinkDatabase CURSOR
 FOR SELECT name AS FileName
      , size / 128.0 AS CurrentSizeMB
@@ -40,7 +41,7 @@ WHILE @@FETCH_STATUS = 0
     SET @cycle = @CurrentSize;
     WHILE 1 = 1
     BEGIN
-    SET @cycle = @cycle - 500;
+    SET @cycle = @cycle - @ShrinkByMB;
     SET @sql = 'DBCC SHRINKFILE('+quotename(@filename)+', '+CAST(@cycle AS VARCHAR)+')'+CHAR(10)+CHAR(13)+'GO'++CHAR(10)+CHAR(13);
     PRINT(@sql);
     IF @cycle < @target BREAK;
