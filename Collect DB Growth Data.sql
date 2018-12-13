@@ -166,3 +166,27 @@ GO
 --DROP TABLE [dbo].[tblDBGrowthDetail]
 --DROP PROCEDURE dbo.spDBGrowth
 --EXEC msdb.dbo.sp_delete_job @job_name=N'DBA - Collect DB Growth Data', @delete_unused_schedule=1
+					  
+USE DBATasks
+GO
+CREATE VIEW vwDBGrowthData
+AS
+SELECT PVT.DatabaseName 
+      , PVT.[0], PVT.[-1], PVT.[-2], PVT.[-3],  PVT.[-4],  PVT.[-5],  PVT.[-6] 
+               , PVT.[-7], PVT.[-8], PVT.[-9], PVT.[-10], PVT.[-11], PVT.[-12] 
+FROM 
+   (SELECT DGD.DBNAME AS DatabaseName 
+          ,DATEDIFF(mm, GETDATE(), DGD.SnapDate) AS MonthsAgo 
+          ,CONVERT(numeric(10, 1), AVG(DGD.UsedMB)) AS AvgSizeMB 
+    FROM [DBATasks].[dbo].[tblDBGrowthDetail] as DGD 
+    WHERE NOT DGD.DBNAME IN 
+              ('master', 'msdb', 'model', 'tempdb') 
+          AND DGD.FileGroupName NOT LIKE  'LogFile' 
+          AND DGD.SnapDate BETWEEN DATEADD(yy, -1, GETDATE()) AND GETDATE() 
+    GROUP BY DGD.DBNAME 
+            ,DATEDIFF(mm, GETDATE(), DGD.SnapDate) 
+    ) AS BCKSTAT 
+PIVOT (SUM(BCKSTAT.AvgSizeMB) 
+       FOR BCKSTAT.MonthsAgo IN ([0], [-1], [-2], [-3], [-4], [-5], [-6], [-7], [-8], [-9], [-10], [-11], [-12]) 
+      ) AS PVT 
+
