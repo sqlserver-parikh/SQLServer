@@ -166,10 +166,70 @@ GO
 --DROP TABLE [dbo].[tblDBGrowthDetail]
 --DROP PROCEDURE dbo.spDBGrowth
 --EXEC msdb.dbo.sp_delete_job @job_name=N'DBA - Collect DB Growth Data', @delete_unused_schedule=1
+
 					  
-USE DBATasks
+--Query Below view to see actual growth over 12 months period.
+--You can also get DB Growth database from Backup details 
+--https://gallery.technet.microsoft.com/scriptcenter/ec6abcda-e451-4863-92ed-8648fdfc67ac
+---- Transact-SQL script to analyse the database size growth using backup history. 
+--DECLARE @startDate DATETIME;
+--SET @startDate = GETDATE();
+--SELECT PVT.DatabaseName,
+--       PVT.[0],
+--       PVT.[-1],
+--       PVT.[-2],
+--       PVT.[-3],
+--       PVT.[-4],
+--       PVT.[-5],
+--       PVT.[-6],
+--       PVT.[-7],
+--       PVT.[-8],
+--       PVT.[-9],
+--       PVT.[-10],
+--       PVT.[-11],
+--       PVT.[-12]
+--FROM
+--(
+--    SELECT BS.database_name AS DatabaseName,
+--           DATEDIFF(mm, @startDate, BS.backup_start_date) AS MonthsAgo,
+--           CONVERT(NUMERIC(10, 1), AVG(BF.file_size / 1048576.0)) AS AvgSizeMB
+--    FROM msdb.dbo.backupset AS BS
+--         INNER JOIN msdb.dbo.backupfile AS BF ON BS.backup_set_id = BF.backup_set_id
+--    WHERE NOT BS.database_name IN('master', 'msdb', 'model', 'tempdb')
+--         AND BF.[file_type] = 'D'
+--         AND BS.backup_start_date BETWEEN DATEADD(yy, -1, @startDate) AND @startDate
+--    GROUP BY BS.database_name,
+--             DATEDIFF(mm, @startDate, BS.backup_start_date)
+--) AS BCKSTAT PIVOT(SUM(BCKSTAT.AvgSizeMB) FOR BCKSTAT.MonthsAgo IN([0],
+--                                                                   [-1],
+--                                                                   [-2],
+--                                                                   [-3],
+--                                                                   [-4],
+--                                                                   [-5],
+--                                                                   [-6],
+--                                                                   [-7],
+--                                                                   [-8],
+--                                                                   [-9],
+--                                                                   [-10],
+--                                                                   [-11],
+--                                                                   [-12])) AS PVT
+--ORDER BY PVT.DatabaseName;
+					  
+USE [DBATasks]
 GO
-CREATE VIEW vwDBGrowthData
+
+IF  EXISTS (SELECT * FROM sys.views WHERE object_id = OBJECT_ID(N'[dbo].[vwDBGrowthData]'))
+DROP VIEW [dbo].[vwDBGrowthData]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.views WHERE object_id = OBJECT_ID(N'[dbo].[vwDBGrowthData]'))
+EXEC dbo.sp_executesql @statement = N'CREATE VIEW [dbo].[vwDBGrowthData]
 AS
 SELECT PVT.DatabaseName 
       , PVT.[0], PVT.[-1], PVT.[-2], PVT.[-3],  PVT.[-4],  PVT.[-5],  PVT.[-6] 
@@ -180,8 +240,8 @@ FROM
           ,CONVERT(numeric(10, 1), AVG(DGD.UsedMB)) AS AvgSizeMB 
     FROM [DBATasks].[dbo].[tblDBGrowthDetail] as DGD 
     WHERE NOT DGD.DBNAME IN 
-              ('master', 'msdb', 'model', 'tempdb') 
-          AND DGD.FileGroupName NOT LIKE  'LogFile' 
+              (''master'', ''msdb'', ''model'', ''tempdb'') 
+          AND DGD.FileGroupName NOT LIKE  ''LogFile'' 
           AND DGD.SnapDate BETWEEN DATEADD(yy, -1, GETDATE()) AND GETDATE() 
     GROUP BY DGD.DBNAME 
             ,DATEDIFF(mm, GETDATE(), DGD.SnapDate) 
@@ -189,4 +249,5 @@ FROM
 PIVOT (SUM(BCKSTAT.AvgSizeMB) 
        FOR BCKSTAT.MonthsAgo IN ([0], [-1], [-2], [-3], [-4], [-5], [-6], [-7], [-8], [-9], [-10], [-11], [-12]) 
       ) AS PVT 
-
+' 
+GO
