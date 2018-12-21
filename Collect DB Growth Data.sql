@@ -74,7 +74,7 @@ SET NOCOUNT ON
 			JOIN sys.database_files S ON
                A.DBID = '+CONVERT(NVARCHAR(10), @DBID)+'
                AND A.FileID = S.file_id LEFT JOIN sys.filegroups fg on fg.data_space_id = S.data_space_id
-		  AND A.SnapDate > DATEADD(MIN,-15,GETDATE());';
+		  AND A.SnapDate > DATEADD(MI,-5,GETDATE());';
                  EXEC sp_executesql
                       @SQL,
                       N'@DBNAME nvarchar(128),  @DBID int',
