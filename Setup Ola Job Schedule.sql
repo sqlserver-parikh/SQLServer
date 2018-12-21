@@ -1,4 +1,5 @@
 --https://ola.hallengren.com/scripts/MaintenanceSolution.sql 
+--https://ola.hallengren.com/scripts/MaintenanceSolution.sql 
 
 IF NOT EXISTS
 (
@@ -93,7 +94,7 @@ IF NOT EXISTS
 )
     EXEC msdb.dbo.sp_add_jobschedule
          @job_name = N'DatabaseIntegrityCheck - SYSTEM_DATABASES',
-         @name = N'Weekly - Sunday - 22:30',
+         @name = N'Weekly - Sunday - 1:00 AM',
          @enabled = 1,
          @freq_type = 8,
          @freq_interval = 1,
@@ -103,7 +104,7 @@ IF NOT EXISTS
          @freq_recurrence_factor = 1,
          @active_start_date = 20160606,
          @active_end_date = 99991231,
-         @active_start_time = 223000,
+         @active_start_time = 010000,
          @active_end_time = 235959;
 IF NOT EXISTS
 (
@@ -114,7 +115,7 @@ IF NOT EXISTS
 )
     EXEC msdb.dbo.sp_add_jobschedule
          @job_name = N'DatabaseIntegrityCheck - USER_DATABASES',
-         @name = N'Weekly - Sunday - 22:45',
+         @name = N'Weekly - Sunday - 1:00 AM',
          @enabled = 1,
          @freq_type = 8,
          @freq_interval = 1,
@@ -124,7 +125,7 @@ IF NOT EXISTS
          @freq_recurrence_factor = 1,
          @active_start_date = 20160606,
          @active_end_date = 99991231,
-         @active_start_time = 224500,
+         @active_start_time = 010000,
          @active_end_time = 235959;
 IF NOT EXISTS
 (
@@ -135,7 +136,7 @@ IF NOT EXISTS
 )
     EXEC msdb.dbo.sp_add_jobschedule
          @job_name = N'IndexOptimize - USER_DATABASES',
-         @name = N'Weekly - Saturday - 23:00',
+         @name = N'Weekly - Saturday - 1:00 AM',
          @enabled = 1,
          @freq_type = 8,
          @freq_interval = 64,
@@ -145,7 +146,7 @@ IF NOT EXISTS
          @freq_recurrence_factor = 1,
          @active_start_date = 20160606,
          @active_end_date = 99991231,
-         @active_start_time = 230000,
+         @active_start_time = 010000,
          @active_end_time = 235959;
 IF NOT EXISTS
 (
