@@ -69,12 +69,12 @@ SET NOCOUNT ON
           UPDATE A
              SET  UsedMB = (ceiling(S.size/128) - ceiling(S.size/128.0 - CAST(FILEPROPERTY(S.name, ''SpaceUsed'') AS int )/128.0))
 			 , FileGroupName = ISNULL(fg.name,''LogFile'')
-			 , DataSpaceID = fg.data_space_id
+			 , DataSpaceID = ISNULL(fg.data_space_id,0)
 			FROM DBATasks..tblDBGrowthDetail A (NOLOCK) 
 			JOIN sys.database_files S ON
                A.DBID = '+CONVERT(NVARCHAR(10), @DBID)+'
                AND A.FileID = S.file_id LEFT JOIN sys.filegroups fg on fg.data_space_id = S.data_space_id
-		  AND A.SnapDate > DATEADD(MI,-5,GETDATE());';
+		  AND A.SnapDate > DATEADD(MI,-1,GETDATE());';
                  EXEC sp_executesql
                       @SQL,
                       N'@DBNAME nvarchar(128),  @DBID int',
