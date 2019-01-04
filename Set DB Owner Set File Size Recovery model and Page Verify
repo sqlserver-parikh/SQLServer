@@ -1,0 +1,46 @@
+DECLARE @command NVARCHAR(MAX);
+DECLARE @name SYSNAME;
+DECLARE @filename NVARCHAR(MAX);
+DECLARE db_cursor CURSOR
+FOR SELECT name
+    FROM sys.databases
+    WHERE create_date > DATEADD(dd, -1, GETDATE());
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @name;
+WHILE @@FETCH_STATUS = 0
+    BEGIN
+        DECLARE filenames CURSOR
+        FOR SELECT name
+            FROM sys.master_files
+            WHERE database_id = DB_ID(@name)
+                  AND size < (256 * 128);
+        OPEN filenames;
+        FETCH NEXT FROM filenames INTO @filename;
+        WHILE @@FETCH_STATUS = 0
+            BEGIN
+                SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', SIZE = 256MB , FILEGROWTH = 128MB )';
+                PRINT @command;
+                EXEC sp_executesql
+                     @command;
+                FETCH NEXT FROM filenames INTO @filename;
+            END;
+        SET @command = 'ALTER AUTHORIZATION ON DATABASE ::['+@name+'] TO [sa];';
+        PRINT @command;
+        EXEC sp_executesql
+             @command;
+        ALTER DATABASE [Hi] SET PAGE_VERIFY CHECKSUM WITH NO_WAIT;
+        SET @command = 'ALTER DATABASE ['+@name+'] SET RECOVERY FULL WITH NO_WAIT;';
+        PRINT @command;
+        EXEC sp_executesql
+             @command;
+        SET @command = 'ALTER DATABASE ['+@name+'] SET PAGE_VERIFY CHECKSUM  WITH NO_WAIT;';
+        PRINT @command;
+        EXEC sp_executesql
+             @command;
+        CLOSE filenames;
+        DEALLOCATE filenames;
+        FETCH NEXT FROM db_cursor INTO @name;
+    END;
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+
