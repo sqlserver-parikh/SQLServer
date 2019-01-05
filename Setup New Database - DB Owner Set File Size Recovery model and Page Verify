@@ -7,13 +7,21 @@ DECLARE db_cursor CURSOR
 FOR SELECT name
     FROM sys.databases
     WHERE SUSER_SNAME(owner_sid) NOT LIKE 'sa'
+          OR ( recovery_model_desc <> 'FULL' and database_id <> 2) 
+          OR page_verify_option_desc <> 'CHECKSUM'
+          OR compatibility_level <>
+(
+    SELECT compatibility_level
+    FROM sys.databases
+    WHERE NAME = 'master'
+)
           OR DATABASE_ID IN
 (
     SELECT database_id
     FROM sys.master_files
     WHERE is_percent_growth = 1
-                       OR growth < (@defaultgrowth * 128)
-                       OR size < (@defaultsize * 128)
+          OR growth < (@defaultgrowth * 128)
+          OR size < (@defaultsize * 128)
 );
 OPEN db_cursor;
 FETCH NEXT FROM db_cursor INTO @name;
