@@ -3,11 +3,13 @@ DECLARE @name SYSNAME;
 DECLARE @filename NVARCHAR(MAX);
 DECLARE @defaultsize INT= 256; --All files will be set to 256MB initial size if its less than 256MB
 DECLARE @defaultgrowth INT= 128; --All files will be set to 128MB growth if its less than 128MB
+DECLARE @printonly BIT= 1;
 DECLARE db_cursor CURSOR
 FOR SELECT name
     FROM sys.databases
     WHERE SUSER_SNAME(owner_sid) NOT LIKE 'sa'
-          OR ( recovery_model_desc <> 'FULL' and database_id <> 2) 
+          OR (recovery_model_desc <> 'FULL'
+              AND database_id <> 2)
           OR page_verify_option_desc <> 'CHECKSUM'
           OR compatibility_level <>
 (
@@ -27,6 +29,14 @@ OPEN db_cursor;
 FETCH NEXT FROM db_cursor INTO @name;
 WHILE @@FETCH_STATUS = 0
     BEGIN
+        IF @printonly = 0
+            BEGIN
+                PRINT '--BELOW COMMANDS ARE EXECUTED';
+            END;
+            ELSE
+            BEGIN
+                PRINT '--Please execute below commands if you want to proceed with change;';
+            END;
         DECLARE filenames CURSOR
         FOR SELECT name
             FROM sys.master_files
@@ -47,7 +57,7 @@ WHILE @@FETCH_STATUS = 0
           AND (size < (@defaultsize * 128))
 )
                     BEGIN
-                        SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', SIZE = '+CONVERT(VARCHAR(5), @defaultsize)+'MB , FILEGROWTH = '+CONVERT(VARCHAR(5), @defaultgrowth)+'MBS )';
+                        SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', SIZE = '+CONVERT(VARCHAR(5), @defaultsize)+'MB , FILEGROWTH = '+CONVERT(VARCHAR(5), @defaultgrowth)+'MB )';
                     END;
                     ELSE
                 IF EXISTS
@@ -62,9 +72,16 @@ WHILE @@FETCH_STATUS = 0
                     BEGIN
                         SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', FILEGROWTH = '+CONVERT(VARCHAR(5), @defaultgrowth)+'MB )';
                     END;
-                PRINT @command;
-                EXEC sp_executesql
-                     @command;
+                IF @printonly = 1
+                    BEGIN
+                        PRINT @command;
+                    END;
+                    ELSE
+                    BEGIN
+                        PRINT @command;
+                        EXEC sp_executesql
+                             @command;
+                    END;
                 FETCH NEXT FROM filenames INTO @filename;
             END;
         IF EXISTS
@@ -89,9 +106,16 @@ WHILE @@FETCH_STATUS = 0
 )
             BEGIN
                 SET @command = 'ALTER DATABASE ['+@name+'] SET RECOVERY FULL WITH NO_WAIT;';
-                PRINT @command;
-                EXEC sp_executesql
-                     @command;
+                IF @printonly = 1
+                    BEGIN
+                        PRINT @command;
+                    END;
+                    ELSE
+                    BEGIN
+                        PRINT @command;
+                        EXEC sp_executesql
+                             @command;
+                    END;
             END;
         IF EXISTS
 (
@@ -122,11 +146,18 @@ WHILE @@FETCH_STATUS = 0
                 SELECT @command = 'ALTER DATABASE ['+@name+'] SET COMPATIBILITY_LEVEL = '+CONVERT(VARCHAR(3), compatibility_level)+';'
                 FROM sys.databases
                 WHERE name = 'master';
-                PRINT @command;
-                EXEC sp_executesql
-                     @command;
+                IF @printonly = 1
+                    BEGIN
+                        PRINT @command;
+                    END;
+                    ELSE
+                    BEGIN
+                        PRINT @command;
+                        EXEC sp_executesql
+                             @command;
+                    END;
             END;
-        SET @command = N'USE '+@name+'; DECLARE @userid VARCHAR(255);
+        SET @command = N'USE ['+@name+']; DECLARE @userid VARCHAR(255);
 CREATE TABLE #OrphanUsers
 (UserName VARCHAR(100),
  USID     NVARCHAR(255)
@@ -154,9 +185,17 @@ WHILE @@FETCH_STATUS = 0
     END CATCH;
 CLOSE FixUser;
 DEALLOCATE FixUser;
-DROP TABLE #OrphanUsers;';
-        EXEC sp_executesql
-             @command;
+DROP TABLE #OrphanUsers; ' + CHAR(13) + CHAR(10) +'GO';
+        IF @printonly = 1
+            BEGIN
+                PRINT @command;
+            END;
+            ELSE
+            BEGIN
+                PRINT @command;
+                EXEC sp_executesql
+                     @command;
+            END;
         CLOSE filenames;
         DEALLOCATE filenames;
         FETCH NEXT FROM db_cursor INTO @name;
