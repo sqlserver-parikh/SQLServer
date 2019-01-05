@@ -1,0 +1,157 @@
+DECLARE @command NVARCHAR(MAX);
+DECLARE @name SYSNAME;
+DECLARE @filename NVARCHAR(MAX);
+DECLARE @defaultsize INT= 256; --All files will be set to 256MB initial size if its less than 256MB
+DECLARE @defaultgrowth INT= 128; --All files will be set to 128MB growth if its less than 128MB
+DECLARE db_cursor CURSOR
+FOR SELECT name
+    FROM sys.databases
+    WHERE SUSER_SNAME(owner_sid) NOT LIKE 'sa'
+          OR DATABASE_ID IN
+(
+    SELECT database_id
+    FROM sys.master_files
+    WHERE is_percent_growth = 1
+                       OR growth < (@defaultgrowth * 128)
+                       OR size < (@defaultsize * 128)
+);
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @name;
+WHILE @@FETCH_STATUS = 0
+    BEGIN
+        DECLARE filenames CURSOR
+        FOR SELECT name
+            FROM sys.master_files
+            WHERE database_id = DB_ID(@name)
+                  AND (is_percent_growth = 1
+                       OR growth < (@defaultgrowth * 128)
+                       OR size < (@defaultsize * 128));
+        OPEN filenames;
+        FETCH NEXT FROM filenames INTO @filename;
+        WHILE @@FETCH_STATUS = 0
+            BEGIN
+                IF EXISTS
+(
+    SELECT 1
+    FROM sys.master_files
+    WHERE database_id = DB_ID(@name)
+          AND name = @filename
+          AND (size < (@defaultsize * 128))
+)
+                    BEGIN
+                        SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', SIZE = '+CONVERT(VARCHAR(5), @defaultsize)+'MB , FILEGROWTH = '+CONVERT(VARCHAR(5), @defaultgrowth)+'MBS )';
+                    END;
+                    ELSE
+                IF EXISTS
+(
+    SELECT 1
+    FROM sys.master_files
+    WHERE database_id = DB_ID(@name)
+          AND name = @filename
+          AND (is_percent_growth = 1
+               OR (growth < (128 * 128)))
+)
+                    BEGIN
+                        SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', FILEGROWTH = '+CONVERT(VARCHAR(5), @defaultgrowth)+'MB )';
+                    END;
+                PRINT @command;
+                EXEC sp_executesql
+                     @command;
+                FETCH NEXT FROM filenames INTO @filename;
+            END;
+        IF EXISTS
+(
+    SELECT 1
+    FROM sys.databases
+    WHERE name = @name
+          AND SUSER_SNAME(owner_sid) <> 'sa'
+)
+            BEGIN
+                SET @command = 'ALTER AUTHORIZATION ON DATABASE ::['+@name+'] TO [sa];';
+                PRINT @command;
+                EXEC sp_executesql
+                     @command;
+            END;
+        IF EXISTS
+(
+    SELECT 1
+    FROM sys.databases
+    WHERE name = @name
+          AND recovery_model_desc <> 'FULL'
+)
+            BEGIN
+                SET @command = 'ALTER DATABASE ['+@name+'] SET RECOVERY FULL WITH NO_WAIT;';
+                PRINT @command;
+                EXEC sp_executesql
+                     @command;
+            END;
+        IF EXISTS
+(
+    SELECT 1
+    FROM sys.databases
+    WHERE name = @name
+          AND page_verify_option_desc <> 'CHECKSUM'
+)
+            BEGIN
+                SET @command = 'ALTER DATABASE ['+@name+'] SET PAGE_VERIFY CHECKSUM  WITH NO_WAIT;';
+                PRINT @command;
+                EXEC sp_executesql
+                     @command;
+            END;
+        IF EXISTS
+(
+    SELECT 1
+    FROM sys.databases
+    WHERE name = @name
+          AND compatibility_level <>
+(
+    SELECT compatibility_level
+    FROM sys.databases
+    WHERE NAME = 'master'
+)
+)
+            BEGIN
+                SELECT @command = 'ALTER DATABASE ['+@name+'] SET COMPATIBILITY_LEVEL = '+CONVERT(VARCHAR(3), compatibility_level)+';'
+                FROM sys.databases
+                WHERE name = 'master';
+                PRINT @command;
+                EXEC sp_executesql
+                     @command;
+            END;
+        SET @command = N'USE '+@name+'; DECLARE @userid VARCHAR(255);
+CREATE TABLE #OrphanUsers
+(UserName VARCHAR(100),
+ USID     NVARCHAR(255)
+);
+INSERT INTO #OrphanUsers
+EXEC sp_change_users_login
+     ''report'';
+DECLARE FixUser CURSOR
+FOR SELECT UserName
+    FROM #OrphanUsers;
+OPEN FixUser;
+FETCH NEXT FROM FixUser INTO @userid;
+WHILE @@FETCH_STATUS = 0
+    BEGIN TRY
+        EXEC sp_change_users_login
+             ''update_one'',
+             @userid,
+             @userid;
+        PRINT ''--User ''+@userid+'' is mapped;'';
+        FETCH NEXT FROM FixUser INTO @userid;
+    END TRY
+    BEGIN CATCH
+        PRINT ''DROP user ''+@userid+'';'';
+        FETCH NEXT FROM FixUser INTO @userid;
+    END CATCH;
+CLOSE FixUser;
+DEALLOCATE FixUser;
+DROP TABLE #OrphanUsers;';
+        EXEC sp_executesql
+             @command;
+        CLOSE filenames;
+        DEALLOCATE filenames;
+        FETCH NEXT FROM db_cursor INTO @name;
+    END;
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
