@@ -37,10 +37,46 @@ WHILE @@FETCH_STATUS = 0
         PRINT @command;
         EXEC sp_executesql
              @command;
+        SELECT @command = 'ALTER DATABASE ['+@name+'] SET COMPATIBILITY_LEVEL = '+CONVERT(VARCHAR(3), compatibility_level)+';'
+        FROM sys.databases
+        WHERE name = 'master';
+        PRINT @command;
+        EXEC sp_executesql
+             @command;
+        SET @command = N'USE '+@name+'; DECLARE @userid VARCHAR(255);
+CREATE TABLE #OrphanUsers
+(UserName VARCHAR(100),
+ USID     NVARCHAR(255)
+);
+INSERT INTO #OrphanUsers
+EXEC sp_change_users_login
+     ''report'';
+DECLARE FixUser CURSOR
+FOR SELECT UserName
+    FROM #OrphanUsers;
+OPEN FixUser;
+FETCH NEXT FROM FixUser INTO @userid;
+WHILE @@FETCH_STATUS = 0
+    BEGIN TRY
+        EXEC sp_change_users_login
+             ''update_one'',
+             @userid,
+             @userid;
+        PRINT ''--User ''+@userid+'' is mapped;'';
+        FETCH NEXT FROM FixUser INTO @userid;
+    END TRY
+    BEGIN CATCH
+        PRINT ''DROP user ''+@userid+'';'';
+        FETCH NEXT FROM FixUser INTO @userid;
+    END CATCH;
+CLOSE FixUser;
+DEALLOCATE FixUser;
+DROP TABLE #OrphanUsers;';
+        EXEC sp_executesql
+             @command;
         CLOSE filenames;
         DEALLOCATE filenames;
         FETCH NEXT FROM db_cursor INTO @name;
     END;
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
-
