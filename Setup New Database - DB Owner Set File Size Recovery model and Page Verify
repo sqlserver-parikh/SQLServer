@@ -7,24 +7,24 @@ DECLARE @printonly BIT= 1;
 DECLARE db_cursor CURSOR
 FOR SELECT name
     FROM sys.databases
-    WHERE SUSER_SNAME(owner_sid) NOT LIKE 'sa'
-          OR (recovery_model_desc <> 'FULL'
-              AND database_id <> 2)
-          OR page_verify_option_desc <> 'CHECKSUM'
-          OR compatibility_level <>
+    WHERE database_id <> 2
+          AND (SUSER_SNAME(owner_sid) NOT LIKE 'sa'
+               OR (recovery_model_desc <> 'FULL')
+               OR page_verify_option_desc <> 'CHECKSUM'
+               OR compatibility_level <>
 (
     SELECT compatibility_level
     FROM sys.databases
     WHERE NAME = 'master'
 )
-          OR DATABASE_ID IN
+               OR DATABASE_ID IN
 (
     SELECT database_id
     FROM sys.master_files
     WHERE is_percent_growth = 1
           OR growth < (@defaultgrowth * 128)
           OR size < (@defaultsize * 128)
-);
+));
 OPEN db_cursor;
 FETCH NEXT FROM db_cursor INTO @name;
 WHILE @@FETCH_STATUS = 0
@@ -54,7 +54,8 @@ WHILE @@FETCH_STATUS = 0
     FROM sys.master_files
     WHERE database_id = DB_ID(@name)
           AND name = @filename
-          AND (size < (@defaultsize * 128))
+          AND (size < (@defaultsize * 128)
+               AND growth < (@defaultgrowth * 128))
 )
                     BEGIN
                         SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', SIZE = '+CONVERT(VARCHAR(5), @defaultsize)+'MB , FILEGROWTH = '+CONVERT(VARCHAR(5), @defaultgrowth)+'MB )';
@@ -67,10 +68,23 @@ WHILE @@FETCH_STATUS = 0
     WHERE database_id = DB_ID(@name)
           AND name = @filename
           AND (is_percent_growth = 1
-               OR (growth < (128 * 128)))
+               OR (growth < (@defaultgrowth * 128)))
 )
                     BEGIN
                         SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', FILEGROWTH = '+CONVERT(VARCHAR(5), @defaultgrowth)+'MB )';
+                    END;
+                    ELSE
+                IF EXISTS
+(
+    SELECT 1
+    FROM sys.master_files
+    WHERE database_id = DB_ID(@name)
+          AND name = @filename
+          AND (is_percent_growth = 1
+               OR (size < (@defaultsize * 128)))
+)
+                    BEGIN
+                        SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', SIZE = '+CONVERT(VARCHAR(5), @defaultsize)+'MB )';
                     END;
                 IF @printonly = 1
                     BEGIN
@@ -185,7 +199,7 @@ WHILE @@FETCH_STATUS = 0
     END CATCH;
 CLOSE FixUser;
 DEALLOCATE FixUser;
-DROP TABLE #OrphanUsers; ' + CHAR(13) + CHAR(10) +'GO';
+DROP TABLE #OrphanUsers; '+CHAR(13)+CHAR(10)+'GO';
         IF @printonly = 1
             BEGIN
                 PRINT @command;
