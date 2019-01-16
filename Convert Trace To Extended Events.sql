@@ -1,3 +1,5 @@
+--http://www.sqlskills.com/blogs/jonathan/wp-content/uploads/2012/4/sp_sqlskills_converttracetoextendedevents.sql
+
 USE [master]
 GO
 IF OBJECT_ID('sp_SQLskills_ConvertTraceToExtendedEvents') IS NOT NULL
