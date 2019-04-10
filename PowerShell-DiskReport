@@ -1,0 +1,244 @@
+#Get-DiskSpaceReport -ComputerList c:\serverlist.txt -warning 65 -critical 40   -To myteam@company.com -From DiskReport@company.com -SMTPMail mail.company.com
+
+#get-wmiobject win32_volume | select name, label, @{Name="Capacity(GB)";expression={[math]::round(($_.Capacity/ 1073741824),2)}}, @{Name="FreeSpace(GB)";expression={[math]::round(($_.FreeSpace / 1073741824),2)}},@{Name="Free(%)";expression={[math]::round(((($_.FreeSpace / 1073741824)/($_.Capacity / 1073741824)) * 100),0)}} |format-table
+
+Function Get-DiskSpaceReport
+{
+param(
+[String]$ComputerList,[int]$warning,[int]$critical,[String]$To,[String]$From,[string]$SMTPMail,[string] $SubServerList
+)
+
+$script:list = $ComputerList
+$freeSpaceFileName = “C:\FreeSpace.htm”
+if ($Warning -eq “$NULL”)
+{
+$Warning=25
+}
+
+if ($critical -eq “$NULL”)
+{
+$critical=15
+}
+
+$critical = $critical
+$warning = $warning
+New-Item -ItemType file $freeSpaceFileName -Force
+
+# Getting the freespace info using WMI
+#Get-WmiObject win32_logicaldisk | Where-Object {$_.drivetype -eq 3 -OR $_.drivetype -eq 2 } | format-table DeviceID, VolumeName,status,Size,FreeSpace | Out-File FreeSpace.txt
+# Function to write the HTML Header to the file
+Function writeHtmlHeader
+{
+param($fileName)
+$date = ( get-date ).ToString(‘yyyy/MM/dd’)
+Add-Content $fileName “<html>”
+Add-Content $fileName “<head>”
+Add-Content $fileName “<meta http-equiv=’Content-Type’ content=’text/html; charset=iso-8859-1′>”
+Add-Content $fileName ‘<title>DiskSpace Report</title>’
+add-content $fileName ‘<STYLE TYPE=”text/css”>’
+add-content $fileName “<!–“
+add-content $fileName “td {“
+add-content $fileName “font-family: Tahoma;”
+add-content $fileName “font-size: 11px;”
+add-content $fileName “border-top: 1px solid #999999;”
+add-content $fileName “border-right: 1px solid #999999;”
+add-content $fileName “border-bottom: 1px solid #999999;”
+add-content $fileName “border-left: 1px solid #999999;”
+add-content $fileName “padding-top: 0px;”
+add-content $fileName “padding-right: 0px;”
+add-content $fileName “padding-bottom: 0px;”
+add-content $fileName “padding-left: 0px;”
+add-content $fileName “}”
+add-content $fileName “body {“
+add-content $fileName “margin-left: 5px;”
+add-content $fileName “margin-top: 5px;”
+add-content $fileName “margin-right: 0px;”
+add-content $fileName “margin-bottom: 10px;”
+add-content $fileName “”
+add-content $fileName “table {“
+add-content $fileName “border: thin solid #000000;”
+add-content $fileName “}”
+add-content $fileName “–>”
+add-content $fileName “</style>”
+Add-Content $fileName “</head>”
+Add-Content $fileName “<body>”
+
+add-content $fileName “<table width=’100%’>”
+add-content $fileName “<tr bgcolor=’#CCCCCC’>”
+add-content $fileName “<td colspan=’7′ height=’25’ align=’center’>”
+add-content $fileName “<font face=’tahoma’ color=’#003399′ size=’4′><strong>DiskSpace Report – $date</strong></font>”
+add-content $fileName “</td>”
+add-content $fileName “</tr>”
+add-content $fileName “</table>”
+
+}
+
+# Function to write the HTML Header to the file
+Function writeTableHeader
+{
+param($fileName)
+
+Add-Content $fileName “<tr bgcolor=#CCCCCC>”
+Add-Content $fileName “<td width=’10%’ align=’center’>Drive</td>”
+Add-Content $fileName “<td width=’50%’ align=’center’>Drive Label</td>”
+Add-Content $fileName “<td width=’50%’ align=’center’>BlockSize</td>”
+Add-Content $fileName “<td width=’10%’ align=’center’>Total Capacity(GB)</td>”
+Add-Content $fileName “<td width=’10%’ align=’center’>Used Capacity(GB)</td>”
+Add-Content $fileName “<td width=’10%’ align=’center’>Free Space(GB)</td>”
+Add-Content $fileName “<td width=’10%’ align=’center’>Freespace %</td>”
+Add-Content $fileName “</tr>”
+}
+
+Function writeHtmlFooter
+{
+param($fileName)
+
+Add-Content $fileName “</body>”
+Add-Content $fileName “</html>”
+}
+
+Function writeDiskInfo
+{
+param($fileName,$devId,$volName, $BlockSize, $frSpace,$totSpace)
+$totSpace=[math]::Round(($totSpace/1073741824),2)
+$frSpace=[Math]::Round(($frSpace/1073741824),2)
+$usedSpace = $totSpace – $frspace
+$usedSpace=[Math]::Round($usedSpace,2)
+$freePercent = ($frspace/$totSpace)*100
+$freePercent = [Math]::Round($freePercent,2)
+if ($freePercent -gt $warning)
+{
+Add-Content $fileName “<tr>”
+Add-Content $fileName “<td>$devid</td>”
+Add-Content $fileName “<td>$volName</td>”
+Add-Content $fileName “<td>$BlockSize</td>”
+Add-Content $fileName “<td>$totSpace</td>”
+Add-Content $fileName “<td>$usedSpace</td>”
+Add-Content $fileName “<td>$frSpace</td>”
+Add-Content $fileName “<td>$freePercent</td>”
+Add-Content $fileName “</tr>”
+}
+elseif ($freePercent -le $critical)
+{
+Add-Content $fileName “<tr bgcolor=#FF0000>”
+Add-Content $fileName “<td>$devid</td>”
+Add-Content $fileName “<td>$volName</td>”
+Add-Content $fileName “<td>$BlockSize</td>”
+Add-Content $fileName “<td>$totSpace</td>”
+Add-Content $fileName “<td>$usedSpace</td>”
+Add-Content $fileName “<td>$frSpace</td>”
+Add-Content $fileName “<td align=right>$freePercent</td>”
+#<td bgcolor=’#FF0000′ align=center>
+Add-Content $fileName “</tr>”
+}
+else
+{
+Add-Content $fileName “<tr bgcolor=#FFFC00>”
+Add-Content $fileName “<td>$devid</td>”
+Add-Content $fileName “<td>$volName</td>”
+Add-Content $fileName “<td>$BlockSize</td>”
+Add-Content $fileName “<td>$totSpace</td>”
+Add-Content $fileName “<td>$usedSpace</td>”
+Add-Content $fileName “<td>$frSpace</td>”
+Add-Content $fileName “<td align=right>$freePercent</td>”
+# #FBB917
+Add-Content $fileName “</tr>”
+}
+}
+
+writeHtmlHeader $freeSpaceFileName
+
+foreach ($server in Get-Content $script:list)
+{
+if(Test-Connection -ComputerName $server -Count 1 -ea 0) {
+
+$BootUpTime = Get-WmiObject win32_operatingsystem -computername $server | select  @{LABEL='LastBootUpTime';EXPRESSION={$_.ConverttoDateTime($_.lastbootuptime)}}
+$BootUpTime = $BootUpTime.LastBootUpTime
+
+$HotFixInfo = Get-HotFix -ComputerName $server |  Where {$_.InstalledOn} | Sort InstalledOn -Descending | Select @{Name = "Installed"; Expression = {"{0:M/dd/yyyy}" -f [datetime]$_.InstalledOn.Tostring()}} -First 1
+$HotFixInfo = $HotFixInfo.Installed
+
+$ComputerInfo = Get-WmiObject Win32_ComputerSystem -ComputerName $server
+$Manufacturer = $ComputerInfo.Manufacturer
+$Model = $ComputerInfo.Model
+
+$NumberOfCore = ((Get-WmiObject -ComputerName $server -Query "select * from Win32_Processor") | Group-Object -Property SocketDesignation).Count; 
+
+$OSInfo = Get-WmiObject Win32_OperatingSystem -ComputerName $server
+$OSInfo = $OSInfo.Caption
+
+$PhysicalMemory = Get-WmiObject CIM_PhysicalMemory -ComputerName $server | Measure-Object -Property capacity -sum | % {[math]::round(($_.sum / 1GB),2)}
+
+Add-Content $freeSpaceFileName “<table width=’100%’><tbody>”
+Add-Content $freeSpaceFileName “<tr bgcolor=’#CCCCCC’>”
+Add-Content $freeSpaceFileName “<td width=’100%’ align=’center’ colSpan=6><font face=’tahoma’ color=’#003399′ size=’2′><strong>Server: $server</strong></font></td>”
+Add-Content $freeSpaceFileName “</tr>”
+
+Add-Content $freeSpaceFileName “<table width=’100%’><tbody>”
+Add-Content $freeSpaceFileName “<tr bgcolor=’#CCCCCC’>”
+Add-Content $freeSpaceFileName “<td width=’100%’ align=’center’ colSpan=6><font face=’tahoma’ color=’#003399′ size=’2′><strong>Manufacturer: $Manufacturer Model: $Model OS: $OSInfo ProcessorCount: $NumberOfCore </strong></font></td>”
+Add-Content $freeSpaceFileName “</tr>”
+
+Add-Content $freeSpaceFileName “<table width=’100%’><tbody>”
+Add-Content $freeSpaceFileName “<tr bgcolor=’#CCCCCC’>”
+Add-Content $freeSpaceFileName “<td width=’100%’ align=’center’ colSpan=6><font face=’tahoma’ color=’#003399′ size=’2′><strong>Total $PhysicalMemory GB memory and last rebooted on $BootUpTime and patched on $HotFixInfo </strong></font></td>”
+Add-Content $freeSpaceFileName “</tr>”
+
+
+#Get-DiskSpaceReport -ComputerList c:\serverlist.txt  -To nimit.parikh@nbcuni.com -From DiskReport@nbcuni.com -SMTPMail Mailrelay.nbcuni.ge.com
+
+#get-wmiobject win32_volume | select name, label, @{Name="Capacity(GB)";expression={[math]::round(($_.Capacity/ 1073741824),2)}}, @{Name="FreeSpace(GB)";expression={[math]::round(($_.FreeSpace / 1073741824),2)}},@{Name="Free(%)";expression={[math]::round(((($_.FreeSpace / 1073741824)/($_.Capacity / 1073741824)) * 100),0)}} |format-table
+
+
+
+writeTableHeader $freeSpaceFileName
+
+$dp = Get-WmiObject win32_volume -ComputerName $server | Where-Object {$_.drivetype -eq 3 }
+
+foreach ($item in $dp)
+{
+Write-Host $item.Name $item.Label $item.BlockSize $item.FreeSpace $item.Capacity
+writeDiskInfo $freeSpaceFileName $item.Name $item.Label $item.BlockSize $item.FreeSpace $item.Capacity
+
+}
+}
+Add-Content $freeSpaceFileName “</table>”
+}
+
+writeHtmlFooter $freeSpaceFileName
+
+
+Function sendEmail
+{
+param($from,$to,$subject,$smtphost,$htmlFileName)
+[string]$receipients=”$to”
+$body = Get-Content $htmlFileName
+$body = New-Object System.Net.Mail.MailMessage $from, $receipients, $subject, $body
+$body.isBodyhtml = $true
+$smtpServer = $MailServer
+$smtp = new-object Net.Mail.SmtpClient($smtphost)
+$smtp.Send($body)
+}
+
+
+# Email our report out
+
+function Validate-IsEmail ([string]$Email)
+
+{
+
+return $Email -match “^(?(“”)(“”.+?””@)|(([0-9a-zA-Z]((\.(?!\.))|[-!#\$%&’\*\+/=\?\^`\{\}\|~\w])*)(?<=[0-9a-zA-Z])@))(?(\[)(\[(\d{1,3}\.){3}\d{1,3}\])|(([0-9a-zA-Z][-\w]*[0-9a-zA-Z]\.)+[a-zA-Z]{2,6}))$”
+}
+
+$date = ( get-date ).ToString(‘yyyy/MM/dd’)
+
+sendEmail -from $From -to $to -subject “$SubServerList Disk Space Report – $Date” -smtphost $SMTPMail -htmlfilename $freeSpaceFileName - 
+
+}
+
+$emlst=”myteam@company.com” #Change your team or individual email here.
+DiskSpaceReport -ComputerList D:\Scripts\Serverlist.txt -warning 20 -critical 10   -To $emlst -From DiskReport@company.com -SMTPMail mail.company.com -SubServerList DevServerList
+
+
+########################################################################################################################
+
