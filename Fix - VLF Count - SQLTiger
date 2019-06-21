@@ -1,6 +1,6 @@
 --I modified little to use OLA Script for backup and commented out changing recovery model.
 --Original script can be found at below location.
---https://raw.githubusercontent.com/microsoft/tigertoolbox/master/Fixing-VLFs/Fix_VLFs.sql
+
 -- 2011-05-24 Pedro Lopes (Microsoft) pedro.lopes@microsoft.com (http://aka.ms/sqlinsights)
 --
 -- 2012-03-25 Added SQL 2012 support
@@ -242,6 +242,8 @@ BEGIN
 			END, 
 		@n_init_iter, @initgrow, CASE WHEN (@potsize/@n_iter_final) <= 1024 THEN (@potsize/@n_iter_final) ELSE 1024 END
 	
+	IF @n_init_iter > 4 
+	SET @n_init_iter = 4
 	SET @i = 0
 	WHILE @i <= @n_init_iter
 	BEGIN
