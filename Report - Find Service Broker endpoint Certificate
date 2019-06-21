@@ -1,3 +1,5 @@
+--http://rusanu.com/2008/10/25/replacing-endpoint-certificates-that-are-near-expiration/
+
 SELECT BE.name ServiceBrokerEndPoint,
        BE.type_desc TypeDesc,
        MC.name CertName,
