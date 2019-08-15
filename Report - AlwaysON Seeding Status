@@ -8,3 +8,9 @@ SELECT remote_machine_name,
        DATEADD(HH, DATEDIFF(HH, GETUTCDATE(), GETDATE()), end_time_utc) EndTime,
        DATEADD(HH, DATEDIFF(HH, GETUTCDATE(), GETDATE()), estimate_time_complete_utc) EstimatedFinishTime
 FROM sys.dm_hadr_physical_seeding_stats;
+
+--No need of password to add database to AG;
+--ALTER AVAILABILITY GROUP AGName REMOVE DATABASE DBName;
+--GO
+--ALTER AVAILABILITY GROUP AGName ADD DATABASE DBName;
+--GO
