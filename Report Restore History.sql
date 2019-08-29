@@ -1,14 +1,14 @@
 USE msdb;
-SELECT @@SERVERNAME CurrentServerName,
+SELECT CurrentServerName = @@SERVERNAME,
        DBRestored = destination_database_name,
        RestoreDate = restore_date,
        SourceDB = b.database_name,
-	RestoredDBBackupFileLocation = bmf.physical_device_name,
+       RestoredDBBackupFileLocation = bmf.physical_device_name,
        SourceFile = physical_name,
        BackupDate = backup_start_date,
        SourceServer = server_name,
-       CONVERT(DECIMAL(18, 2), b.backup_size / 1024.0 / 1024.0) BackupSize,
-       h.user_name RestoredBy
+       BackupSize = CONVERT(DECIMAL(18, 2), b.backup_size / 1024.0 / 1024.0),
+       RestoredBy = h.user_name 
 FROM msdb..restorehistory h
      INNER JOIN msdb..backupset b ON h.backup_set_id = b.backup_set_id
      INNER JOIN msdb..backupfile f ON f.backup_set_id = b.backup_set_id
