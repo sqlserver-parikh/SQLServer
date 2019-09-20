@@ -1,0 +1,184 @@
+--https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
+--Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
+--Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
+DROP PROC IF EXISTS sp_RestoreFromAllFilesInDirectory
+GO
+
+CREATE PROCEDURE sp_RestoreFromAllFilesInDirectory
+@SourceDirBackupFiles nvarchar(200), @DestDirDbFiles nvarchar(200), @DestDirLogFiles nvarchar(200) 
+AS
+--Originally written by Tibor Karaszi 2004. Use at own risk. 
+--Restores from all files in a certain directory. Assumes that: 
+--  There's only one backup on each backup device. 
+--  Each database uses only two database files and the mdf file is returned first from the RESTORE FILELISTONLY command. 
+--Sample execution: 
+-- EXEC sp_RestoreFromAllFilesInDirectory 'C:\Mybakfiles\', 'D:\Mydatabasesdirectory\' ,'C:\MylogDirectory\'
+
+--Modified 2016-12-19:
+-- Works for SQL Server 2016
+-- Added linebreaks for readability
+-- Create physical file name from logical file name, not database name
+-- Supports multiple database file, thanks to above
+-- Added stats för every 5 %
+SET NOCOUNT ON
+
+DECLARE @crlf char(2) = CHAR(13) + CHAR(10)
+
+--Table to hold each backup file name in
+CREATE TABLE #files(fname varchar(200),depth int, file_ int)
+INSERT #files
+EXECUTE master.dbo.xp_dirtree @SourceDirBackupFiles, 1, 1
+
+--Table to hold the result from RESTORE HEADERONLY. Needed to get the database name out from
+CREATE TABLE #bdev(
+BackupName nvarchar(128) 
+,BackupDescription nvarchar(255) 
+,BackupType smallint
+,ExpirationDate datetime
+,Compressed tinyint
+,Position smallint
+,DeviceType tinyint
+,UserName nvarchar(128) 
+,ServerName nvarchar(128) 
+,DatabaseName nvarchar(128) 
+,DatabaseVersion bigint
+,DatabaseCreationDate datetime
+,BackupSize numeric(20,0)
+,FirstLSN numeric(25,0)
+,LastLSN numeric(25,0)
+,CheckpointLSN numeric(25,0)
+,DatabaseBackupLSN numeric(25,0)
+,BackupStartDate datetime
+,BackupFinishDate datetime
+,SortOrder smallint
+,[CodePage] smallint
+,UnicodeLocaleId bigint
+,UnicodeComparisonStyle bigint
+,CompatibilityLevel tinyint
+,SoftwareVendorId bigint
+,SoftwareVersionMajor bigint
+,SoftwareVersionMinor bigint
+,SoftwareVersionBuild bigint
+,MachineName nvarchar(128) 
+,Flags bigint
+,BindingID uniqueidentifier
+,RecoveryForkID uniqueidentifier
+,Collation nvarchar(128) 
+,FamilyGUID uniqueidentifier
+,HasBulkLoggedData bigint
+,IsSnapshot bigint
+,IsReadOnly bigint
+,IsSingleUser bigint
+,HasBackupChecksums bigint
+,IsDamaged bigint
+,BegibsLogChain bigint
+,HasIncompleteMetaData bigint
+,IsForceOffline bigint
+,IsCopyOnly bigint
+,FirstRecoveryForkID uniqueidentifier
+,ForkPointLSN numeric(25,0)
+,RecoveryModel nvarchar(128) 
+,DifferentialBaseLSN numeric(25,0)
+,DifferentialBaseGUID uniqueidentifier
+,BackupTypeDescription nvarchar(128) 
+,BackupSetGUID uniqueidentifier
+,CompressedBackupSize bigint
+,Containment bigint
+,KeyAlgorithm nvarchar(32)
+,EncryptorThumbprint varbinary(20)
+,EncryptorType nvarchar(23)
+)
+
+--Table to hold result from RESTORE FILELISTONLY. Need to generate the MOVE options to the RESTORE command
+CREATE TABLE #dbfiles(
+LogicalName nvarchar(128) 
+,PhysicalName nvarchar(260) 
+,[Type] char(1) 
+,FileGroupName nvarchar(128) 
+,Size numeric(20,0)
+,MaxSize numeric(20,0)
+,FileId bigint
+,CreateLSN numeric(25,0)
+,DropLSN numeric(25,0)
+,UniqueId uniqueidentifier
+,ReadOnlyLSN numeric(25,0)
+,ReadWriteLSN numeric(25,0)
+,BackupSizeInBytes bigint
+,SourceBlockSize bigint
+,FilegroupId bigint
+,LogGroupGUID uniqueidentifier
+,DifferentialBaseLSN numeric(25)
+,DifferentialBaseGUID uniqueidentifier
+,IsReadOnly bigint
+,IsPresent int 
+,TDEThumbprint uniqueidentifier
+,SnapshotUrl nvarchar(360)
+)
+
+DECLARE @fname varchar(200) 
+DECLARE @dirfile varchar(300) 
+DECLARE @LogicalName nvarchar(128) 
+DECLARE @PhysicalName nvarchar(260) 
+DECLARE @type char(1) 
+DECLARE @DbName sysname 
+DECLARE @sql nvarchar(1000) 
+
+DECLARE files CURSOR FOR
+SELECT fname FROM #files
+
+DECLARE dbfiles CURSOR FOR
+SELECT LogicalName, PhysicalName, Type FROM #dbfiles
+
+OPEN files
+FETCH NEXT FROM files INTO @fname
+WHILE @@FETCH_STATUS = 0
+BEGIN
+SET @dirfile = @SourceDirBackupFiles + @fname
+
+--Get database name from RESTORE HEADERONLY, assumes there's only one backup on each backup file.
+TRUNCATE TABLE #bdev
+INSERT #bdev
+EXEC('RESTORE HEADERONLY FROM DISK = ''' + @dirfile + '''') 
+SET @DbName = (SELECT DatabaseName FROM #bdev)
+
+--Construct the beginning for the RESTORE DATABASE command
+SET @sql = 'RESTORE DATABASE [' + @DbName + '] ' + @crlf 
++ 'FROM DISK = ''' + @dirfile + '''' + @crlf 
++ ' WITH REPLACE' + @crlf 
++ ',STATS = 5 ' + @crlf 
++ ',MOVE '
+
+--Get information about database files from backup device into temp table
+TRUNCATE TABLE #dbfiles
+INSERT #dbfiles
+EXEC('RESTORE FILELISTONLY FROM DISK = ''' + @dirfile + '''')
+
+OPEN dbfiles
+
+--For each database file that the database uses
+WHILE 1 = 1
+BEGIN
+	FETCH NEXT FROM dbfiles INTO @LogicalName, @PhysicalName, @type
+	IF @@FETCH_STATUS <> 0 
+		BREAK
+	IF @type = 'D'
+	BEGIN
+	  SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DestDirDbFiles + @LogicalName + '.mdf''' + @crlf
+	  SET @sql = @sql + ',MOVE '
+	END
+	ELSE IF @type = 'L'
+	  SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DestDirLogFiles + @LogicalName + '.ldf''' + @crlf
+END
+
+SET @sql = @sql + @crlf
+
+--Here's the actual RESTORE command 
+PRINT @sql 
+--Remove the comment below if you want the procedure to actually execute the restore command. 
+--EXEC(@sql) 
+CLOSE dbfiles 
+FETCH NEXT FROM files INTO @fname 
+END 
+CLOSE files 
+DEALLOCATE dbfiles 
+DEALLOCATE files 
