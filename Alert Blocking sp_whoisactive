@@ -179,4 +179,132 @@ QuitWithRollback:
 EndSave:
 GO
 
+--USE [DBATasks]
+--GO
+--SET ANSI_NULLS ON
+--GO
+--SET QUOTED_IDENTIFIER ON
+--GO
+--IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spBlockingAlert]') AND type in (N'P', N'PC'))
+--BEGIN
+--EXEC dbo.sp_executesql @statement = N'DROP PROCEDURE [dbo].[spBlockingAlert]' 
+--END
+
+--IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spBlockingAlert]') AND type in (N'P', N'PC'))
+--BEGIN
+--EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[spBlockingAlert] AS' 
+--END
+--GO
+
+--ALTER PROCEDURE [dbo].[spBlockingAlert]
+--(@timecheckmin          INT          = 15,
+-- @emailDL               VARCHAR(MAX) = 'nimit.parikh@broadridge.com',
+-- @blocked_session_count INT          = 10
+--)
+--AS
+--     BEGIN
+--         DECLARE @emailProfile VARCHAR(128);
+--         SELECT @emailProfile = name
+--         FROM msdb..sysmail_profile
+--         WHERE profile_id = 1;
+--         IF EXISTS
+--(
+--    SELECT 1
+--    FROM dbo.tblWhoIsActive WITH (nolock)
+--    WHERE 1 = 1
+--      --AND database_name LIKE 'DBName'
+--	 --AND CAST(sql_text AS VARCHAR(MAX)) LIKE '%QueryText%'
+--      --AND CAST(sql_command AS VARCHAR(MAX)) LIKE '%QueryText%'
+--          AND (blocking_session_id IS NOT NULL
+--               OR blocked_session_count > 0)
+--          AND blocked_session_count > @blocked_session_count
+--	 --AND host_name LIKE 'ServerName'
+--	 --AND percent_complete > 20
+--	 --AND login_name LIKE 'LoginName'
+--	 --AND program_name LIKE '%ProgramName'
+--	 --and query_plan is not null
+--	 --and session_id = 55
+--          AND collection_time > DATEADD(mi, -@timecheckmin, GETDATE())
+--	 --AND collection_time > '2018-10-19 07:12:01.110'
+--	 --AND collection_time < '2018-10-19 07:29:01.110'
+--)
+----ORDER BY tempdb_current DESC
+--             BEGIN
+--                 PRINT 'YES';
+--                 DECLARE @tableHTML VARCHAR(MAX);
+--                 SET @tableHTML = N'<table border="1">'+N'<tr>
+--<th>CollectTime</th>
+--<th>dd hh:mm:ss.mss</th>
+--<th>SQLCommand</th>
+--<th>SessionID</th>
+--<th>LoginName</th>
+--<th>BlockedBy</th>
+--<th>TotalBlocked</th>
+--<th>HostName</th>
+--<th>DBName</th>
+--<th>ProgramName</th>
+--<th>StartTime</th>
+--</tr>'+CAST(
+--(
+--    SELECT td = collection_time,
+--           '',
+--           td = [dd hh:mm:ss.mss],
+--           '',
+--           td = CASE
+--                    WHEN LEFT(CAST(sql_command AS VARCHAR(MAX)), 50) IS NULL
+--                    THEN ''
+--                    ELSE LEFT(CAST(sql_command AS VARCHAR(MAX)), 50)
+--                END,
+--           '',
+--           td = session_id,
+--           '',
+--           td = login_name,
+--           '',
+--           td = CASE
+--                    WHEN [blocking_session_id] IS NULL
+--                    THEN 'LeadBlocker'
+--                    ELSE CONVERT(VARCHAR(4), blocking_session_id)
+--                END,
+--           '',
+--           td = blocked_session_count,
+--           '',
+--           td = host_name,
+--           '',
+--           td = database_name,
+--           '',
+--           td = program_name,
+--           '',
+--           td = start_time
+--    FROM dbo.tblWhoIsActive WITH (nolock)
+--    WHERE 1 = 1
+--      --AND database_name LIKE 'DBName'
+--	 --AND CAST(sql_text AS VARCHAR(MAX)) LIKE '%QueryText%'
+--      --AND CAST(sql_command AS VARCHAR(MAX)) LIKE '%QueryText%'
+--          AND (blocking_session_id IS NOT NULL
+--               OR blocked_session_count > 0)
+--	 --AND host_name LIKE 'ServerName'
+--	 --AND percent_complete > 20
+--	 --AND login_name LIKE 'LoginName'
+--	 --AND program_name LIKE '%ProgramName'
+--	 --and query_plan is not null
+--	 --and session_id = 55
+--          AND collection_time > DATEADD(mi, -@timecheckmin, GETDATE())
+--	 --AND collection_time > '2018-10-19 07:12:01.110'
+--	 --AND collection_time < '2018-10-19 07:29:01.110'
+--    ORDER BY 1 DESC,
+--             blocked_session_count DESC,
+--             2 DESC FOR XML PATH('tr'), TYPE
+--) AS NVARCHAR(MAX))+N'</table>';
+--                 DECLARE @subject VARCHAR(228)= 'Heavy Blocking ON  '+CONVERT(VARCHAR(128), @@SERVERNAME);
+--                 EXEC msdb.dbo.sp_send_dbmail
+--                      @recipients = @emailDL,
+--                      @profile_name = @emailProfile,
+--                      @subject = @subject,
+--                      @body = @tableHTML,
+--                      @body_format = 'HTML';
+--             END;
+--     END;
+--GO
+
+
 
