@@ -1,0 +1,23 @@
+USE [master];
+GO
+DECLARE @dbname SYSNAME= 'DBATasks';
+DECLARE @sql NVARCHAR(MAX);
+SET @sql = 'ALTER DATABASE ['+@dbname+'] SET QUERY_STORE = ON
+ALTER DATABASE ['+@dbname+'] SET QUERY_STORE (OPERATION_MODE = READ_WRITE, INTERVAL_LENGTH_MINUTES = 15, MAX_STORAGE_SIZE_MB = 512,   CLEANUP_POLICY = (STALE_QUERY_THRESHOLD_DAYS = 60))
+ALTER DATABASE [' + @dbname + '] SET QUERY_STORE CLEAR';
+EXEC sp_executesql
+     @sql;
+
+PRINT 'Query Store is now enabled for database - ' + @dbname
+GO
+
+--Rollback
+--USE [master];
+--GO
+--DECLARE @dbname SYSNAME= 'DBATasks';
+--DECLARE @sql NVARCHAR(MAX);
+--SET @sql = 'ALTER DATABASE [' + @dbname + '] SET QUERY_STORE = OFF;'
+--EXEC sp_executesql
+--     @sql;
+--PRINT 'Query Store is now disabled for database - ' + @dbname
+--GO
