@@ -252,3 +252,94 @@ PIVOT (SUM(BCKSTAT.AvgSizeMB)
       ) AS PVT 
 ' 
 GO
+
+								   
+---Below query will give details in presentable format.								   
+WITH CTE
+     AS (
+     SELECT PVT.DatabaseName,
+            PVT.FileID,
+            PVT.[0],
+            PVT.[-1],
+            PVT.[-2],
+            PVT.[-3],
+            PVT.[-4],
+            PVT.[-5],
+            PVT.[-6],
+            PVT.[-7],
+            PVT.[-8],
+            PVT.[-9],
+            PVT.[-10],
+            PVT.[-11],
+            PVT.[-12]
+     FROM
+     (
+         SELECT DGD.DBNAME AS DatabaseName,
+                DGD.FileID,
+                DATEDIFF(mm, GETDATE(), DGD.SnapDate) AS MonthsAgo,
+                CONVERT(NUMERIC(10, 1), AVG(DGD.UsedMB)) AS AvgSizeMB
+         FROM [DBATasks].[dbo].[tblDBGrowthDetail] AS DGD
+         WHERE NOT DGD.DBNAME IN('master', 'msdb', 'model', 'tempdb')
+         AND DGD.FileGroupName NOT LIKE 'LogFile'
+         AND DGD.SnapDate BETWEEN DATEADD(yy, -1, GETDATE()) AND GETDATE()
+         GROUP BY DGD.DBNAME,
+                  DGD.FileID,
+                  DATEDIFF(mm, GETDATE(), DGD.SnapDate)
+     ) AS BCKSTAT PIVOT(SUM(BCKSTAT.AvgSizeMB) FOR BCKSTAT.MonthsAgo IN([0],
+                                                                        [-1],
+                                                                        [-2],
+                                                                        [-3],
+                                                                        [-4],
+                                                                        [-5],
+                                                                        [-6],
+                                                                        [-7],
+                                                                        [-8],
+                                                                        [-9],
+                                                                        [-10],
+                                                                        [-11],
+                                                                        [-12])) AS PVT)
+ , CTE2
+ AS(    SELECT C.DatabaseName,
+            V.volume_mount_point Drive,
+            V.logical_volume_name DriveLabel,
+            V.file_system_type FileSystemType,
+            CAST(CAST(total_bytes / 1048576 AS DECIMAL(18, 2)) AS VARCHAR(20)) AS TotalDiskSpaceMB,
+            CAST(CAST(available_bytes / 1048576 AS DECIMAL(18, 2)) AS VARCHAR(20)) AvailableDiskSpaceMB,
+            (C.[0] - ISNULL(C.[-12], ISNULL(C.[-11], ISNULL(C.[-10], ISNULL(C.[-9], ISNULL(C.[-8], ISNULL(C.[-7], ISNULL(C.[-6], ISNULL(C.[-5], ISNULL(C.[-4], ISNULL(C.[-3], ISNULL(C.[-2], ISNULL(C.[-1], 0))))))))))))) LastXMonthGrowth,
+		  CASE 
+			 WHEN C.[-12] IS NOT NULL THEN  '12'
+			 WHEN C.[-11] IS NOT NULL THEN  '11'
+			 WHEN C.[-10] IS NOT NULL THEN  '10'
+			 WHEN C.[-9] IS NOT NULL THEN  '9'
+			 WHEN C.[-8] IS NOT NULL THEN  '8'
+			 WHEN C.[-7] IS NOT NULL THEN  '7'
+			 WHEN C.[-6] IS NOT NULL THEN  '6'
+			 WHEN C.[-5] IS NOT NULL THEN  '5'
+			 WHEN C.[-4] IS NOT NULL THEN  '4'
+			 WHEN C.[-3] IS NOT NULL THEN  '3'
+			 WHEN C.[-2] IS NOT NULL THEN  '2'
+			 WHEN C.[-1] IS NOT NULL THEN  '1'
+		  END XMonthData,
+            C.[0],
+            C.[-1],
+            C.[-2],
+            C.[-3],
+            C.[-4],
+            C.[-5],
+            C.[-6],
+            C.[-7],
+            C.[-8],
+            C.[-9],
+            C.[-10],
+            C.[-11],
+            C.[-12]
+     FROM CTE C
+          CROSS APPLY sys.dm_os_volume_stats(DB_ID(C.DatabaseName), C.FileID) V)
+select * from CTE2		
+	--,cte3 as
+	--(	SELECT Drive, TotalDiskSpaceMB, AvailableDiskSpaceMB, SUM((LastXMonthGrowth/XMonthData)*12+ [0] )NextYearTotalExpectedSize FROM CTE2
+	--	GROUP BY Drive, TotalDiskSpaceMB, AvailableDiskSpaceMB)
+	--	select Drive, TotalDiskSpaceMB, 
+	--	CASE
+	--	  WHEN TotalDiskSpaceMB > NextYearTotalExpectedSize *1.20 THEN 0
+	--	  ELSE (NextYearTotalExpectedSize * 1.20) - TotalDiskSpaceMB end DiskNeeded from cte3
