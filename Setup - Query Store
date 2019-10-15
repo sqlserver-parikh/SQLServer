@@ -1,5 +1,6 @@
 USE [master];
 GO
+--https://blogs.msdn.microsoft.com/docast/2017/07/27/troubleshoot-sql-query-performance-issues-using-query-store/
 DECLARE @dbname SYSNAME= 'DBATasks';
 DECLARE @sql NVARCHAR(MAX);
 SET @sql = 'ALTER DATABASE ['+@dbname+'] SET QUERY_STORE = ON
