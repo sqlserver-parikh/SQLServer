@@ -109,6 +109,12 @@ BEGIN TRY
          N'CLUSTER',
          N'CLUSTERNAME',
          @param = @WindowsCluster OUTPUT;
+	DECLARE @WindowsRDP int;
+    EXEC master..xp_instance_regread
+         N'HKEY_LOCAL_MACHINE',
+         N'System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp',
+         N'PortNumber',
+         @param = @WindowsRDP OUTPUT;
     EXEC @Ret_Value = master..xp_instance_regread
          'HKEY_LOCAL_MACHINE',
          'HARDWARE\DESCRIPTION\System\BIOS',
@@ -258,6 +264,7 @@ BEGIN TRY
     ) MaxMemory,
 --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
            @WinName WindowsName,
+		   @WindowsRDP WindowsRDPPort,
            ISNULL(@SystemManufacturer, 'VMware, Inc.') AS SystemManufacturer,
            CASE
                WHEN @SystemManufacturer <> 'VMware, Inc.'
