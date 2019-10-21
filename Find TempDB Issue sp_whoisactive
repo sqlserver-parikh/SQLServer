@@ -19,6 +19,7 @@ WHERE 1 = 1
 	 --AND program_name LIKE '%ProgramName'
 	 --and query_plan is not null
 	 --and session_id = 55
+      --AND CONVERT(INT, RTRIM(LTRIM((REPLACE(tempdb_current, ',', ''))))) > 10000
       AND collection_time > DATEADD(MI, -12000, GETDATE())
 	 --AND collection_time > '2018-03-16 11:14:01.090'
 	 --AND collection_time < '2018-03-16 11:14:01.090'
