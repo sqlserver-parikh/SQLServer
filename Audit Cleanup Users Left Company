@@ -1,0 +1,71 @@
+SET NOCOUNT ON;
+DECLARE @name SYSNAME;
+DECLARE @SQL NVARCHAR(MAX);
+IF OBJECT_ID('tempdb..#tblValidateLogins') IS NULL
+    CREATE TABLE [dbo].[#tblValidateLogins]
+    ([SID]  [VARBINARY](85) NULL,
+     [name] [SYSNAME] NOT NULL
+    );
+INSERT INTO #tblValidateLogins
+EXEC sp_validatelogins;
+DECLARE db_cursor CURSOR
+FOR
+    SELECT name
+    FROM sys.databases
+    WHERE owner_sid IN
+    (
+        SELECT sid
+        FROM #tblValidateLogins
+    );
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @name;
+BEGIN
+    SET @SQL = 'ALTER AUTHORIZATION ON DATABASE ::['+@name+'] TO [sa];';
+    PRINT @SQL;
+    EXEC sp_executesql @SQL;
+    FETCH NEXT FROM db_cursor INTO @name;
+END;
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+DECLARE agentjob_cursor CURSOR
+FOR
+    SELECT name
+    FROM msdb..sysjobs
+    WHERE owner_sid IN
+    (
+        SELECT sid
+        FROM #tblValidateLogins
+    );
+OPEN agentjob_cursor;
+FETCH NEXT FROM agentjob_cursor INTO @name;
+BEGIN
+    SET @SQL = 'EXEC msdb.dbo.sp_update_job @job_name=N'''+@name+''' , 
+		@owner_login_name=N''sa''';
+    PRINT @SQL;
+    EXEC sp_executesql @SQL;
+    FETCH NEXT FROM agentjob_cursor INTO @name;
+END;
+CLOSE agentjob_cursor;
+DEALLOCATE agentjob_cursor;
+DECLARE login_cursor CURSOR
+FOR
+    SELECT name
+    FROM #tblValidateLogins;
+OPEN login_cursor;
+FETCH NEXT FROM login_cursor INTO @name;
+WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @SQL = 'EXEC sp_MSforeachdb
+             ''USE [?];  IF EXISTS (SELECT * FROM [?].sys.database_principals
+WHERE name LIKE '''''+@name+''''') DROP USER '+QUOTENAME(@name)+';''';
+        EXEC sp_executesql @SQL;
+        PRINT @sql;
+        SET @SQL = 'DROP LOGIN '+QUOTENAME(@name);
+        EXEC sp_executesql @sql;
+        PRINT @sql;
+        FETCH NEXT FROM login_cursor INTO @name;
+    END;
+CLOSE login_cursor;
+DEALLOCATE login_cursor;
+GO
+DROP TABLE #tblValidateLogins;
