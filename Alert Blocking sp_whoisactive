@@ -215,8 +215,8 @@ GO
 --      --AND database_name LIKE 'DBName'
 --	 --AND CAST(sql_text AS VARCHAR(MAX)) LIKE '%QueryText%'
 --      --AND CAST(sql_command AS VARCHAR(MAX)) LIKE '%QueryText%'
---          AND (blocking_session_id IS NOT NULL
---               OR blocked_session_count > 0)
+--        --  AND (blocking_session_id IS NOT NULL
+--          --     OR blocked_session_count > 0)
 --          AND blocked_session_count > @blocked_session_count
 --	 --AND host_name LIKE 'ServerName'
 --	 --AND percent_complete > 20
