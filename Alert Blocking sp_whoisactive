@@ -198,7 +198,7 @@ GO
 
 --ALTER PROCEDURE [dbo].[spBlockingAlert]
 --(@timecheckmin          INT          = 15,
--- @emailDL               VARCHAR(MAX) = 'nimit.parikh@broadridge.com',
+-- @emailDL               VARCHAR(MAX) = 'nparikh@company.com',
 -- @blocked_session_count INT          = 10
 --)
 --AS
