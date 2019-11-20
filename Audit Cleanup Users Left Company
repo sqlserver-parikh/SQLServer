@@ -116,7 +116,7 @@ CLOSE login_cursor;
 DEALLOCATE login_cursor;
 GO
 DROP TABLE #tblValidateLogins;', 
-		@database_name=N'DBATasks', 
+		@database_name=N'master', 
 		@flags=0
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 IF NOT EXISTS (SELECT * FROM msdb.dbo.sysjobsteps WHERE job_id = @jobId and step_id = 2)
