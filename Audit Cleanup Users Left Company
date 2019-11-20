@@ -1,7 +1,54 @@
-SET NOCOUNT ON;
+
+USE [msdb]
+GO
+
+IF  EXISTS (SELECT job_id FROM msdb.dbo.sysjobs_view WHERE name = N'DBA - Cleanup Logins - Fix Orphan Users')
+EXEC msdb.dbo.sp_delete_job @job_name=N'DBA - Cleanup Logins - Fix Orphan Users', @delete_unused_schedule=1
+GO
+
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'Database Maintenance' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'Database Maintenance'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+select @jobId = job_id from msdb.dbo.sysjobs where (name = N'DBA - Cleanup Logins - Fix Orphan Users')
+if (@jobId is NULL)
+BEGIN
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA - Cleanup Logins - Fix Orphan Users', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=0, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'No description available.', 
+		@category_name=N'Database Maintenance', 
+		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+/****** Object:  Step [Cleanup Logins]    Script Date: 11/14/2019 2:20:00 PM ******/
+IF NOT EXISTS (SELECT * FROM msdb.dbo.sysjobsteps WHERE job_id = @jobId and step_id = 1)
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Cleanup Logins', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=3, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'SET NOCOUNT ON;
 DECLARE @name SYSNAME;
 DECLARE @SQL NVARCHAR(MAX);
-IF OBJECT_ID('tempdb..#tblValidateLogins') IS NULL
+IF OBJECT_ID(''tempdb..#tblValidateLogins'') IS NULL
     CREATE TABLE [dbo].[#tblValidateLogins]
     ([SID]  [VARBINARY](85) NULL,
      [name] [SYSNAME] NOT NULL
@@ -20,7 +67,7 @@ FOR
 OPEN db_cursor;
 FETCH NEXT FROM db_cursor INTO @name;
 BEGIN
-    SET @SQL = 'ALTER AUTHORIZATION ON DATABASE ::['+@name+'] TO [sa];';
+    SET @SQL = ''ALTER AUTHORIZATION ON DATABASE ::[''+@name+''] TO [sa];'';
     PRINT @SQL;
     EXEC sp_executesql @SQL;
     FETCH NEXT FROM db_cursor INTO @name;
@@ -39,8 +86,8 @@ FOR
 OPEN agentjob_cursor;
 FETCH NEXT FROM agentjob_cursor INTO @name;
 BEGIN
-    SET @SQL = 'EXEC msdb.dbo.sp_update_job @job_name=N'''+@name+''' , 
-		@owner_login_name=N''sa''';
+    SET @SQL = ''EXEC msdb.dbo.sp_update_job @job_name=N''''''+@name+'''''' , 
+		@owner_login_name=N''''sa'''''';
     PRINT @SQL;
     EXEC sp_executesql @SQL;
     FETCH NEXT FROM agentjob_cursor INTO @name;
@@ -55,12 +102,12 @@ OPEN login_cursor;
 FETCH NEXT FROM login_cursor INTO @name;
 WHILE @@FETCH_STATUS = 0
     BEGIN
-        SET @SQL = 'EXEC sp_MSforeachdb
-             ''USE [?];  IF EXISTS (SELECT * FROM [?].sys.database_principals
-WHERE name LIKE '''''+@name+''''') DROP USER '+QUOTENAME(@name)+';''';
+        SET @SQL = ''EXEC sp_MSforeachdb
+             ''''USE [?];  IF EXISTS (SELECT * FROM [?].sys.database_principals
+WHERE name LIKE ''''''''''+@name+'''''''''') DROP USER ''+QUOTENAME(@name)+'';'''''';
         EXEC sp_executesql @SQL;
         PRINT @sql;
-        SET @SQL = 'DROP LOGIN '+QUOTENAME(@name);
+        SET @SQL = ''DROP LOGIN ''+QUOTENAME(@name);
         EXEC sp_executesql @sql;
         PRINT @sql;
         FETCH NEXT FROM login_cursor INTO @name;
@@ -68,4 +115,102 @@ WHERE name LIKE '''''+@name+''''') DROP USER '+QUOTENAME(@name)+';''';
 CLOSE login_cursor;
 DEALLOCATE login_cursor;
 GO
-DROP TABLE #tblValidateLogins;
+DROP TABLE #tblValidateLogins;', 
+		@database_name=N'DBATasks', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+IF NOT EXISTS (SELECT * FROM msdb.dbo.sysjobsteps WHERE job_id = @jobId and step_id = 2)
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Fix Orphan Users', 
+		@step_id=2, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'--Below script will loop through all database and generate script to map user and drop user.
+
+SET NOCOUNT ON;
+DECLARE @userid VARCHAR(255);
+DECLARE @dbname VARCHAR(128);
+DECLARE @script NVARCHAR(MAX);
+CREATE TABLE #OrphanUsers
+(DBName   VARCHAR(128),
+ UserName VARCHAR(128),
+ UserSID  NVARCHAR(255)
+);
+INSERT INTO #OrphanUsers
+EXEC sp_MSforeachdb
+     ''select "?" DBName,name, sid from [?]..sysusers
+            where issqluser = 1
+            and   (sid is not null and sid <> 0x0)
+            and   (len(sid) <= 16)
+            and   suser_sname(sid) is null
+            order by name'';
+DECLARE FixUser CURSOR
+FOR SELECT UserName,
+           DBName
+    FROM #OrphanUsers;
+OPEN FixUser;
+FETCH NEXT FROM FixUser INTO @userid, @DBName;
+WHILE @@FETCH_STATUS = 0
+    IF EXISTS
+              (
+              SELECT 1
+              FROM sys.server_principals
+                     WHERE name = @userid
+              )
+        BEGIN
+            SET @script = ''USE ''+QUOTENAME(@dbname)+'';''+CHAR(10)+''EXECUTE sp_change_users_login ''''update_one'''', ''''''+@userid+'''''', ''''''+@userid+'''''''';
+            EXEC sp_executesql
+                 @script;
+            PRINT @script;
+            FETCH NEXT FROM FixUser INTO @userid, @DBName;
+        END;
+    ELSE
+        BEGIN
+            IF EXISTS
+                      (
+                      SELECT name
+                      FROM sys.schemas
+                             WHERE principal_id = USER_ID(@userid)
+                      )
+                BEGIN
+                    SET @script = ''USE ''+QUOTENAME(@dbname)+'';''+CHAR(10)+''DROP USER ''+QUOTENAME(@userid)+'';''+CHAR(10);
+                    EXEC sp_executesql @script;
+                    PRINT @script;
+                END;
+            FETCH NEXT FROM FixUser INTO @userid, @DBName;
+        END;
+CLOSE FixUser;
+DEALLOCATE FixUser;
+DROP TABLE #OrphanUsers;', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Daily 11PM', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=1, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20191114, 
+		@active_end_date=99991231, 
+		@active_start_time=230000, 
+		@active_end_time=235959
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+GO
+
