@@ -137,6 +137,9 @@ SELECT
   a.ExpirationChecked
 FROM #tmpServerRoles a
 ORDER BY type_desc
+CLOSE Roles;
+DEALLOCATE Roles;
+
 END CATCH
 DROP TABLE #tmpGroupDetail
 DROP TABLE #tmpServerRoles
