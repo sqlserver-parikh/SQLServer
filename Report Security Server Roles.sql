@@ -114,6 +114,7 @@ SELECT
 FROM #tmpServerRoles a
 LEFT JOIN #tmpGroupDetail b
   ON a.LoginName = b.Permission_Path
+ORDER BY type_desc
 CLOSE Roles;
 DEALLOCATE Roles;
 END TRY 
