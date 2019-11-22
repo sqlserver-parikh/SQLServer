@@ -76,7 +76,7 @@ WITH cte
 -----------------------------------------------------------------------------
 -----------------------------------------------------------------------------
 
-                                         
+ 
 ;
 WITH cte
 AS (SELECT
@@ -149,6 +149,7 @@ FROM cte a
 WHERE type_desc NOT IN ('SERVER_ROLE', 'CERTIFICATE_MAPPED_LOGIN')
 AND LoginName NOT LIKE '##%'
 AND LoginName NOT LIKE 'NT %';
+BEGIN TRY 
 DECLARE @lname varchar(256)
 CREATE TABLE #tmpGroupDetail (
   AccountName varchar(256),
@@ -193,5 +194,10 @@ LEFT JOIN #tmpGroupDetail b
   ON a.LoginName = b.Permission_Path
 CLOSE Roles;
 DEALLOCATE Roles;
+END TRY 
+BEGIN CATCH 
+     SELECT * FROM #tmpServerRoles
+END CATCH
 DROP TABLE #tmpGroupDetail
 DROP TABLE #tmpServerRoles
+
