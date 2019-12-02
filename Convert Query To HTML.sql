@@ -1,8 +1,15 @@
 --https://stackoverflow.com/questions/7070053/convert-a-sql-query-result-table-to-an-html-table-for-email
-USE [master]
+USE [DBATasks]
 GO
+
 IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spQueryToHtmlTable]') AND type in (N'P', N'PC'))
 DROP PROCEDURE [dbo].[spQueryToHtmlTable]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
 GO
 
 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spQueryToHtmlTable]') AND type in (N'P', N'PC'))
@@ -11,12 +18,11 @@ EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[spQueryToHtmlTable
 END
 GO
 
--- Description: Turns a query into a formatted HTML table. Useful for emails. 
--- Any ORDER BY clause needs to be passed in the separate ORDER BY parameter.
--- =============================================
 ALTER PROCEDURE [dbo].[spQueryToHtmlTable]
 (@query   NVARCHAR(MAX), --A query to turn into HTML format. It should not include an ORDER BY clause.
  @orderBy NVARCHAR(MAX) = NULL, --An optional ORDER BY clause. It should contain the words 'ORDER BY'.
+ @OperatorName nvarchar(128) = 'SQLDBATeam',
+ @Subject nvarchar(128) = 'HTML Report',
  @html    NVARCHAR(MAX) = NULL OUTPUT --The HTML output of the procedure.
 )
 AS
@@ -56,18 +62,17 @@ AS
                   N'@html nvarchar(MAX) OUTPUT',
                   @html = @html OUTPUT;
          END;
-/*
-
-DECLARE @html nvarchar(MAX);
-EXEC spQueryToHtmlTable @html = @html OUTPUT,  @query = N'SELECT name, database_id, create_date FROM sys.databases', @orderBy = N'ORDER BY name';
-
+    
+declare @email_to nvarchar(max)
+ SELECT @email_to = email_address
+     FROM msdb..sysoperators
+     WHERE NAME = @OperatorName;
+SET @Subject = @Subject + ' - ' + CONVERT(nvarchar(128),@@SERVERNAME)
 EXEC msdb.dbo.sp_send_dbmail
-    @recipients = 'DBATeam@company.com;',
-    @subject = 'Report Name',
+    @recipients = @email_to,
+    @subject = @Subject,
     @body = @html,
     @body_format = 'HTML',
     @query_no_truncate = 1,
     @attach_query_result_as_file = 0;
-
-*/
 GO
