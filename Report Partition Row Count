@@ -1,3 +1,4 @@
+--https://www.mssqltips.com/sqlservertip/5296/implementation-of-sliding-window-partitioning-in-sql-server-to-purge-data/
 SELECT OBJECT_SCHEMA_NAME(pstats.object_id) AS SchemaName, 
        OBJECT_NAME(pstats.object_id) AS TableName, 
        'ALTER TABLE ' + OBJECT_SCHEMA_NAME(pstats.object_id) + '.' + OBJECT_NAME(pstats.object_id) + ' REBUILD PARTITION = ' + CONVERT(VARCHAR(5), pstats.partition_number) + ' WITH(DATA_COMPRESSION = PAGE )' CompressionScript, 
