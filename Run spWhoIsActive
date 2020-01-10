@@ -30,13 +30,13 @@
 	--Get associated query plans for running tasks, if available
 	--If @get_plans = 1, gets the plan based on the request''s statement offset
 	--If @get_plans = 2, gets the entire plan based on the request''s plan_handle
-	@get_plans = 0,
+	@get_plans = 2,
 
 	--Get the associated outer ad hoc query or stored procedure call, if available
-	@get_outer_command = 0,
+	@get_outer_command = 1,
 
 	--Enables pulling transaction log write info and transaction duration
-	@get_transaction_info = 0,
+	@get_transaction_info = 1,
 
 	--Get information on active tasks, based on three interest levels
 	--Level 0 does not pull any task-related information
@@ -83,7 +83,7 @@
 	--Each element in this list must be one of the valid output column names. Names must be
 	--delimited by square brackets. White space, formatting, and additional characters are
 	--allowed, as long as the list contains exact matches of delimited valid column names.
-	@output_column_list = '[dd%][session_id][sql_text][sql_command][login_name][percent_complete][host_name][block%][tran_log%][cpu%][temp%][reads%][writes%][context%][physical%][query_plan][locks][%]',
+	@output_column_list = '[dd%][session_id][sql_text][sql_command][login_name][percent_complete][block%][tran_log%][cpu%][temp%][host_name][reads%][writes%][context%][physical%][query_plan][locks][%]',
 
 	--Column(s) by which to sort output, optionally with sort directions. 
 		--Valid column choices:
