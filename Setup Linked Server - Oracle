@@ -1,5 +1,9 @@
 --http://sql-articles.com/articles/dba/creating-oracle-linked-server-in-sql-server/
+Pre-Steps
+1. Install Oracle Driver
+2. Reboot Windows machine
 
+Setup: 
 1. RDP to SQL Server where you want to setup linked server
 2. Open Command Prompt Windows + R + CMD
 3. Type tnsping ORAServer
