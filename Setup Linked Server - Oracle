@@ -1,0 +1,21 @@
+--http://sql-articles.com/articles/dba/creating-oracle-linked-server-in-sql-server/
+
+1. RDP to SQL Server where you want to setup linked server
+2. Open Command Prompt Windows + R + CMD
+3. Type tnsping ORAServer
+    --This will show you path of parameter file where we need to create Ora File.
+4. Go to location where sqlnet.ora file is and create new file with name tnsnames.ora
+5. Populate tnsnames.ora file with oracle connection string
+6. On Command prompt type tnsping ServiceName --Name you used in ora file for your oracle server, if its success it will come up with OK
+7. Create Linked Server on SQL Server
+
+USE [master]
+GO
+EXEC master.dbo.sp_addlinkedserver @server = N'LinkedServerName', @srvproduct=N'', @provider=N'OraOLEDB.Oracle', @datasrc=N'ServiceName'  --Service name is from Ora file
+GO
+EXEC master.dbo.sp_addlinkedsrvlogin @rmtsrvname = N'LinkedServerName', @locallogin = NULL , @useself = N'False', @rmtuser = N'OracleUserName', @rmtpassword = N'1Str0ngPas$w0rd3asy2H@ck'
+GO
+EXEC master.dbo.sp_MSset_oledb_prop N'OraOLEDB.Oracle', N'AllowInProcess', 1
+GO
+
+8. Test Linked server and you are done.
