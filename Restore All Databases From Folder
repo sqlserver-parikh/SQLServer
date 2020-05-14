@@ -1,6 +1,10 @@
 --https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
 --Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
 --Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
+
+--https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
+--Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
+--Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
 DROP PROC IF EXISTS sp_RestoreFromAllFilesInDirectory
 GO
 
@@ -147,12 +151,13 @@ SET @sql = 'RESTORE DATABASE [' + @DbName + '] ' + @crlf
 + ' WITH REPLACE' + @crlf 
 + ',STATS = 5 ' + @crlf 
 + ',MOVE '
-
+--select * from #dbfiles
 --Get information about database files from backup device into temp table
 TRUNCATE TABLE #dbfiles
 INSERT #dbfiles
 EXEC('RESTORE FILELISTONLY FROM DISK = ''' + @dirfile + '''')
-
+--select * from #bdev
+--select * from #files
 OPEN dbfiles
 
 --For each database file that the database uses
@@ -168,6 +173,9 @@ BEGIN
 	END
 	ELSE IF @type = 'L'
 	  SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DestDirLogFiles + @LogicalName + '.ldf''' + @crlf
+	else if @type = 'S'
+		  SET @sql =  @sql + ', MOVE ' + '''' + @LogicalName + ''' TO ''' + @DestDirDbFiles + @LogicalName + '''' + @crlf
+
 END
 
 SET @sql = @sql + @crlf
