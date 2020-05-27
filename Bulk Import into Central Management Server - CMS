@@ -1,0 +1,32 @@
+--Step 1 -- Create excel spreadsheet with all your server names
+--Step 2 -- Import excel spreadsheet in SQL Server msdb database, name table ServerNames and make sure that your columnname is ServerName.
+--Step 3 -- Run below script to import all servers into group named Custom.
+
+DECLARE @groupid INT;
+INSERT INTO [msdb].[dbo].[sysmanagement_shared_server_groups_internal]
+(name,
+ description,
+ server_type,
+ parent_id,
+ is_system_object
+)
+       SELECT 'Custom',
+              'BulkInsert',
+              0,
+              1,
+              0;
+SELECT @groupid = server_group_id
+FROM [msdb].[dbo].[sysmanagement_shared_server_groups_internal]
+WHERE name = 'Custom'
+      AND description = 'BulkInsert';
+INSERT INTO [dbo].[sysmanagement_shared_registered_servers_internal]
+(server_group_id,
+ name,
+ server_name,
+ description,
+ server_type
+)
+       SELECT @groupid,ServerName, ServerName,'',0 from ServerNames
+	  
+    
+--Step 4 -- Drop newly created ServerNames table from msdb database.
