@@ -3,7 +3,7 @@ IF OBJECT_ID(N'tempdb..#ServerLevelRoles') IS NOT NULL
     DROP TABLE #ServerLevelRoles;
 CREATE TABLE #ServerLevelRoles(ScriptToRun VARCHAR(1000));
 INSERT INTO #ServerLevelRoles
-       SELECT ' exec sp_addsrvrolemember ''' + m.name + ''',' + p.name + ';'
+       SELECT 'EXEC sp_addsrvrolemember ''' + m.name + ''',' + p.name + ';'
        FROM sys.server_role_members rm
             JOIN sys.server_principals p ON rm.role_principal_id = p.principal_id
             JOIN sys.server_principals m ON rm.member_principal_id = m.principal_id
@@ -11,8 +11,8 @@ INSERT INTO #ServerLevelRoles
 INSERT INTO #ServerLevelRoles
        SELECT CASE
                   WHEN sp.state_desc = 'GRANT_WITH_GRANT_OPTION'
-                  THEN SUBSTRING(state_desc, 0, 6) + ' ' + permission_name + ' to [' + SPs.name + '] with grant option ;'
-                  ELSE state_desc + ' ' + permission_name + ' to [' + SPs.name + '] ;'
+                  THEN SUBSTRING(state_desc, 0, 6) + ' ' + permission_name + ' to ' + QUOTENAME(SPs.name) + 'WITH GRANT OPTION;'
+                  ELSE state_desc + ' ' + permission_name + ' to ' + QUOTENAME(SPs.name) + ';'
               END
        FROM sys.server_permissions SP
             JOIN sys.server_principals SPs ON sp.grantee_principal_id = SPs.principal_id
