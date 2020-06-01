@@ -1,5 +1,5 @@
 --First verify database name having log reuse wait description as Replication
-
+--https://blog.sqlauthority.com/2016/04/07/sql-server-huge-transaction-log-snapshot-replication/
 SELECT log_reuse_wait_desc,
        *
 FROM sys.databases
