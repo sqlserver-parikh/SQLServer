@@ -321,7 +321,7 @@ get-wmiobject win32_volume
                            END VLFInfo, 
                            b.size / 128.0 AS size, 
                            CAST(b.size / 128.0 - (d.spaceused / 128.0) AS DECIMAL(19, 2)) AS spacefree, 
-                           CONVERT(DECIMAL(19, 2), (100 * CAST(b.size * 8 / 1024.0 - (d.spaceused / 128.0) AS DECIMAL(19, 2))) / (b.size * 8 / 1024.0)) AS DBPercentFree, 
+                           CONVERT(DECIMAL(19, 2), (100 * CAST(cast(b.size as bigint) * 8 / 1024.0 - (d.spaceused / 128.0) AS DECIMAL(19, 2))) / (cast(b.size as bigint) * 8 / 1024.0)) AS DBPercentFree, 
                            '-' AS DrivePercentFree,
                            CASE
                                WHEN b.is_percent_growth = 0
