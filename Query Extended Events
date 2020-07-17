@@ -7,6 +7,9 @@ WHERE st.target_data LIKE '%:\%.xel%' --and s.name like 'Performance_Monitor' --
 SELECT n.value('(@name)[1]', 'varchar(50)') AS event_name, 
        n.value('(@package)[1]', 'varchar(50)') AS package_name, 
        n.value('(@timestamp)[1]', 'datetime2') AS [utc_timestamp], 
+       n.value('(data[@name="object_id"]/value)[1]', 'bigint') AS object_id, 
+       n.value('(data[@name="object_name"]/value)[1]', 'nvarchar(max)') AS object_name, 
+       n.value('(data[@name="object_type"]/value)[1]', 'nvarchar(max)') AS object_type, 
        n.value('(data[@name="duration"]/value)[1]', 'bigint') AS duration, 
        n.value('(data[@name="cpu_time"]/value)[1]', 'bigint') AS cpu, 
        n.value('(data[@name="physical_reads"]/value)[1]', 'bigint') AS physical_reads, 
@@ -30,7 +33,7 @@ FROM
 ) ed
 CROSS APPLY ed.event_data.nodes('event') AS q(n)
 WHERE  1= 1
-and n.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE,-5000,GETUTCDATE())
+and n.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE,-5,GETUTCDATE())
 --and n.value('(data[@name="statement"]/value)[1]', 'nvarchar(max)') like '%usp_name%'
-and n.value('(data[@name="duration"]/value)[1]', 'bigint') > 100000 * 1 --5 second
+--and n.value('(data[@name="duration"]/value)[1]', 'bigint') > 100000 * 1 --5 second
 ORDER BY utc_timestamp DESC
