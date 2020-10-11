@@ -343,3 +343,58 @@ select * from CTE2
 	--	CASE
 	--	  WHEN TotalDiskSpaceMB > NextYearTotalExpectedSize *1.20 THEN 0
 	--	  ELSE (NextYearTotalExpectedSize * 1.20) - TotalDiskSpaceMB end DiskNeeded from cte3
+
+
+
+WITH cte
+     AS (SELECT DGD.DBNAME AS DatabaseName, 
+                SUM(CONVERT(NUMERIC(15, 2), (DGD.UsedMB))) AS SizeMB, 
+                SnapDate, 
+                DATENAME(month, snapdate) + ' ' + CONVERT(VARCHAR(4), YEAR(snapdate)) Month, 
+                RANK() OVER(PARTITION BY MONTH(snapdate), 
+                                         dbname
+                ORDER BY snapdate DESC) AS Rank
+         FROM [msdb].[dbo].[tblDBGrowthDetail] AS DGD
+         GROUP BY DBNAME, 
+                  SnapDate)
+     SELECT *
+     INTO #temp
+     FROM cte
+     WHERE rank = 1
+     ORDER BY SnapDate DESC;
+SELECT DISTINCT 
+       SnapDate
+INTO #months
+FROM #temp
+ORDER BY SnapDate DESC;
+DECLARE @columns NVARCHAR(MAX)= '', @sql NVARCHAR(MAX)= '';
+
+-- select the category names
+SELECT @columns+=QUOTENAME(CONVERT(VARCHAR(8), SnapDate, 112)) + ','
+FROM #months
+ORDER BY SnapDate DESC;
+-- remove the last comma
+SET @columns = LEFT(@columns, LEN(@columns) - 1);
+
+-- construct dynamic SQL
+SET @sql = '
+SELECT * FROM   
+(
+    SELECT 
+        DatabaseName, 
+        SizeMB,
+        CONVERT(VARCHAR(8),SnapDate ,112) SnapDate
+    FROM 
+        #temp
+) t 
+PIVOT(
+    sum(sizemb) 
+    FOR snapdate IN (' + @columns + ')
+) AS pivot_table;';
+
+-- execute the dynamic SQL
+EXECUTE sp_executesql 
+        @sql;
+		GO
+DROP TABLE #temp;
+DROP TABLE #months;
