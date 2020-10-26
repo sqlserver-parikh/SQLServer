@@ -344,25 +344,26 @@ select * from CTE2
 	--	  WHEN TotalDiskSpaceMB > NextYearTotalExpectedSize *1.20 THEN 0
 	--	  ELSE (NextYearTotalExpectedSize * 1.20) - TotalDiskSpaceMB end DiskNeeded from cte3
 
-
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--Last 12 month growth
 
 WITH cte
-     AS (SELECT DGD.DBNAME AS DatabaseName, 
-                SUM(CONVERT(NUMERIC(15, 2), (DGD.UsedMB))) AS SizeMB, 
-                SnapDate, 
-                DATENAME(month, snapdate) + ' ' + CONVERT(VARCHAR(4), YEAR(snapdate)) Month, 
-                RANK() OVER(PARTITION BY MONTH(snapdate), 
-                                         dbname
-                ORDER BY snapdate DESC) AS Rank
-         FROM [msdb].[dbo].[tblDBGrowthDetail] AS DGD
-         GROUP BY DBNAME, 
-                  SnapDate)
+     AS (
+     SELECT DGD.DBNAME AS DatabaseName,
+            SUM(CONVERT(NUMERIC(15, 2), (DGD.UsedMB))) AS SizeMB,
+            SnapDate,
+            DATENAME(month, snapdate)+' '+CONVERT(VARCHAR(4), YEAR(snapdate)) Month,
+            RANK() OVER(PARTITION BY MONTH(snapdate),
+                                     dbname ORDER BY snapdate DESC) AS Rank
+     FROM dbatasks.[dbo].[tblDBGrowthDetail] AS DGD
+     GROUP BY DBNAME,
+              SnapDate)
      SELECT *
      INTO #temp
      FROM cte
      WHERE rank = 1
      ORDER BY SnapDate DESC;
-SELECT DISTINCT 
+SELECT DISTINCT
        SnapDate
 INTO #months
 FROM #temp
@@ -370,11 +371,33 @@ ORDER BY SnapDate DESC;
 DECLARE @columns NVARCHAR(MAX)= '', @sql NVARCHAR(MAX)= '';
 
 -- select the category names
-SELECT @columns+=QUOTENAME(CONVERT(VARCHAR(8), SnapDate, 112)) + ','
+
+SELECT @columns+=QUOTENAME(CONVERT(VARCHAR(8), SnapDate, 112))+','
 FROM #months
 ORDER BY SnapDate DESC;
 -- remove the last comma
 SET @columns = LEFT(@columns, LEN(@columns) - 1);
+SET @sql = '
+SELECT * into ##yahoo FROM   
+(
+    SELECT 
+        DatabaseName, 
+        SizeMB,
+        CONVERT(VARCHAR(8),SnapDate ,112) SnapDate
+    FROM 
+        #temp
+) t 
+PIVOT(
+    sum(sizemb) 
+    FOR snapdate IN ('+@columns+')
+) AS pivot_table
+WHERE 1= 0;';
+
+-- execute the dynamic SQL
+
+EXECUTE sp_executesql
+        @sql;
+
 
 -- construct dynamic SQL
 SET @sql = '
@@ -389,12 +412,24 @@ SELECT * FROM
 ) t 
 PIVOT(
     sum(sizemb) 
-    FOR snapdate IN (' + @columns + ')
+    FOR snapdate IN ('+@columns+')
 ) AS pivot_table;';
 
 -- execute the dynamic SQL
-EXECUTE sp_executesql 
+INSERT INTO ##yahoo
+EXECUTE sp_executesql
         @sql;
-		GO
+DECLARE @column1 VARCHAR(10);
+DECLARE @column12 VARCHAR(10);
+SET @column1 = CONVERT(VARCHAR(8), DATEADD(DD, -1, GETDATE()), 112);
+SET @column12 = CONVERT(VARCHAR(8), EOMONTH(GETDATE(), -11), 112);
+SET @sql = 'select * , '+QUOTENAME(@column1)+' - '+QUOTENAME(@column12)+' as Last12MonthsGrowth 
+FROM ##YAHOO
+WHERE DATABASENAME NOT LIKE ''TEMPDB''';
+PRINT @sql;
+EXECUTE sp_executesql
+        @sql;
+GO
 DROP TABLE #temp;
+DROP TABLE ##yahoo;
 DROP TABLE #months;
