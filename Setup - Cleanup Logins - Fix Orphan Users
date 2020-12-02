@@ -215,3 +215,28 @@ EndSave:
 GO
 
 
+--SET NOCOUNT ON;
+--CREATE TABLE #temp
+--(dbname   SYSNAME, 
+-- username VARCHAR(128)
+--);
+--DECLARE @sql NVARCHAR(MAX)= N'';
+--SELECT @sql+=N'SELECT ''' + db.name + ''',p.name
+--  FROM ' + QUOTENAME(db.name) + '.sys.database_principals AS p
+--  WHERE [type] IN (N''U'', N''G'')
+--  AND NOT EXISTS
+--  (
+--    SELECT 1 FROM sys.server_principals AS sp
+--    WHERE sp.sid = p.sid
+--  );'
+--FROM sys.databases AS db
+--WHERE [state] = 0;
+--INSERT INTO #temp
+--EXEC sp_executesql 
+--     @sql;
+--SELECT 'USE ' + DBNAME + '; ' + 'DROP SCHEMA ' + QUOTENAME(USERNAME) + CHAR(10) + CHAR(13) + 'GO'
+--FROM #temp
+--UNION ALL
+--SELECT 'USE ' + DBNAME + '; ' + 'DROP USER ' + QUOTENAME(USERNAME) + CHAR(10) + CHAR(13) + 'go'
+--FROM #temp;
+--DROP TABLE #temp
