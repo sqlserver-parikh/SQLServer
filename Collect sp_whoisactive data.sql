@@ -113,7 +113,19 @@ WHILE @numberOfRuns > 0
 GO
 
 DELETE FROM tblWhoIsActive
-WHERE collection_time < DATEADD(dd, -2, GETDATE());',
+WHERE collection_time < DATEADD(HH, -24, GETDATE())
+      AND CONVERT(INT, RTRIM(LTRIM((REPLACE(tempdb_current, '','', ''''))))) < 400000
+      AND (blocking_session_id IS NULL
+           AND blocked_session_count = 0);
+GO
+DELETE FROM tblWhoIsActive
+WHERE collection_time < DATEADD(DD, -15, GETDATE())
+      AND CONVERT(INT, RTRIM(LTRIM((REPLACE(tempdb_current, '','', ''''))))) < 400000
+      AND (blocking_session_id IS NOT NULL
+           AND blocked_session_count = 0);
+GO
+DELETE FROM tblWhoIsActive
+WHERE collection_time < DATEADD(DD, -30, GETDATE());', 
      @database_name = N'msdb',
      @flags = 0;
 IF(@@ERROR <> 0
