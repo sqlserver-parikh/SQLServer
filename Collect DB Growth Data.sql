@@ -251,11 +251,11 @@ PIVOT (SUM(BCKSTAT.AvgSizeMB)
        FOR BCKSTAT.MonthsAgo IN ([0], [-1], [-2], [-3], [-4], [-5], [-6], [-7], [-8], [-9], [-10], [-11], [-12]) 
       ) AS PVT 
 ' 
-GO
 
+/*
 								   
 ---Below query will give details in presentable format.								   
-WITH CTE
+;WITH CTE
      AS (
      SELECT PVT.DatabaseName,
             PVT.FileID,
@@ -433,3 +433,4 @@ GO
 DROP TABLE #temp;
 DROP TABLE ##yahoo;
 DROP TABLE #months;
+*/
