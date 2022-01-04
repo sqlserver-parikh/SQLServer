@@ -307,3 +307,18 @@ end
 CLOSE multirestore 
 DEALLOCATE multirestore
 drop table #multifilerestore
+
+
+/*
+--Copy all backups from multiple folders to one folder.
+Set-Location U:\Backups\SmallDB
+Get-ChildItem -Path "U:\Backups\SmallDB\*.bak" -Recurse | Move-Item -Destination "U:\Backups\SmallDB\"
+
+$tdc="U:\Backups\SmallDB"
+do {
+  $dirs = gci $tdc -directory -recurse | Where { (gci $_.fullName).count -eq 0 } | select -expandproperty FullName
+  $dirs | Foreach-Object { Remove-Item $_ }
+} while ($dirs.count -gt 0)
+
+--Robocopy "\\mycompany\SQL-BACKUPS\" U:\Backups\SmallDB *.bak /MAX:10000000000 /MAXAGE:7 /S /XF "*master*" "*msdb*" "*zDBA*" "*model*" "*pubs*" "*ag_test*" "*view_test*"
+*/
