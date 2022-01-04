@@ -231,22 +231,22 @@ BEGIN
 	BEGIN
 		if @count in ( 1,5,9,13,17,21,25,29,33)
 		begin 
-	  SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DestDirDbFiles + @LogicalName + '.mdf ''' 
+	  SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DestDirDbFiles + @LogicalName + '.mdf '''  + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
 	  else if @count in (2, 6,10,14,18,22,26,30,34)
 	  begin
-	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest2DirDbFiles + @LogicalName + '.mdf '''
+	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest2DirDbFiles + @LogicalName + '.mdf ''' + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
 	  else  if ( @count in ( 3,7,11,15,19,23,27,31,35))
 	  begin
-	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest3DirDbFiles + @LogicalName + '.mdf ''' 
+	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest3DirDbFiles + @LogicalName + '.mdf '''  + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
 	  else  if ( @count in ( 4,8,12,16,20,24,28,32) OR @count >=36)
 	  begin
-	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest4DirDbFiles + @LogicalName + '.mdf '''
+	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest4DirDbFiles + @LogicalName + '.mdf ''' + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
 END
@@ -307,4 +307,3 @@ end
 CLOSE multirestore 
 DEALLOCATE multirestore
 drop table tempdb..multifilerestore
-
