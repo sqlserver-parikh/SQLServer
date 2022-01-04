@@ -151,7 +151,7 @@ LogicalName nvarchar(128)
 ,SnapshotUrl nvarchar(360)
 )
 
-CREATE TABLE [dbo].[multifilerestore](
+CREATE TABLE tempdb.[dbo].[multifilerestore](
 	[MediaName] [nvarchar](128) NULL,
 	[MediaSetId] [uniqueidentifier] NULL,
 	[FamilyCount] [int] NULL,
