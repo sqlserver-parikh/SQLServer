@@ -16,7 +16,7 @@ GO
 
 
 
-ALTER PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory]
+alter PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory]
 @SourceDirBackupFiles nvarchar(200), @DestDirDbFiles nvarchar(200),@Dest2DirDbFiles nvarchar(200) = NULL, @Dest3DirDbFiles nvarchar(200) = NULL, @Dest4DirDbFiles nvarchar(200) = NULL, @DestDirLogFiles nvarchar(200) 
 AS
 --Originally written by Tibor Karaszi 2004. Use at own risk. 
@@ -151,7 +151,7 @@ LogicalName nvarchar(128)
 ,SnapshotUrl nvarchar(360)
 )
 
-CREATE TABLE tempdb.[dbo].[multifilerestore](
+CREATE TABLE [#multifilerestore](
 	[MediaName] [nvarchar](128) NULL,
 	[MediaSetId] [uniqueidentifier] NULL,
 	[FamilyCount] [int] NULL,
@@ -229,22 +229,22 @@ BEGIN
 		BREAK
 	IF @type = 'D'
 	BEGIN
-		if @count in ( 1,5,9,13,17,21,25,29,33)
+		if @count in ( 1,8,9,13,17,21,25,29,33)
 		begin 
 	  SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DestDirDbFiles + @LogicalName + '.mdf '''  + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
-	  else if @count in (2, 6,10,14,18,22,26,30,34)
+	  else if @count in (2, 7,10,14,18,22,26,30,34)
 	  begin
 	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest2DirDbFiles + @LogicalName + '.mdf ''' + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
-	  else  if ( @count in ( 3,7,11,15,19,23,27,31,35))
+	  else  if ( @count in ( 3,6,11,15,19,23,27,31,35))
 	  begin
 	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest3DirDbFiles + @LogicalName + '.mdf '''  + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
-	  else  if ( @count in ( 4,8,12,16,20,24,28,32) OR @count >=36)
+	  else  if ( @count in ( 4,5,12,16,20,24,28,32) OR @count >=36)
 	  begin
 	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest4DirDbFiles + @LogicalName + '.mdf ''' + @crlf
 	  SET @sql = @sql + ' ,MOVE '
@@ -268,7 +268,7 @@ BEGIN
 END
 ELSE 
 begin
-		insert into  [tempdb].[dbo].[multifilerestore]
+		insert into [#multifilerestore]
 		select * , @dirfile BackupLocation , @sql Scripts,getdate() from #restoreLabel
 END
 waitfor delay '00:00:01'
@@ -290,10 +290,10 @@ DECLARE multirestore CURSOR FOR
 select distinct replace(scripts, '''' + backuplocation + '''',  SUBSTRING(
                       (
                           SELECT DISTINCT (', DISK = '''+backuplocation + '''')
-                          FROM [tempdb].[dbo].[multifilerestore] b
+                          FROM [#multifilerestore] b
                           WHERE a.mediasetid = b.mediasetid FOR XML PATH('')
                       ), 9, 8000))
-					  from [tempdb].[dbo].[multifilerestore] a where familysequencenumber = 1
+					  from [#multifilerestore] a where familysequencenumber = 1
 
 --select * from #dbfiles
 OPEN multirestore
@@ -306,4 +306,4 @@ FETCH NEXT FROM multirestore INTO @sql
 end
 CLOSE multirestore 
 DEALLOCATE multirestore
-drop table tempdb..multifilerestore
+drop table #multifilerestore
