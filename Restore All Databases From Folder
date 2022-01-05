@@ -7,7 +7,7 @@
 --Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
 USE master
 GO
-/****** Object:  StoredProcedure [dbo].[sp_RestoreFromAllFilesInDirectory]    Script Date: 1/3/2022 2:05:55 PM ******/
+/****** Object:  StoredProcedure [dbo].[sp_RestoreFromAllFilesInDirectory]    Script Date: 1/4/2022 6:58:38 PM ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
@@ -16,19 +16,36 @@ GO
 
 
 
-alter PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory]
-@SourceDirBackupFiles nvarchar(200), @DestDirDbFiles nvarchar(200),@Dest2DirDbFiles nvarchar(200) = NULL, @Dest3DirDbFiles nvarchar(200) = NULL, @Dest4DirDbFiles nvarchar(200) = NULL, @DestDirLogFiles nvarchar(200) 
+CREATE PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory]
+@SourceDirBackupFiles nvarchar(200), @DestDirDbFiles nvarchar(200),@Dest2DirDbFiles nvarchar(200) = NULL, @Dest3DirDbFiles nvarchar(200) = NULL, @Dest4DirDbFiles nvarchar(200) = NULL,
+@Dest5DirDbFiles nvarchar(200) = NULL, @Dest6DirDbFiles nvarchar(200) = NULL, @DestDirLogFiles nvarchar(200)
+, @BackupInLastXDays int = 7, @MaxBackupSizeInGB int = 10 
 AS
 --Originally written by Tibor Karaszi 2004. Use at own risk. 
 --Restores from all files in a certain directory. Assumes that: 
 --  There's only one backup on each backup device. 
 --  Each database uses only two database files and the mdf file is returned first from the RESTORE FILELISTONLY command. 
 --Sample execution: 
--- EXEC sp_RestoreFromAllFilesInDirectory 'J:\Backup\', 'J:\SQLData\', 'K:\SQLData\', 'M:\SQLData\', 'N:\SQLData\' ,'I:\SQLData\'
---EXEC sp_RestoreFromAllFilesInDirectory 
---@SourceDirBackupFiles = 'J:\Backup\',
---@DestDirDbFiles = 'J:\SQLData\' ,
---@DestDirLogFiles ='I:\SQLData\'
+/*
+EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
+		@SourceDirBackupFiles = N'\\dc1.greendotcorp.com\dfs\dc1-sql-backups\NRTDBVCLUSAG\',
+		@DestDirDbFiles = N'J:\SQLData\', --Must Pass this parameter for largest data drive size
+		@Dest2DirDbFiles = N'K:\SQLData\', --If parameter is not passed than it will restore all data file to above data drive in this case J drive
+		@Dest3DirDbFiles = N'M:\SQLData\',
+		@Dest4DirDbFiles = N'N:\SQLData\',
+		@Dest5DirDbFiles = N'G:\SQLData\',
+		@Dest6DirDbFiles = N'H:\SQLData\',
+		@DestDirLogFiles = N'I:\SQLData\',  --Must pass this parameter for log file drive location
+		@BackupInLastXDays = 7, --Restore maximum 7 days old backup
+		@MaxBackupSizeInGB = 10 --Max compressed backup size 10GB
+*/
+/*
+EXEC sp_RestoreFromAllFilesInDirectory 
+@SourceDirBackupFiles = 'J:\Backup\',
+@DestDirDbFiles = 'J:\SQLData\' ,
+@DestDirLogFiles ='I:\SQLData\'
+--Default max 10GB backup will be restore, backup should be done in last 7 days, you can change this values as needed.
+*/
 --Modified 2016-12-19:
 -- Works for SQL Server 2016
 -- Added linebreaks for readability
@@ -43,13 +60,44 @@ if @Dest3DirDbFiles is null
 set @Dest3DirDbFiles = @DestDirDbFiles
 if @Dest4DirDbFiles is null
 set @Dest4DirDbFiles = @DestDirDbFiles
+if @Dest5DirDbFiles is null
+set @Dest5DirDbFiles = @DestDirDbFiles
+if @Dest6DirDbFiles is null
+set @Dest6DirDbFiles = @DestDirDbFiles
 DECLARE @crlf char(2) = CHAR(13) + CHAR(10)
 
 --Table to hold each backup file name in
-CREATE TABLE #files(fname varchar(200),depth int, file_ int)
-INSERT #files
-EXECUTE master.dbo.xp_dirtree @SourceDirBackupFiles, 1, 1
+CREATE TABLE #dirtree (
+ Dir VARCHAR(256), 
+ Depth TinyInt, 
+ IsFile Bit, 
+ ID INT IDENTITY(1,1) PRIMARY KEY);
 
+CREATE TABLE #fulltree (
+ Dir VARCHAR(256), 
+ Depth TinyInt, 
+ IsFile Bit, 
+ Parent INT, 
+ ID INT PRIMARY KEY);
+INSERT INTO #dirtree(Dir, Depth, IsFile) 
+EXEC master.sys.xp_dirtree @SourceDirBackupFiles,0,1;
+INSERT INTO #fulltree(Dir, Depth, IsFile, Parent, ID)
+SELECT Dir, Depth, IsFile, p.MID as Parent, ID
+FROM #dirtree as d WITH (NOLOCK)
+OUTER APPLY (SELECT MAX(ID) as MID FROM #dirtree as i WITH (NOLOCK)
+ WHERE i.Depth + 1 = d.Depth and i.ID < d.ID ) as p;
+CREATE NONCLUSTERED INDEX #fulltree_parent ON #fulltree([Parent])
+;WITH RecCTE as (
+ SELECT CAST(@SourceDirBackupFiles + Dir as VARCHAR(MAX)) as Dir
+  , Depth, ID, IsFile, Dir as FName
+ FROM #fulltree WHERE Parent is Null
+ UNION ALL
+ SELECT CAST(p.Dir + '\' + d.Dir as VARCHAR(MAX))
+  , d.Depth, d.ID, d.IsFile, d.Dir as FName
+ FROM #fulltree as d INNER JOIN RecCTE as p ON d.Parent = p.ID
+) SELECT Dir, Depth, IsFile, FName into #files FROM RecCTE where isfile = 1 ORDER BY ID
+drop table #dirtree
+drop table #fulltree
 --Table to hold the result from RESTORE HEADERONLY. Needed to get the database name out from
 CREATE TABLE #bdev(
 BackupName nvarchar(128) 
@@ -179,23 +227,31 @@ DECLARE @DbName sysname
 DECLARE @sql nvarchar(max) , @Size numeric(20,0), @fileid bigint;
 
 DECLARE files CURSOR FOR
-SELECT fname FROM #files
+SELECT Dir FROM #files
+where Dir like '%.bak' and DIR not like '%master%'
+and DIR not like '%msdb%'
+and DIR not like '%zdba%'
+and DIR not like '%model%'
+and DIR not like '%pubs%'
+and DIR not like '%ag_test%'
+and DIR not like '%view_test%'
 
 DECLARE dbfiles CURSOR FOR
 SELECT LogicalName, PhysicalName, Type, size, FileId FROM #dbfiles
 order by type, size desc
+
 --select * from #dbfiles
 OPEN files
 FETCH NEXT FROM files INTO @fname
 WHILE @@FETCH_STATUS = 0
 BEGIN
-SET @dirfile = @SourceDirBackupFiles + @fname
+SET @dirfile = @fname
 
 --Get database name from RESTORE HEADERONLY, assumes there's only one backup on each backup file.
 TRUNCATE TABLE #bdev
 INSERT #bdev
 EXEC('RESTORE HEADERONLY FROM DISK = ''' + @dirfile + '''') 
-SET @DbName = (SELECT top 1 DatabaseName FROM #bdev)
+SET @DbName = (SELECT DatabaseName FROM #bdev where BackupStartDate > DATEADD(dd,-@BackupInLastXDays,getdate()) and CompressedBackupSize/(1024*1024*1024) < @MaxBackupSizeInGB)
 
 
 TRUNCATE TABLE #restorelabel
@@ -216,7 +272,8 @@ EXEC('RESTORE FILELISTONLY FROM DISK = ''' + @dirfile + '''')
 
 --select * from #bdev
 --select * from #files
---select * from #dbfiles
+select * from #dbfiles
+order by type, size desc
 OPEN dbfiles
 declare @count int = 1
 --For each database file that the database uses
@@ -229,35 +286,53 @@ BEGIN
 		BREAK
 	IF @type = 'D'
 	BEGIN
-		if @count in ( 1,8,9,13,17,21,25,29,33)
+		if @count in ( 1,8,14,21,22,29,30)
 		begin 
 	  SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DestDirDbFiles + @LogicalName + '.mdf '''  + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
-	  else if @count in (2, 7,10,14,18,22,26,30,34)
+	  else if @count in (2, 9,15,20,23,28,31)
 	  begin
 	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest2DirDbFiles + @LogicalName + '.mdf ''' + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
-	  else  if ( @count in ( 3,6,11,15,19,23,27,31,35))
+	  else  if ( @count in ( 3,10,16,19,24,27,32))
 	  begin
 	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest3DirDbFiles + @LogicalName + '.mdf '''  + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
-	  else  if ( @count in ( 4,5,12,16,20,24,28,32) OR @count >=36)
+	  else  if ( @count in ( 4,11,17,18,25,26))
 	  begin
 	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest4DirDbFiles + @LogicalName + '.mdf ''' + @crlf
 	  SET @sql = @sql + ' ,MOVE '
 	  end
+	    else  if ( @count in ( 5,12) )
+	  begin
+	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest5DirDbFiles + @LogicalName + '.mdf ''' + @crlf
+	  SET @sql = @sql + ' ,MOVE '
+	  end
+	    else  if ( @count in ( 6,13) )
+	  begin
+	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest6DirDbFiles + @LogicalName + '.mdf ''' + @crlf
+	  SET @sql = @sql + ' ,MOVE '
+	  end
+	    else  
+	  begin
+	    SET @sql = @sql + '''' + @LogicalName + ''' TO ''S:\SQLData\' + @LogicalName + '.mdf ''' + @crlf
+	  SET @sql = @sql + ' ,MOVE '
+	  end
 END
 	ELSE IF @type = 'L'
+	begin
 	  SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DestDirLogFiles + @LogicalName + '.ldf''' + @crlf
+	   SET @sql = @sql + ' ,MOVE '
+	   end
 	else if @type = 'S'
 		  SET @sql =  @sql + ', MOVE ' + '''' + @LogicalName + ''' TO ''' + @DestDirDbFiles + @LogicalName + '''' + @crlf
 set @count = @count + 1
 END
 
-SET @sql = @sql + @crlf
+SET @sql = left(@sql, len(@sql)-5) + @crlf
 
 --Here's the actual RESTORE command 
 if exists (select 1 from #restoreLabel where FamilyCount = 1)
@@ -274,7 +349,7 @@ END
 waitfor delay '00:00:01'
 set @sql = 'drop database ' + QUOTENAME(@dbname)
 print @sql
---exec sp_executesql @sql 
+exec sp_executesql @sql 
 waitfor delay '00:00:01'
 print @dirfile
 --exec xp_delete_file 0,@dirfile
@@ -306,6 +381,8 @@ FETCH NEXT FROM multirestore INTO @sql
 end
 CLOSE multirestore 
 DEALLOCATE multirestore
+drop table #multifilerestore
+
 drop table #multifilerestore
 
 
