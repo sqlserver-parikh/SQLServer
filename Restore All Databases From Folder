@@ -340,7 +340,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
                  WHERE BackupStartDate > DATEADD(dd, -@BackupInLastXDays, GETDATE())
                        AND CompressedBackupSize / (1024 * 1024 * 1024) < @MaxBackupSizeInGB
                        AND BackupType = 1
-				ORDER BY BackupStartDate DESC
+				ORDER BY BackupStartDate ASC
              );
              TRUNCATE TABLE #restorelabel;
              INSERT INTO #restoreLabel
