@@ -331,8 +331,8 @@ EXEC sp_RestoreFromAllFilesInDirectory
              TRUNCATE TABLE #bdev;
              INSERT INTO #bdev
              EXEC ('RESTORE HEADERONLY FROM DISK = '''+@dirfile+'''');
-             SELECT *
-             FROM #bdev;
+             --SELECT *
+             --FROM #bdev;
              SET @DbName =
              (
                  SELECT TOP 1 DatabaseName
@@ -340,6 +340,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
                  WHERE BackupStartDate > DATEADD(dd, -@BackupInLastXDays, GETDATE())
                        AND CompressedBackupSize / (1024 * 1024 * 1024) < @MaxBackupSizeInGB
                        AND BackupType = 1
+				ORDER BY BackupStartDate DESC
              );
              TRUNCATE TABLE #restorelabel;
              INSERT INTO #restoreLabel
