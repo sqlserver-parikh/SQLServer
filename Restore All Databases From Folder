@@ -12,7 +12,6 @@ SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
-
 CREATE PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @SourceDirBackupFiles NVARCHAR(200), 
                                                           @DestDirDbFiles       NVARCHAR(200), 
                                                           @Dest2DirDbFiles      NVARCHAR(200) = NULL, 
@@ -196,7 +195,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
       IsSingleUser           BIGINT, 
       HasBackupChecksums     BIGINT, 
       IsDamaged              BIGINT, 
-      BegibsLogChain         BIGINT, 
+      BeginsLogChain         BIGINT, 
       HasIncompleteMetaData  BIGINT, 
       IsForceOffline         BIGINT, 
       IsCopyOnly             BIGINT, 
@@ -214,7 +213,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
              ALTER TABLE #bdev
              ADD Containment BIGINT;
          END;
-     IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(4)) AS FLOAT) = 12 -- Greater than SQL 2005 
+     IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(4)) AS FLOAT) >= 12 -- Greater than SQL 2005 
          BEGIN
              ALTER TABLE #bdev
              ADD Containment         BIGINT, 
@@ -332,9 +331,11 @@ EXEC sp_RestoreFromAllFilesInDirectory
              TRUNCATE TABLE #bdev;
              INSERT INTO #bdev
              EXEC ('RESTORE HEADERONLY FROM DISK = '''+@dirfile+'''');
+             SELECT *
+             FROM #bdev;
              SET @DbName =
              (
-                 SELECT DatabaseName
+                 SELECT TOP 1 DatabaseName
                  FROM #bdev
                  WHERE BackupStartDate > DATEADD(dd, -@BackupInLastXDays, GETDATE())
                        AND CompressedBackupSize / (1024 * 1024 * 1024) < @MaxBackupSizeInGB
