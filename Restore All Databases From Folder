@@ -12,17 +12,17 @@ SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
-CREATE PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @SourceDirBackupFiles NVARCHAR(200), 
-                                                          @DestDirDbFiles       NVARCHAR(200), 
-                                                          @Dest2DirDbFiles      NVARCHAR(200) = NULL, 
-                                                          @Dest3DirDbFiles      NVARCHAR(200) = NULL, 
-                                                          @Dest4DirDbFiles      NVARCHAR(200) = NULL, 
-                                                          @Dest5DirDbFiles      NVARCHAR(200) = NULL, 
-                                                          @Dest6DirDbFiles      NVARCHAR(200) = NULL, 
-                                                          @DestDirLogFiles      NVARCHAR(200), 
-                                                          @BackupInLastXDays    INT           = 7, 
-                                                          @MaxBackupSizeInGB    INT           = 10, 
-                                                          @PrintOnly            BIT           = 1 --1 prints command, 0 execute script
+CREATE PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @SourceDirBackupFiles NVARCHAR(500), 
+                                                           @DestDirDbFiles       NVARCHAR(500) = NULL, 
+                                                           @Dest2DirDbFiles      NVARCHAR(500) = NULL, 
+                                                           @Dest3DirDbFiles      NVARCHAR(500) = NULL, 
+                                                           @Dest4DirDbFiles      NVARCHAR(500) = NULL, 
+                                                           @Dest5DirDbFiles      NVARCHAR(500) = NULL, 
+                                                           @Dest6DirDbFiles      NVARCHAR(500) = NULL, 
+                                                           @DestDirLogFiles      NVARCHAR(500) = NULL, 
+                                                           @BackupInLastXDays    INT           = 7, 
+                                                           @MaxBackupSizeInGB    INT           = 10, 
+                                                           @PrintOnly            BIT           = 1 --1 prints command, 0 execute script
 AS
      --Originally written by Tibor Karaszi 2004. Use at own risk. 
      --Restores from all files in a certain directory. Assumes that: 
@@ -57,8 +57,12 @@ EXEC sp_RestoreFromAllFilesInDirectory
      -- Supports multiple database file, thanks to above
      -- Added stats för every 5 %
      SET NOCOUNT ON;
+     IF @DestDirDbFiles IS NULL
+         SET @DestDirDbFiles = CONVERT(NVARCHAR(500), SERVERPROPERTY('InstanceDefaultDataPath'));
      IF @Dest2DirDbFiles IS NULL
          SET @Dest2DirDbFiles = @DestDirDbFiles;
+     IF @DestDirLogFiles IS NULL
+         SET @DestDirLogFiles = CONVERT(NVARCHAR(500), SERVERPROPERTY('InstanceDefaultLogPath'));
      IF @Dest3DirDbFiles IS NULL
          SET @Dest3DirDbFiles = @DestDirDbFiles;
      IF @Dest4DirDbFiles IS NULL
@@ -340,7 +344,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
                  WHERE BackupStartDate > DATEADD(dd, -@BackupInLastXDays, GETDATE())
                        AND CompressedBackupSize / (1024 * 1024 * 1024) < @MaxBackupSizeInGB
                        AND BackupType = 1
-				ORDER BY BackupStartDate ASC
+                 ORDER BY BackupStartDate DESC
              );
              TRUNCATE TABLE #restorelabel;
              INSERT INTO #restoreLabel
