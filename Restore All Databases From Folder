@@ -13,18 +13,17 @@ GO
 SET QUOTED_IDENTIFIER ON
 GO
 
-
-
 CREATE PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @SourceDirBackupFiles NVARCHAR(200), 
-                                                           @DestDirDbFiles       NVARCHAR(200), 
-                                                           @Dest2DirDbFiles      NVARCHAR(200) = NULL, 
-                                                           @Dest3DirDbFiles      NVARCHAR(200) = NULL, 
-                                                           @Dest4DirDbFiles      NVARCHAR(200) = NULL, 
-                                                           @Dest5DirDbFiles      NVARCHAR(200) = NULL, 
-                                                           @Dest6DirDbFiles      NVARCHAR(200) = NULL, 
-                                                           @DestDirLogFiles      NVARCHAR(200), 
-                                                           @BackupInLastXDays    INT           = 7, 
-                                                           @MaxBackupSizeInGB    INT           = 10
+                                                          @DestDirDbFiles       NVARCHAR(200), 
+                                                          @Dest2DirDbFiles      NVARCHAR(200) = NULL, 
+                                                          @Dest3DirDbFiles      NVARCHAR(200) = NULL, 
+                                                          @Dest4DirDbFiles      NVARCHAR(200) = NULL, 
+                                                          @Dest5DirDbFiles      NVARCHAR(200) = NULL, 
+                                                          @Dest6DirDbFiles      NVARCHAR(200) = NULL, 
+                                                          @DestDirLogFiles      NVARCHAR(200), 
+                                                          @BackupInLastXDays    INT           = 7, 
+                                                          @MaxBackupSizeInGB    INT           = 10, 
+                                                          @PrintOnly            BIT           = 1 --1 prints command, 0 execute script
 AS
      --Originally written by Tibor Karaszi 2004. Use at own risk. 
      --Restores from all files in a certain directory. Assumes that: 
@@ -339,6 +338,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
                  FROM #bdev
                  WHERE BackupStartDate > DATEADD(dd, -@BackupInLastXDays, GETDATE())
                        AND CompressedBackupSize / (1024 * 1024 * 1024) < @MaxBackupSizeInGB
+                       AND BackupType = 1
              );
              TRUNCATE TABLE #restorelabel;
              INSERT INTO #restoreLabel
@@ -430,13 +430,29 @@ EXEC sp_RestoreFromAllFilesInDirectory
                  WHERE FamilyCount = 1
              )
                  BEGIN
-                     PRINT @sql; 
-                     --Remove the comment below if you want the procedure to actually execute the restore command. 
-                     EXEC (@sql);
+                     IF @PrintOnly = 1
+                         PRINT @sql; 
+                         --Remove the comment below if you want the procedure to actually execute the restore command. 
+                         ELSE
+                         EXEC (@sql);
+                     WAITFOR DELAY '00:00:01';
+                     SET @sql = '--drop database ' + QUOTENAME(@dbname);
+                     IF @PrintOnly = 1
+                         PRINT @sql;
+                         ELSE
+                         EXEC sp_executesql 
+                              @sql;
+                     WAITFOR DELAY '00:00:01';
+                     IF @PrintOnly = 1
+                         PRINT '--exec xp_delete_file 0,''' + @dirfile + '''';
+                         ELSE
+                         EXEC xp_delete_file 
+                              0, 
+                              @dirfile;
                  END;
                  ELSE
                  BEGIN
-                     PRINT 'this file is multi backup restore ' + @dirfile + @sql;
+                     --PRINT 'this file is multi backup restore ' + @dirfile + @sql;
                      INSERT INTO [#multifilerestore]
                             SELECT *, 
                                    @dirfile BackupLocation, 
@@ -444,23 +460,12 @@ EXEC sp_RestoreFromAllFilesInDirectory
                                    GETDATE()
                             FROM #restoreLabel;
                  END;
-             WAITFOR DELAY '00:00:01';
-             SET @sql = 'drop database ' + QUOTENAME(@dbname);
-             PRINT @sql;
-             --EXEC sp_executesql 
-             --     @sql;
-             WAITFOR DELAY '00:00:01';
-             PRINT @dirfile;
-             --exec xp_delete_file 0,@dirfile
              CLOSE dbfiles;
              FETCH NEXT FROM files INTO @fname;
          END;
      CLOSE files;
      DEALLOCATE dbfiles;
      DEALLOCATE files;
-     PRINT 'multi restore starts';
-     SELECT *
-     FROM [#multifilerestore];
      DECLARE multirestore CURSOR
      FOR SELECT DISTINCT 
                 replace(scripts, '''' + backuplocation + '''', SUBSTRING(
@@ -471,16 +476,19 @@ EXEC sp_RestoreFromAllFilesInDirectory
              WHERE a.mediasetid = b.mediasetid FOR XML PATH('')
          ), 9, 8000))
          FROM [#multifilerestore] a
-         WHERE familysequencenumber = 1;
+         WHERE familysequencenumber = 1
+               AND Scripts IS NOT NULL;
 
      --select * from #dbfiles
      OPEN multirestore;
      FETCH NEXT FROM multirestore INTO @sql;
      WHILE @@FETCH_STATUS = 0
          BEGIN
-             PRINT @SQL;
-             --EXEC sp_executesql 
-             --     @sql;
+             IF @PRINTONLY = 1
+                 PRINT @SQL;
+                 ELSE
+                 EXEC sp_executesql 
+                      @sql;
              FETCH NEXT FROM multirestore INTO @sql;
          END;
      CLOSE multirestore;
