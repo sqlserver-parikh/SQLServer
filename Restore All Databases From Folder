@@ -7,32 +7,31 @@
 --Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
 USE master
 GO
-/****** Object:  StoredProcedure [dbo].[sp_RestoreFromAllFilesInDirectory]    Script Date: 1/4/2022 6:58:38 PM ******/
+
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
 USE [master]
 GO
-/****** Object:  StoredProcedure [dbo].[sp_RestoreFromAllFilesInDirectory]    Script Date: 1/6/2022 12:40:34 PM ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
-ALTER PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @DatabaseName nvarchar(500) = NULL, --If null all dbs restored or only one chosen database restore.
-							@SourceDirBackupFiles NVARCHAR(500) = NULL, --Default Data directory picked.
+create PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @DatabaseName nvarchar(500) = NULL,
+							@SourceDirBackupFiles NVARCHAR(500), 
                                                            @DestDirDbFiles       NVARCHAR(500) = NULL, 
                                                            @Dest2DirDbFiles      NVARCHAR(500) = NULL, 
                                                            @Dest3DirDbFiles      NVARCHAR(500) = NULL, 
                                                            @Dest4DirDbFiles      NVARCHAR(500) = NULL, 
                                                            @Dest5DirDbFiles      NVARCHAR(500) = NULL, 
                                                            @Dest6DirDbFiles      NVARCHAR(500) = NULL, 
-                                                           @DestDirLogFiles      NVARCHAR(500) = NULL,  --Default Log Directory picked
+                                                           @DestDirLogFiles      NVARCHAR(500) = NULL, 
                                                            @BackupInLastXDays    INT           = 7, 
                                                            @MaxBackupSizeInGB    INT           = 500, 
                                                            @PrintOnly            BIT           = 0, --1 prints command, 0 execute script
-							@DropDatabase		 BIT			= 0, --if you want to immediately drop after restore.
-							 @DeleteBackupFile	 BIT			= 0		
+														   @DropDatabase		 BIT			= 1,
+														   @DeleteBackupFile	 BIT			= 1		
 AS
      --Originally written by Tibor Karaszi 2004. Use at own risk. 
      --Restores from all files in a certain directory. Assumes that: 
@@ -42,7 +41,7 @@ AS
 /*
 EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
 		@SourceDirBackupFiles = N'\\dc1.greendotcorp.com\dfs\dc1-sql-backups\NRTDBVCLUSAG\',
-		@DestDirDbFiles = N'J:\SQLData\', --default data directory is chosen, pick largest drive if there are multiple drives
+		@DestDirDbFiles = N'J:\SQLData\', --Must Pass this parameter for largest data drive size
 		@Dest2DirDbFiles = N'K:\SQLData\', --If parameter is not passed than it will restore all data file to above data drive in this case J drive
 		@Dest3DirDbFiles = N'M:\SQLData\',
 		@Dest4DirDbFiles = N'N:\SQLData\',
@@ -346,8 +345,14 @@ EXEC sp_RestoreFromAllFilesInDirectory
 
              --Get database name from RESTORE HEADERONLY, assumes there's only one backup on each backup file.
              TRUNCATE TABLE #bdev;
+			 BEGIN TRY
              INSERT INTO #bdev
              EXEC ('RESTORE HEADERONLY FROM DISK = '''+@dirfile+'''');
+			 END TRY
+			 BEGIN CATCH
+	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
+    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore header FAILED',  isnull( @dirfile,''), isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
+	END CATCH 
              --SELECT *
              --FROM #bdev;
              SET @DbName =
@@ -362,17 +367,27 @@ EXEC sp_RestoreFromAllFilesInDirectory
              );
 			 SET @CompressedBackupSize = ( SELECT  TOP 1 CompressedBackupSize FROM #bdev)
              TRUNCATE TABLE #restorelabel;
+			 begin try
              INSERT INTO #restoreLabel
              EXEC ('RESTORE labelonly FROM DISK = '''+@dirfile+'''');
-
+	 END TRY
+			 BEGIN CATCH
+	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
+    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore label FAILED',  isnull( @dirfile,''), isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
+	END CATCH 
              --Construct the beginning for the RESTORE DATABASE command
              SET @sql = 'RESTORE DATABASE [' + @DbName + '] ' + @crlf + 'FROM DISK = ''' + @dirfile + '''' + @crlf + ' WITH REPLACE' + @crlf + ',STATS = 5 ' + @crlf + ',MOVE ';
              --select * from #dbfiles
              --Get information about database files from backup device into temp table
              TRUNCATE TABLE #dbfiles;
+			 BEGIN TRY
              INSERT INTO #dbfiles
              EXEC ('RESTORE FILELISTONLY FROM DISK = '''+@dirfile+'''');
-
+			 END TRY
+	BEGIN CATCH
+	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
+    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore filelist FAILED',  isnull( @dirfile,''), isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
+	END CATCH 
              --SELECT *
              --FROM #dbfiles
              --ORDER BY type, 
@@ -457,17 +472,29 @@ EXEC sp_RestoreFromAllFilesInDirectory
                          ELSE
 						 begin 
 						 set @StartTime = GETDATE()
+						 BEGIN TRY
                          EXEC (@sql);
 						 waitfor delay '00:00:01'
 						  INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
     VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore completed', @sql, @StartTime,getdate(), ERROR_NUMBER(),ERROR_message())
+	END TRY
+	BEGIN CATCH
+	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
+    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore FAILED', @sql, isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
+	END CATCH 
 						 end
                      SET @sql = 'drop database ' + QUOTENAME(@dbname);
                      IF @PrintOnly = 1
                          PRINT @sql;
                          ELSE if @DropDatabase = 1
+						 begin try
                          EXEC sp_executesql 
                               @sql;
+							  	 END TRY
+			 BEGIN CATCH
+	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
+    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Drop database FAILED',  isnull( @sql,''), isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
+	END CATCH 
                      WAITFOR DELAY '00:00:01';
                      IF @PrintOnly = 1
                          PRINT '--exec xp_delete_file 0,''' + @dirfile + '''';
@@ -514,12 +541,18 @@ EXEC sp_RestoreFromAllFilesInDirectory
                  PRINT @SQL;
                  ELSE
 				 BEGIN 
+				 begin try
 				 set @StartTime = GETDATE()
                  EXEC sp_executesql 
                       @sql;
 					   waitfor delay '00:00:01'
 						  INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
     VALUES (@DbName,  convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore completed', @sql, @StartTime, getdate(), ERROR_NUMBER(),ERROR_message())
+		 END TRY
+			 BEGIN CATCH
+	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
+    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Multifile Restore FAILED', isnull( @sql,''), isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
+	END CATCH 
 	end
              FETCH NEXT FROM multirestore INTO @sql,@dbname, @CompressedBackupSize;
          END;
