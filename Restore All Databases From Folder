@@ -11,13 +11,25 @@
 --https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
 --Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
 --Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
+--https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
+--Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
+--Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
+--https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
+--Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
+--Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
+--https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
+--Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
+--Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
+--https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
+--Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
+--Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
 USE master;
 GO
 SET ANSI_NULLS ON;
 GO
 SET QUOTED_IDENTIFIER ON;
 GO
-ALTER PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @DatabaseName         NVARCHAR(500) = NULL, 
+CREATE OR ALTER PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @DatabaseName         NVARCHAR(500) = NULL, 
                                                           @SourceDirBackupFiles NVARCHAR(500), 
                                                           @DestDirDbFiles       NVARCHAR(500) = NULL, 
                                                           @Dest2DirDbFiles      NVARCHAR(500) = NULL, 
@@ -37,6 +49,7 @@ AS
      --  There's only one backup on each backup device. 
      --  Each database uses only two database files and the mdf file is returned first from the RESTORE FILELISTONLY command. 
      --Sample execution: 
+
 /*
 EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
 		@SourceDirBackupFiles = N'\\dc1.greendotcorp.com\dfs\dc1-sql-backups\NRTDBVCLUSAG\',
@@ -75,11 +88,11 @@ EXEC sp_RestoreFromAllFilesInDirectory
      IF @Dest3DirDbFiles IS NULL
          SET @Dest3DirDbFiles = @DestDirDbFiles;
      IF @Dest4DirDbFiles IS NULL
-         SET @Dest4DirDbFiles = @DestDirDbFiles;
+         SET @Dest4DirDbFiles = @Dest2DirDbFiles;
      IF @Dest5DirDbFiles IS NULL
          SET @Dest5DirDbFiles = @DestDirDbFiles;
      IF @Dest6DirDbFiles IS NULL
-         SET @Dest6DirDbFiles = @DestDirDbFiles;
+         SET @Dest6DirDbFiles = @Dest2DirDbFiles;
      DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
      DECLARE @StartTime DATETIME;
      --Table to hold each backup file name in
@@ -748,7 +761,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
                  BEGIN
                      BEGIN TRY
                          SET @StartTime = GETDATE();
-						 PRINT @SQL
+                         PRINT @SQL;
                          EXEC sp_executesql 
                               @sql;
                          WAITFOR DELAY '00:00:01';
@@ -846,7 +859,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
                  IF @DeleteBackupFile = 1
                      BEGIN
                          BEGIN TRY
-                            exec (@sql);
+                             EXEC (@sql);
                          END TRY
                          BEGIN CATCH
                              PRINT @SQL;
