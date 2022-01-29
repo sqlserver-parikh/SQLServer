@@ -1,28 +1,3 @@
---https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
---Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
---Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
-
---https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
---Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
---Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
---https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
---Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
---Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
---https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
---Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
---Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
---https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
---Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
---Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
---https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
---Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
---Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
---https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
---Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
---Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
---https://karaszi.com/restore-all-databases-from-a-number-of-backup-files
---Below is code for SQL 2016 and SQL 2017, for lower version you can check above website.
---Below code is just copy from above website, I have tested it works fine on SQL 2017 restore.
 USE master;
 GO
 SET ANSI_NULLS ON;
