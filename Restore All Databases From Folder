@@ -5,19 +5,20 @@ GO
 SET QUOTED_IDENTIFIER ON;
 GO
 CREATE OR ALTER PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @DatabaseName         NVARCHAR(500) = NULL, 
-                                                          @SourceDirBackupFiles NVARCHAR(500), 
-                                                          @DestDirDbFiles       NVARCHAR(500) = NULL, 
-                                                          @Dest2DirDbFiles      NVARCHAR(500) = NULL, 
-                                                          @Dest3DirDbFiles      NVARCHAR(500) = NULL, 
-                                                          @Dest4DirDbFiles      NVARCHAR(500) = NULL, 
-                                                          @Dest5DirDbFiles      NVARCHAR(500) = NULL, 
-                                                          @Dest6DirDbFiles      NVARCHAR(500) = NULL, 
-                                                          @DestDirLogFiles      NVARCHAR(500) = NULL, 
-                                                          @BackupInLastXDays    INT           = 7, 
-                                                          @MaxBackupSizeInGB    INT           = 500, 
-                                                          @PrintOnly            BIT           = 0, --1 prints command, 0 execute script
-                                                          @DropDatabase         BIT           = 1, 
-                                                          @DeleteBackupFile     BIT           = 1
+                                                                    @SourceDirBackupFiles NVARCHAR(500), 
+                                                                    @DestDirDbFiles       NVARCHAR(500) = NULL, 
+                                                                    @Dest2DirDbFiles      NVARCHAR(500) = NULL, 
+                                                                    @Dest3DirDbFiles      NVARCHAR(500) = NULL, 
+                                                                    @Dest4DirDbFiles      NVARCHAR(500) = NULL, 
+                                                                    @Dest5DirDbFiles      NVARCHAR(500) = NULL, 
+                                                                    @Dest6DirDbFiles      NVARCHAR(500) = NULL, 
+                                                                    @DestDirLogFiles      NVARCHAR(500) = NULL, 
+                                                                    @BackupInLastXDays    INT           = 7, 
+                                                                    @MaxBackupSizeInGB    INT           = 500, 
+                                                                    @DropDatabase         BIT           = 1, 
+                                                                    @DeleteBackupFile     BIT           = 1, 
+                                                                    @CheckDB              BIT           = 1,
+								    @PrintOnly            BIT           = 0 --1 prints command, 0 execute script
 AS
      --Originally written by Tibor Karaszi 2004. Use at own risk. 
      --Restores from all files in a certain directory. Assumes that: 
@@ -635,6 +636,13 @@ EXEC sp_RestoreFromAllFilesInDirectory
                                  );
                              END CATCH;
                          END;
+                     IF @CheckDB = 1
+                         BEGIN
+                             EXECUTE dbo.DatabaseIntegrityCheck 
+                                     @Databases = @dbname, 
+                                     @CheckCommands = 'CHECKDB', 
+                                     @LogToTable = 'Y';
+                         END;
                      SET @sql = 'drop database ' + QUOTENAME(@dbname);
                      IF @PrintOnly = 1
                          PRINT @sql;
@@ -731,7 +739,9 @@ EXEC sp_RestoreFromAllFilesInDirectory
      WHILE @@FETCH_STATUS = 0
          BEGIN
              IF @PRINTONLY = 1
-                 PRINT @SQL;
+                 BEGIN
+                     PRINT @SQL;
+                 END;
                  ELSE
                  BEGIN
                      BEGIN TRY
@@ -819,6 +829,59 @@ EXEC sp_RestoreFromAllFilesInDirectory
                          );
                      END CATCH;
                  END;
+             WAITFOR DELAY '00:00:01';
+             IF @CheckDB = 1
+                 BEGIN
+                     EXECUTE dbo.DatabaseIntegrityCheck 
+                             @Databases = @dbname, 
+                             @CheckCommands = 'CHECKDB', 
+                             @LogToTable = 'Y';
+                 END;
+             SET @sql = 'drop database ' + QUOTENAME(@dbname);
+             IF @PrintOnly = 1
+                 PRINT @sql;
+                 ELSE
+                 IF @DropDatabase = 1
+                     BEGIN TRY
+                         EXEC sp_executesql 
+                              @sql;
+                     END TRY
+                     BEGIN CATCH
+                         INSERT INTO master.dbo.CommandLog
+                         (DatabaseName, 
+                          SchemaName, 
+                          ObjectName, 
+                          ObjectType, 
+                          IndexName, 
+                          IndexType, 
+                          StatisticsName, 
+                          PartitionNumber, 
+                          ExtendedInfo, 
+                          CommandType, 
+                          Command, 
+                          StartTime, 
+                          EndTime, 
+                          ErrorNumber, 
+                          ErrorMessage
+                         )
+                         VALUES
+                         (@DbName, 
+                          CONVERT(VARCHAR(30), @CompressedBackupSize), 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          'Drop database FAILED', 
+                          ISNULL(@sql, ''), 
+                          ISNULL(@StartTime, GETDATE()), 
+                          GETDATE(), 
+                          ERROR_NUMBER(), 
+                          ERROR_MESSAGE()
+                         );
+                     END CATCH;
              WAITFOR DELAY '00:00:01';
              SELECT @sql =
              (
