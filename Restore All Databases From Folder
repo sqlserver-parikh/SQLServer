@@ -76,6 +76,12 @@ EXEC sp_RestoreFromAllFilesInDirectory
      DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
      DECLARE @StartTime DATETIME;
      --Table to hold each backup file name in
+     CREATE TABLE #fixeddrives
+     (drive  VARCHAR(20), 
+      MBFree BIGINT
+     );
+     INSERT INTO #fixeddrives
+     EXEC xp_fixeddrives;
      CREATE TABLE #dirtree
      (Dir    VARCHAR(256), 
       Depth  TINYINT, 
@@ -914,6 +920,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
      CLOSE multirestore;
      DEALLOCATE multirestore;
      DROP TABLE #multifilerestore;
+     DROP TABLE #fixeddrives;
 
 /*
 --Copy all backups from multiple folders to one folder.
