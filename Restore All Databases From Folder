@@ -12,13 +12,14 @@ CREATE OR ALTER PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @DatabaseNam
                                                                     @Dest4DirDbFiles      NVARCHAR(500) = NULL, 
                                                                     @Dest5DirDbFiles      NVARCHAR(500) = NULL, 
                                                                     @Dest6DirDbFiles      NVARCHAR(500) = NULL, 
+                                                                    @Dest7DirDbFiles      NVARCHAR(500) = NULL, 
                                                                     @DestDirLogFiles      NVARCHAR(500) = NULL, 
                                                                     @BackupInLastXDays    INT           = 7, 
                                                                     @MaxBackupSizeInGB    INT           = 500, 
+                                                                    @PrintOnly            BIT           = 0, --1 prints command, 0 execute script
                                                                     @DropDatabase         BIT           = 1, 
                                                                     @DeleteBackupFile     BIT           = 1, 
-                                                                    @CheckDB              BIT           = 1,
-								    @PrintOnly            BIT           = 0 --1 prints command, 0 execute script
+                                                                    @CheckDB              BIT           = 1
 AS
      --Originally written by Tibor Karaszi 2004. Use at own risk. 
      --Restores from all files in a certain directory. Assumes that: 
@@ -35,6 +36,7 @@ EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
 		@Dest4DirDbFiles = N'N:\SQLData\',
 		@Dest5DirDbFiles = N'G:\SQLData\',
 		@Dest6DirDbFiles = N'H:\SQLData\',
+		@Dest7DirDbFiles = N'S:\SQLData\',
 		@DestDirLogFiles = N'I:\SQLData\',  --Must pass this parameter for log file drive location
 		@BackupInLastXDays = 7, --Restore maximum 7 days old backup
 		@MaxBackupSizeInGB = 10 --Max compressed backup size 10GB
@@ -69,6 +71,8 @@ EXEC sp_RestoreFromAllFilesInDirectory
          SET @Dest5DirDbFiles = @DestDirDbFiles;
      IF @Dest6DirDbFiles IS NULL
          SET @Dest6DirDbFiles = @Dest2DirDbFiles;
+     IF @Dest7DirDbFiles IS NULL
+         SET @Dest7DirDbFiles = @DestDirDbFiles;
      DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
      DECLARE @StartTime DATETIME;
      --Table to hold each backup file name in
@@ -530,7 +534,7 @@ EXEC sp_RestoreFromAllFilesInDirectory
                                                      END;
                                                      ELSE
                                                      BEGIN
-                                                         SET @sql = @sql + '''' + @LogicalName + ''' TO ''S:\SQLData\' + @LogicalName + '.mdf ''' + @crlf;
+                                                         SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @Dest7DirDbFiles + @LogicalName + '.mdf ''' + @crlf;
                                                          SET @sql = @sql + ' ,MOVE ';
                                                      END;
                          END;
