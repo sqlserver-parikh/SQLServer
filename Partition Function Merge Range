@@ -1,0 +1,24 @@
+--Below code will do merge range for parition number 2 and make sure that partition dont have any data.
+DECLARE @tname VARCHAR(128)= 'tablename';
+DECLARE @BOUNDARYvalue SQL_VARIANT, @sql NVARCHAR(MAX), @fname VARCHAR(128);
+SELECT TOP 1 @BOUNDARYvalue = r.value, 
+             @fname = f.name
+FROM sys.tables AS t
+     INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
+     INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
+                                       AND i.index_id = p.index_id
+     INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
+     INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
+     LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
+                                                        AND r.boundary_id = p.partition_number
+WHERE t.name = @tname
+      AND i.type <= 1
+      AND p.partition_number = 2
+      AND rows = 0
+ORDER BY p.partition_number;
+SELECT @tname TableName, 
+       @fname PartitionFunction, 
+       @BOUNDARYvalue PFRange; 
+SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + ' () MERGE RANGE (''' + CONVERT(VARCHAR(30), @BOUNDARYvalue, 121) + ''')';
+--EXEC sp_executesql      @sql;
+PRINT @sql;
