@@ -1,4 +1,4 @@
-DECLARE @tname VARCHAR(128)= 'tablename', @BOUNDARYvalue SQL_VARIANT, @sql NVARCHAR(MAX), @fname VARCHAR(128), @sname VARCHAR(128), @rows BIGINT, @CurrentDate AS DATETIMEOFFSET= DATEADD(dd, 30, SYSDATETIMEOFFSET());
+DECLARE @tname VARCHAR(128)= 'tablename', @BOUNDARYvalue SQL_VARIANT, @sql NVARCHAR(MAX), @fname VARCHAR(128), @sname VARCHAR(128), @rows BIGINT, @CurrentDate AS DATETIMEOFFSET= DATEADD(dd, 30, SYSDATETIMEOFFSET()), @boundary VARCHAR(MAX);
 DECLARE cpartition CURSOR
 FOR SELECT t.name TName, 
            r.value PFRange, 
@@ -16,7 +16,8 @@ FOR SELECT t.name TName,
     WHERE 1 = 1
           --  AND t.name = @tname
           AND i.type <= 1
-          AND p.partition_number = 2
+          AND p.partition_number = 1
+          AND r.value < DATEADD(DD, -30, GETDATE())
     --AND rows = 0
     ORDER BY p.partition_number;
 OPEN cpartition;
@@ -24,7 +25,22 @@ FETCH NEXT FROM cpartition INTO @tname, @BOUNDARYvalue, @fname, @sname, @rows;
 WHILE @@FETCH_STATUS = 0
     BEGIN
         BEGIN TRY
-            SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + ' () MERGE RANGE (''' + CONVERT(VARCHAR(23), @BOUNDARYvalue, 121) + ''')';
+            SET @sql = 'truncate table ' + @tname + '_switchout';
+            EXEC sp_executesql 
+                 @sql;
+            SET @sql = 'ALTER TABLE ' + QUOTENAME(@tname) + ' SWITCH PARTITION 1 TO  [' + @tname + '_switchout];';
+            EXEC sp_executesql 
+                 @sql;
+        END TRY
+        BEGIN CATCH
+            PRINT 'Issue with switch ' + @sql;
+        END CATCH;
+        BEGIN TRY
+            IF(SQL_VARIANT_PROPERTY(@BOUNDARYvalue, 'basetype') = 'datetimeoffset')
+                SET @boundary = format(CAST(@BOUNDARYvalue AS DATETIMEOFFSET(7)), 'yyyy-MM-dd HH:mm:ss.fffffff zzz');
+                ELSE
+                SET @boundary = CONVERT(VARCHAR(23), @BOUNDARYvalue, 121);
+            SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + ' () MERGE RANGE (''' + @boundary + ''')';
             IF @rows = 0
                 BEGIN
                     EXEC sp_executesql 
@@ -33,7 +49,12 @@ WHILE @@FETCH_STATUS = 0
                 END;
         END TRY
         BEGIN CATCH
-            PRINT @SQL;
+            SELECT @tname, 
+                   @BOUNDARYvalue, 
+                   @fname, 
+                   @sname, 
+                   @rows;
+            PRINT 'Merge Range Failed ' + @SQL;
         END CATCH;
         BEGIN TRY
             SET @sql = 'ALTER PARTITION SCHEME ' + @sname + 'NEXT USED [PRIMARY];';
@@ -52,6 +73,7 @@ WHILE @@FETCH_STATUS = 0
     END;
 CLOSE cpartition;  
 DEALLOCATE cpartition;
+GO
 
 
 /*
