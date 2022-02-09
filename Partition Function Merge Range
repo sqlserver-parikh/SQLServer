@@ -1,6 +1,7 @@
 DECLARE @tname VARCHAR(128)= 'tablename', @BOUNDARYvalue SQL_VARIANT, @sql NVARCHAR(MAX), @fname VARCHAR(128), @sname VARCHAR(128), @rows BIGINT, @CurrentDate AS DATETIMEOFFSET= DATEADD(dd, 30, SYSDATETIMEOFFSET()), @boundary VARCHAR(MAX);
 DECLARE cpartition CURSOR
-FOR SELECT t.name TName, 
+FOR SELECT DISTINCT 
+           t.name TName, 
            r.value PFRange, 
            f.name PFName, 
            S.name PSName, 
@@ -14,23 +15,26 @@ FOR SELECT t.name TName,
          LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
                                                             AND r.boundary_id = p.partition_number
     WHERE 1 = 1
-          --  AND t.name = @tname
-          AND i.type <= 1
+          --AND t.name = @tname
+          --AND i.type <= 1
           AND p.partition_number = 1
-          AND r.value < DATEADD(DD, -30, GETDATE())
+    --AND r.value < DATEADD(DD, -30, GETDATE())
     --AND rows = 0
-    ORDER BY p.partition_number;
+    ORDER BY t.name;
 OPEN cpartition;
 FETCH NEXT FROM cpartition INTO @tname, @BOUNDARYvalue, @fname, @sname, @rows;
 WHILE @@FETCH_STATUS = 0
     BEGIN
         BEGIN TRY
-            SET @sql = 'truncate table ' + @tname + '_switchout';
-            EXEC sp_executesql 
-                 @sql;
-            SET @sql = 'ALTER TABLE ' + QUOTENAME(@tname) + ' SWITCH PARTITION 1 TO  [' + @tname + '_switchout];';
-            EXEC sp_executesql 
-                 @sql;
+            IF @BOUNDARYvalue < DATEADD(dd, -30, GETDATE())
+                BEGIN
+                    SET @sql = 'truncate table ' + @tname + '_switchout';
+                    EXEC sp_executesql 
+                         @sql;
+                    SET @sql = 'ALTER TABLE ' + QUOTENAME(@tname) + ' SWITCH PARTITION 1 TO  [' + @tname + '_switchout];';
+                    EXEC sp_executesql 
+                         @sql;
+                END;
         END TRY
         BEGIN CATCH
             PRINT 'Issue with switch ' + @sql;
@@ -57,12 +61,12 @@ WHILE @@FETCH_STATUS = 0
             PRINT 'Merge Range Failed ' + @SQL;
         END CATCH;
         BEGIN TRY
-            SET @sql = 'ALTER PARTITION SCHEME ' + @sname + 'NEXT USED [PRIMARY];';
-            --PRINT @sql;
+            SET @sql = 'ALTER PARTITION SCHEME ' + @sname + ' NEXT USED [PRIMARY];';
+            PRINT @sql;
             EXEC sp_executesql 
                  @sql;
-            SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + ' SPLIT RANGE (''' + CONVERT(VARCHAR(23), @CurrentDate, 121) + ''')';
-            --PRINT @SQL;
+            SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + '() SPLIT RANGE (''' + CONVERT(VARCHAR(23), @CurrentDate, 121) + ''')';
+            PRINT @SQL;
             EXEC sp_executesql 
                  @sql;
         END TRY
@@ -74,7 +78,6 @@ WHILE @@FETCH_STATUS = 0
 CLOSE cpartition;  
 DEALLOCATE cpartition;
 GO
-
 
 /*
 
