@@ -45,7 +45,7 @@ WHILE @@FETCH_STATUS = 0
                 ELSE
                 SET @boundary = CONVERT(VARCHAR(23), @BOUNDARYvalue, 121);
             SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + ' () MERGE RANGE (''' + @boundary + ''')';
-            IF @rows = 0
+            IF @rows = 0 and @BOUNDARYvalue < DATEADD(dd, -30, GETDATE())
                 BEGIN
                     EXEC sp_executesql 
                          @sql;
@@ -78,45 +78,47 @@ WHILE @@FETCH_STATUS = 0
 CLOSE cpartition;  
 DEALLOCATE cpartition;
 GO
-
 /*
 
---Find Partition - Non Aligned Indexes 
-
-SELECT
- ISNULL(db_name(s.database_id),db_name()) AS DBName
- ,OBJECT_SCHEMA_NAME(i.object_id,DB_ID()) AS SchemaName
- ,o.name AS [Object_Name]
- ,i.name AS Index_name
- ,i.Type_Desc AS Type_Desc
- ,ds.name AS DataSpaceName
- ,ds.type_desc AS DataSpaceTypeDesc
- ,s.user_seeks
- ,s.user_scans
- ,s.user_lookups
- ,s.user_updates
- ,s.last_user_seek
- ,s.last_user_update
-FROM sys.objects AS o
-JOIN sys.indexes AS i ON o.object_id = i.object_id
-JOIN sys.data_spaces ds ON ds.data_space_id = i.data_space_id
-LEFT OUTER JOIN sys.dm_db_index_usage_stats AS s ON i.object_id = s.object_id AND i.index_id = s.index_id AND s.database_id = DB_ID()
-WHERE o.type = 'u'
-AND i.type IN (1, 2)
-AND o.object_id in
-(
- SELECT a.object_id from
- (SELECT ob.object_id, ds.type_desc from sys.objects ob 
- JOIN sys.indexes ind on ind.object_id = ob.object_id 
- JOIN sys.data_spaces ds on ds.data_space_id = ind.data_space_id
- GROUP BY ob.object_id, ds.type_desc ) a 
- GROUP BY a.object_id 
- HAVING COUNT (*) > 1
- )
-ORDER BY [Object_Name] DESC;
+SELECT DISTINCT 
+       t.name TName, 
+       f.name PFName, 
+       S.name PSName, 
+       r.value PSRange, 
+       SQL_VARIANT_PROPERTY(r.value, 'BaseType') AS 'Base Type', 
+       SQL_VARIANT_PROPERTY(r.value, 'Precision') AS 'Precision', 
+       SQL_VARIANT_PROPERTY(r.value, 'Scale') AS 'Scale', 
+       c.name PartitionColumn, 
+       rows RowsCount, 
+       p.partition_number, 
+       p.data_compression_desc
+FROM sys.tables AS t
+     INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
+     INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
+                                       AND i.index_id = p.index_id
+     INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
+     INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
+     LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
+                                                        AND r.boundary_id = p.partition_number
+     LEFT JOIN sys.index_columns AS ic ON ic.[object_id] = i.[object_id]
+                                          AND ic.index_id = i.index_id
+                                          AND ic.partition_ordinal >= 1
+     LEFT JOIN sys.columns AS c ON t.[object_id] = c.[object_id]
+                                   AND ic.column_id = c.column_id
+WHERE 1 = 1
+      -- AND t.name = 'tbl_carrecorddata'
+      AND i.type <= 1
+--AND p.partition_number = 1
+--AND F.NAME NOT LIKE 'DateTimeOffsetRangePFN'
+--AND r.value < DATEADD(DD, -30, GETDATE())
+-- AND rows <> 0
+ORDER BY t.name, 
+         partition_number;
 GO
-*/
 
+
+*/
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
 /*
 
 ;WITH CTE_PartCount AS
