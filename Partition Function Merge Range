@@ -1,83 +1,142 @@
-DECLARE @tname VARCHAR(128)= 'tablename', @BOUNDARYvalue SQL_VARIANT, @sql NVARCHAR(MAX), @fname VARCHAR(128), @sname VARCHAR(128), @rows BIGINT, @CurrentDate AS DATETIMEOFFSET=  DATEADD(DD, DATEDIFF(day, '19000101', GETDATE()) + 30, '19000101'), @boundary VARCHAR(MAX);
-DECLARE cpartition CURSOR
-FOR SELECT DISTINCT 
-           t.name TName, 
-           r.value PFRange, 
-           f.name PFName, 
-           S.name PSName, 
-           rows RowsCount
-    FROM sys.tables AS t
-         INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
-         INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
-                                           AND i.index_id = p.index_id
-         INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
-         INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
-         LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
-                                                            AND r.boundary_id = p.partition_number
-    WHERE 1 = 1
-          --AND t.name = @tname
-          --AND i.type <= 1
-          AND p.partition_number = 1
-    --AND r.value < DATEADD(DD, -30, GETDATE())
-    --AND rows = 0
-    ORDER BY t.name;
-OPEN cpartition;
-FETCH NEXT FROM cpartition INTO @tname, @BOUNDARYvalue, @fname, @sname, @rows;
-WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            IF @BOUNDARYvalue < DATEADD(dd, -30, GETDATE())
-                BEGIN
-                    SET @sql = 'truncate table ' + @tname + '_switchout';
-                    EXEC sp_executesql 
-                         @sql;
-                    SET @sql = 'ALTER TABLE ' + QUOTENAME(@tname) + ' SWITCH PARTITION 1 TO  [' + @tname + '_switchout];';
-                    EXEC sp_executesql 
-                         @sql;
-                END;
-        END TRY
-        BEGIN CATCH
-            PRINT 'Issue with switch ' + @sql;
-        END CATCH;
-        BEGIN TRY
-            IF(SQL_VARIANT_PROPERTY(@BOUNDARYvalue, 'basetype') = 'datetimeoffset')
-                SET @boundary = format(CAST(@BOUNDARYvalue AS DATETIMEOFFSET(7)), 'yyyy-MM-dd HH:mm:ss.fffffff zzz');
-                ELSE
-                SET @boundary = CONVERT(VARCHAR(23), @BOUNDARYvalue, 121);
-            SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + ' () MERGE RANGE (''' + @boundary + ''')';
-            IF @rows = 0 and @BOUNDARYvalue < DATEADD(dd, -30, GETDATE())
-                BEGIN
-                    EXEC sp_executesql 
-                         @sql;
-                    PRINT @sql;
-                END;
-        END TRY
-        BEGIN CATCH
-            SELECT @tname, 
-                   @BOUNDARYvalue, 
-                   @fname, 
-                   @sname, 
-                   @rows;
-            PRINT 'Merge Range Failed ' + @SQL;
-        END CATCH;
-        BEGIN TRY
-            SET @sql = 'ALTER PARTITION SCHEME ' + @sname + ' NEXT USED [PRIMARY];';
-            PRINT @sql;
-            EXEC sp_executesql 
-                 @sql;
-            SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + '() SPLIT RANGE (''' + CONVERT(VARCHAR(23), @CurrentDate, 121) + ''')';
-            PRINT @SQL;
-            EXEC sp_executesql 
-                 @sql;
-        END TRY
-        BEGIN CATCH
-            PRINT 'Partition already there;';
-        END CATCH;
-        FETCH NEXT FROM cpartition INTO @tname, @BOUNDARYvalue, @fname, @sname, @rows;
-    END;
-CLOSE cpartition;  
-DEALLOCATE cpartition;
+DROP PROCEDURE IF EXISTS [dbo].[usp_PartitionMaintenance];
 GO
+SET ANSI_NULLS ON;
+GO
+SET QUOTED_IDENTIFIER ON;
+GO
+CREATE PROCEDURE [dbo].[usp_PartitionMaintenance] @TableName               VARCHAR(128) = '', --All Partitioned tables, you can specify if you want to work on only 1
+                                                  @CleanupXDaysOldData     INT          = 30, 
+                                                  @Execute                 BIT          = 1, 
+                                                  @NextPartitionAfterXDays INT          = 30
+AS
+     SET @TableName = ISNULL(@TableName, '%');
+     IF @TableName = ''
+         SET @TableName = '%';
+     DECLARE @BOUNDARYvalue SQL_VARIANT, @partition_number INT, @sql NVARCHAR(MAX), @fname VARCHAR(128), @sname VARCHAR(128), @rows BIGINT, @CurrentDate AS DATETIMEOFFSET= DATEADD(DD, DATEDIFF(day, '19000101', GETDATE()) + @NextPartitionAfterXDays, '19000101'), @boundary VARCHAR(MAX);
+     DECLARE cpartition CURSOR
+     FOR SELECT DISTINCT 
+                t.name TName, 
+                r.value PFRange, 
+                f.name PFName, 
+                S.name PSName, 
+                rows RowsCount, 
+                partition_number
+         FROM sys.tables AS t
+              INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
+              INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
+                                                AND i.index_id = p.index_id
+              INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
+              INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
+              LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
+                                                                 AND r.boundary_id = p.partition_number
+         WHERE 1 = 1
+               AND t.name LIKE @TableName
+               AND i.type <= 1
+               AND p.partition_number = 1
+         -- AND r.value < DATEADD(DD, -@CleanupXDaysOldData, GETDATE())
+         --AND rows = 0
+         UNION
+         SELECT DISTINCT 
+                t.name TName, 
+                r.value PFRange, 
+                f.name PFName, 
+                S.name PSName, 
+                rows RowsCount, 
+                partition_number
+         FROM sys.tables AS t
+              INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
+              INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
+                                                AND i.index_id = p.index_id
+              INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
+              INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
+              LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
+                                                                 AND r.boundary_id = p.partition_number
+         WHERE 1 = 1
+               AND t.name LIKE @TableName
+               AND i.type <= 1
+               --  AND p.partition_number = 1
+               AND r.value < DATEADD(DD, -@CleanupXDaysOldData, GETDATE())
+         --AND rows = 0
+         ORDER BY partition_number;
+     OPEN cpartition;
+     FETCH NEXT FROM cpartition INTO @TableName, @BOUNDARYvalue, @fname, @sname, @rows, @partition_number;
+     WHILE @@FETCH_STATUS = 0
+         BEGIN
+             BEGIN TRY
+                 --select @BOUNDARYvalue , DATEADD(dd, -@CleanupXDaysOldData, GETDATE())
+                 IF @BOUNDARYvalue < DATEADD(dd, -@CleanupXDaysOldData, GETDATE())
+                     BEGIN
+                         SET @sql = 'TRUNCATE TABLE ' + @TableName + '_switchout';
+                         IF @Execute = 1
+                             EXEC sp_executesql 
+                                  @sql;
+                             ELSE
+                             PRINT @sql;
+                         SET @sql = 'ALTER TABLE ' + QUOTENAME(@TableName) + ' SWITCH PARTITION ' + CONVERT(VARCHAR(6), @partition_number) + ' TO [' + @TableName + '_switchout];';
+                         IF @Execute = 1
+                             EXEC sp_executesql 
+                                  @sql;
+                             ELSE
+                             PRINT @SQL;
+                     END;
+             END TRY
+             BEGIN CATCH
+                 PRINT 'Issue with switch ' + @sql;
+             END CATCH;
+             BEGIN TRY
+                 IF(SQL_VARIANT_PROPERTY(@BOUNDARYvalue, 'basetype') = 'datetimeoffset')
+                     SET @boundary = format(CAST(@BOUNDARYvalue AS DATETIMEOFFSET(7)), 'yyyy-MM-dd HH:mm:ss.fffffff zzz');
+                     ELSE
+                     SET @boundary = CONVERT(VARCHAR(23), @BOUNDARYvalue, 121);
+                 SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + ' () MERGE RANGE (''' + @boundary + ''') --' + @TableName;
+                 IF @rows = 0
+                    AND @BOUNDARYvalue < DATEADD(dd, -@CleanupXDaysOldData, GETDATE())
+                     BEGIN
+                         IF @Execute = 1
+                             EXEC sp_executesql 
+                                  @sql;
+                             ELSE
+                             PRINT @sql;
+                     END;
+             END TRY
+             BEGIN CATCH
+                 SELECT @TableName, 
+                        @BOUNDARYvalue, 
+                        @fname, 
+                        @sname, 
+                        @rows;
+                 PRINT 'Merge Range Failed ' + @SQL;
+             END CATCH;
+             BEGIN TRY
+                 SET @sql = 'ALTER PARTITION SCHEME ' + @sname + ' NEXT USED [PRIMARY]; --' + @TableName;
+                 IF(@Execute = 1)
+                     BEGIN
+                         IF @partition_number = 1
+                             EXEC sp_executesql 
+                                  @sql;
+                     END;
+                     ELSE
+                     IF @partition_number = 1
+                         PRINT @SQL;
+                 SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + '() SPLIT RANGE (''' + CONVERT(VARCHAR(23), @CurrentDate, 121) + '''); --' + @TableName;
+                 IF(@Execute = 1)
+                     BEGIN
+                         IF @partition_number = 1
+                             EXEC sp_executesql 
+                                  @sql;
+                     END;
+                     ELSE
+                     IF @partition_number = 1
+                         PRINT @SQL;
+             END TRY
+             BEGIN CATCH
+                 PRINT 'Partition already there;';
+             END CATCH;
+             FETCH NEXT FROM cpartition INTO @TableName, @BOUNDARYvalue, @fname, @sname, @rows, @partition_number;
+         END;
+     CLOSE cpartition;
+     DEALLOCATE cpartition;
+
 /*
 
 SELECT DISTINCT 
@@ -118,6 +177,7 @@ GO
 
 
 */
+
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 /*
 
@@ -167,3 +227,5 @@ SELECT S.object_id
 FROM CTE_Summary AS S
 
 */
+
+GO
