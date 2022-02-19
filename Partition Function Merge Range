@@ -4,10 +4,12 @@ SET ANSI_NULLS ON;
 GO
 SET QUOTED_IDENTIFIER ON;
 GO
-CREATE PROCEDURE [dbo].[usp_PartitionMaintenance] @TableName               VARCHAR(128) = '', --All Partitioned tables, you can specify if you want to work on only 1
+CREATE PROCEDURE [dbo].[usp_PartitionMaintenance] @TableName               VARCHAR(128) = '', 
                                                   @CleanupXDaysOldData     INT          = 30, 
-                                                  @Execute                 BIT          = 1, 
-                                                  @NextPartitionAfterXDays INT          = 30
+                                                  @Execute                 BIT          = 0, 
+                                                  @NextPartitionAfterXDays INT          = 30, 
+                                                  @PartitionALIGNEDIndex   BIT          = 0, 
+                                                  @AllPartitionTablesInfo  BIT          = 0
 AS
      SET @TableName = ISNULL(@TableName, '%');
      IF @TableName = ''
@@ -136,96 +138,97 @@ AS
          END;
      CLOSE cpartition;
      DEALLOCATE cpartition;
+     IF @AllPartitionTablesInfo = 1
+         BEGIN
+             SELECT DISTINCT 
+                    t.name TName, 
+                    f.name PFName, 
+                    S.name PSName, 
+                    r.value PSRange, 
+                    SQL_VARIANT_PROPERTY(r.value, 'BaseType') AS 'Base Type', 
+                    SQL_VARIANT_PROPERTY(r.value, 'Precision') AS 'Precision', 
+                    SQL_VARIANT_PROPERTY(r.value, 'Scale') AS 'Scale', 
+                    c.name PartitionColumn, 
+                    rows RowsCount, 
+                    p.partition_number, 
+                    p.data_compression_desc
+             FROM sys.tables AS t
+                  INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
+                  INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
+                                                    AND i.index_id = p.index_id
+                  INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
+                  INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
+                  LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
+                                                                     AND r.boundary_id = p.partition_number
+                  LEFT JOIN sys.index_columns AS ic ON ic.[object_id] = i.[object_id]
+                                                       AND ic.index_id = i.index_id
+                                                       AND ic.partition_ordinal >= 1
+                  LEFT JOIN sys.columns AS c ON t.[object_id] = c.[object_id]
+                                                AND ic.column_id = c.column_id
+             WHERE 1 = 1
+                   -- AND t.name = 'tbl_carrecorddata'
+                   AND i.type <= 1
+             --AND p.partition_number = 1
+             --AND F.NAME NOT LIKE 'DateTimeOffsetRangePFN'
+             --AND r.value < DATEADD(DD, -30, GETDATE())
+             -- AND rows <> 0
+             ORDER BY t.name, 
+                      partition_number;
+         END;
 
-/*
-
-SELECT DISTINCT 
-       t.name TName, 
-       f.name PFName, 
-       S.name PSName, 
-       r.value PSRange, 
-       SQL_VARIANT_PROPERTY(r.value, 'BaseType') AS 'Base Type', 
-       SQL_VARIANT_PROPERTY(r.value, 'Precision') AS 'Precision', 
-       SQL_VARIANT_PROPERTY(r.value, 'Scale') AS 'Scale', 
-       c.name PartitionColumn, 
-       rows RowsCount, 
-       p.partition_number, 
-       p.data_compression_desc
-FROM sys.tables AS t
-     INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
-     INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
-                                       AND i.index_id = p.index_id
-     INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
-     INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
-     LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
-                                                        AND r.boundary_id = p.partition_number
-     LEFT JOIN sys.index_columns AS ic ON ic.[object_id] = i.[object_id]
-                                          AND ic.index_id = i.index_id
-                                          AND ic.partition_ordinal >= 1
-     LEFT JOIN sys.columns AS c ON t.[object_id] = c.[object_id]
-                                   AND ic.column_id = c.column_id
-WHERE 1 = 1
-      -- AND t.name = 'tbl_carrecorddata'
-      AND i.type <= 1
---AND p.partition_number = 1
---AND F.NAME NOT LIKE 'DateTimeOffsetRangePFN'
---AND r.value < DATEADD(DD, -30, GETDATE())
--- AND rows <> 0
-ORDER BY t.name, 
-         partition_number;
-GO
-
-
-*/
-
------------------------------------------------------------------------------------------------------------------------------------------------------------
-/*
-
-;WITH CTE_PartCount AS
-    (
-    SELECT P.object_id
-        , P.index_id
-        , COUNT(P.partition_number) AS PartitionCount
-    FROM sys.partitions AS P
-    GROUP BY P.object_id
-        , P.index_id
-    )
-, CTE_Objects AS
-    (
-    SELECT O.object_id
-        , O.name AS ObjectName
-        , S.name AS SchemaName
-        , I.index_id
-        , I.name AS IndexName
-        , I.type_desc AS IndexType
-    FROM sys.objects AS O
-        INNER JOIN sys.schemas AS S ON S.schema_id = O.schema_id
-        INNER JOIN sys.indexes AS I ON I.object_id = O.object_id
-    WHERE O.is_ms_shipped = 0
-        AND O.type_desc = 'USER_TABLE'
-    )
-, CTE_Summary AS
-    (
-    SELECT O.object_id
-        , O.ObjectName
-        , O.SchemaName
-        , O.IndexName
-        , O.IndexType
-        , PC.PartitionCount
-        , TablePartCount = FIRST_VALUE(PC.PartitionCount) OVER (PARTITION BY O.object_id ORDER BY O.object_id, O.index_id)
-    FROM CTE_Objects AS O
-        LEFT OUTER JOIN CTE_PartCount AS PC ON PC.object_id = O.object_id AND PC.index_id = O.index_id
-    )
-SELECT S.object_id
-    , S.SchemaName
-    , S.ObjectName
-    , S.IndexName
-    , S.IndexType
-    , S.PartitionCount
-    , IsPartitioned = CASE WHEN S.TablePartCount <> 1 THEN 'YES' ELSE 'NO' END
-    , IsAligned = CASE WHEN S.TablePartCount = S.PartitionCount THEN 'ALIGNED' ELSE '' END
-FROM CTE_Summary AS S
-
-*/
-
+     -----------------------------------------------------------------------------------------------------------------------------------------------------------
+     IF @PartitionALIGNEDIndex = 1
+         BEGIN
+             WITH CTE_PartCount
+                  AS (SELECT P.object_id, 
+                             P.index_id, 
+                             COUNT(P.partition_number) AS PartitionCount
+                      FROM sys.partitions AS P
+                      GROUP BY P.object_id, 
+                               P.index_id),
+                  CTE_Objects
+                  AS (SELECT O.object_id, 
+                             O.name AS ObjectName, 
+                             S.name AS SchemaName, 
+                             I.index_id, 
+                             I.name AS IndexName, 
+                             I.type_desc AS IndexType
+                      FROM sys.objects AS O
+                           INNER JOIN sys.schemas AS S ON S.schema_id = O.schema_id
+                           INNER JOIN sys.indexes AS I ON I.object_id = O.object_id
+                      WHERE O.is_ms_shipped = 0
+                            AND O.type_desc = 'USER_TABLE'),
+                  CTE_Summary
+                  AS (SELECT O.object_id, 
+                             O.ObjectName, 
+                             O.SchemaName, 
+                             O.IndexName, 
+                             O.IndexType, 
+                             PC.PartitionCount, 
+                             TablePartCount = FIRST_VALUE(PC.PartitionCount) OVER(PARTITION BY O.object_id
+                             ORDER BY O.object_id, 
+                                      O.index_id)
+                      FROM CTE_Objects AS O
+                           LEFT OUTER JOIN CTE_PartCount AS PC ON PC.object_id = O.object_id
+                                                                  AND PC.index_id = O.index_id)
+                  SELECT S.object_id, 
+                         S.SchemaName, 
+                         S.ObjectName, 
+                         S.IndexName, 
+                         S.IndexType, 
+                         S.PartitionCount, 
+                         IsPartitioned = CASE
+                                             WHEN S.TablePartCount <> 1
+                                             THEN 'YES'
+                                             ELSE 'NO'
+                                         END, 
+                         IsAligned = CASE
+                                         WHEN S.TablePartCount = S.PartitionCount
+                                         THEN 'ALIGNED'
+                                         ELSE ''
+                                     END
+                  FROM CTE_Summary AS S
+                  WHERE S.TablePartCount <> 1
+                  ORDER BY IsAligned;
+         END;
 GO
