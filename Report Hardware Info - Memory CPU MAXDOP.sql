@@ -312,16 +312,14 @@ BEGIN TRY
               AND STATUS <> 1073808392
     ) DBCount, 
     (
-        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
-        FROM sys.dm_os_performance_counters
-        WHERE instance_name LIKE '%_Total%'
-              AND counter_name LIKE 'Data File(s) Size (KB)%'
+        SELECT convert(decimal(25,0),SUM(size/128.0))
+        FROM sys.master_files
+        WHERE is_sparse = 0 and database_id <> 2 and type_desc = 'ROWS'
     ) TotalDataSizeMB, 
     (
-        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
-        FROM sys.dm_os_performance_counters
-        WHERE instance_name LIKE '%_Total%'
-              AND counter_name LIKE 'Log File(s) Size (KB)%'
+        SELECT convert(decimal(25,0),SUM(size/128.0))
+        FROM sys.master_files
+        WHERE is_sparse = 0 and database_id <> 2 and type_desc = 'LOG'
     ) TotalLogSizeMB, 
            SERVERPROPERTY('Collation') ServerCollation, 
     (
