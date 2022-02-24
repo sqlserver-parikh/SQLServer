@@ -62,6 +62,10 @@ BEGIN TRY
 	declare @agname sysname, @listnername varchar(128),
 @primaryserver varchar(128),
 @agserverlist varchar(max), @agdblist varchar(max)
+
+if (select compatibility_level from sys.databases
+where database_id = 1) >= 110
+begin 
 SELECT
 name as AGname,agl.dns_name,
 replica_server_name,
@@ -97,8 +101,14 @@ inner join sys.availability_group_listeners agl on agl.group_id = groups.group_i
             FROM #aginfo b  where a.agname = b.agname  and a.dns_name = b.dns_name order by 1 FOR xml PATH('') 
        ) , 3, 8000)  from #aginfo a
 	   end
-
-
+end 
+else begin
+   set @agname =  'No AlwaysON'
+	   set @listnername =  'No AlwaysON'
+	   set @primaryserver = 'No AlwaysON'
+	   set @agserverlist = 'No AlwaysON'
+	   set @agdblist =  'No AlwaysON'
+end 
     IF OBJECT_ID('tempdb..#InstanceName') IS NOT NULL
         DROP TABLE #InstanceName;
     CREATE TABLE #InstanceName
