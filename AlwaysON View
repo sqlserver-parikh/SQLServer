@@ -1,5 +1,5 @@
 SELECT
-name as AGname,agl.dns_name
+name as AGname,agl.dns_name,
 replica_server_name,
 ADC.database_name,
 CASE WHEN  (primary_replica  = replica_server_name) THEN  1
