@@ -58,6 +58,47 @@ BEGIN TRY
     (PortType NVARCHAR(180), 
      Port     INT
     );
+
+	declare @agname sysname, @listnername varchar(128),
+@primaryserver varchar(128),
+@agserverlist varchar(max), @agdblist varchar(max)
+SELECT
+name as AGname,agl.dns_name,
+replica_server_name,
+ADC.database_name,
+CASE WHEN  (primary_replica  = replica_server_name) THEN  1
+ELSE  '' END AS IsPrimaryServer,
+secondary_role_allow_connections_desc AS ReadableSecondary,
+[availability_mode]  AS [Synchronous],
+failover_mode_desc, read_only_routing_url, availability_mode_desc
+INTO #aginfo
+FROM master.sys.availability_groups Groups
+INNER JOIN master.sys.availability_replicas Replicas ON Groups.group_id = Replicas.group_id
+INNER JOIN master.sys.dm_hadr_availability_group_states States ON Groups.group_id = States.group_id
+INNER JOIN  sys.availability_databases_cluster ADC ON ADC.group_id = Groups.group_id
+inner join sys.availability_group_listeners agl on agl.group_id = groups.group_id
+	   if @@ROWCOUNT = 0 
+	   begin 
+	   set @agname =  'No AlwaysON'
+	   set @listnername =  'No AlwaysON'
+	   set @primaryserver = 'No AlwaysON'
+	   set @agserverlist = 'No AlwaysON'
+	   set @agdblist =  'No AlwaysON'
+	   end
+	   else 
+	   begin
+	          SELECT  distinct top 1 @agname = a.AGName, @listnername = a.DNS_Name , @primaryserver = (select distinct replica_server_name from #aginfo b where IsPrimaryServer = 1 and a.agname = b.agname  and a.dns_name = b.dns_name ), @agserverlist = SUBSTRING(
+        (
+            SELECT DISTINCT ' ,' + b.replica_server_name
+            FROM #aginfo b  where a.agname = b.agname  and a.dns_name = b.dns_name  FOR xml PATH('') 
+        ) , 3, 8000), @agdblist = SUBSTRING(
+        (
+            SELECT DISTINCT ' ,' + b.database_name
+            FROM #aginfo b  where a.agname = b.agname  and a.dns_name = b.dns_name order by 1 FOR xml PATH('') 
+       ) , 3, 8000)  from #aginfo a
+	   end
+
+
     IF OBJECT_ID('tempdb..#InstanceName') IS NOT NULL
         DROP TABLE #InstanceName;
     CREATE TABLE #InstanceName
@@ -193,6 +234,11 @@ BEGIN TRY
            END SQLVersionDesc, 
            SERVERPROPERTY(N'ProductVersion') SQLVersion, 
            SERVERPROPERTY('ProductLevel') ServicePack, 
+		   @agname AGName,
+		   @listnername AGListenerName,
+		   @primaryserver AGPrimaryServer,
+		   @agserverlist  AGServerList,
+		   @agdblist AGDBList,
     (
         SELECT COUNT(*)
         FROM #InstanceName
@@ -229,14 +275,16 @@ BEGIN TRY
         WHERE dbid > 4
     ) DBCount, 
     (
-        SELECT sum(size)/128.0
-        FROM sys.master_files
-      where is_sparse = 0 and type = 0
+        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
+        FROM sys.dm_os_performance_counters
+        WHERE instance_name LIKE '%_Total%'
+              AND counter_name LIKE 'Data File(s) Size (KB)%'
     ) TotalDataSizeMB, 
     (
-   SELECT sum(size)/128.0
-        FROM sys.master_files
-      where is_sparse = 0 and type = 1
+        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
+        FROM sys.dm_os_performance_counters
+        WHERE instance_name LIKE '%_Total%'
+              AND counter_name LIKE 'Log File(s) Size (KB)%'
     ) TotalLogSizeMB, 
            SERVERPROPERTY('Collation') ServerCollation, 
     (
@@ -325,3 +373,5 @@ IF OBJECT_ID('tempdb..#SQLInstances') IS NOT NULL
     DROP TABLE #SQLInstances;
 IF OBJECT_ID('tempdb..#WinNames') IS NOT NULL
     DROP TABLE #WinNames;
+IF OBJECT_ID('tempdb..#aginfo') IS NOT NULL
+    DROP TABLE #aginfo;
