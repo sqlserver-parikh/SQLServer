@@ -89,11 +89,11 @@ inner join sys.availability_group_listeners agl on agl.group_id = groups.group_i
 	   begin
 	          SELECT  distinct top 1 @agname = a.AGName, @listnername = a.DNS_Name , @primaryserver = (select distinct replica_server_name from #aginfo b where IsPrimaryServer = 1 and a.agname = b.agname  and a.dns_name = b.dns_name ), @agserverlist = SUBSTRING(
         (
-            SELECT DISTINCT ' ,' + b.replica_server_name
+            SELECT DISTINCT ', ' + b.replica_server_name
             FROM #aginfo b  where a.agname = b.agname  and a.dns_name = b.dns_name  FOR xml PATH('') 
         ) , 3, 8000), @agdblist = SUBSTRING(
         (
-            SELECT DISTINCT ' ,' + b.database_name
+            SELECT DISTINCT ', ' + b.database_name
             FROM #aginfo b  where a.agname = b.agname  and a.dns_name = b.dns_name order by 1 FOR xml PATH('') 
        ) , 3, 8000)  from #aginfo a
 	   end
