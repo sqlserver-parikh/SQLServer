@@ -282,7 +282,7 @@ end
     (
         SELECT COUNT(*)
         FROM sys.sysdatabases
-        WHERE dbid > 4
+        WHERE dbid > 4 and status <> 1073808392
     ) DBCount, 
     (
         SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
