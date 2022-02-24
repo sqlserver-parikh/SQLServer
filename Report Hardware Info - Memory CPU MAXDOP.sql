@@ -58,57 +58,83 @@ BEGIN TRY
     (PortType NVARCHAR(180), 
      Port     INT
     );
-
-	declare @agname sysname, @listnername varchar(128),
-@primaryserver varchar(128),
-@agserverlist varchar(max), @agdblist varchar(max)
-
-if (select compatibility_level from sys.databases
-where database_id = 1) >= 110
-begin 
-SELECT
-name as AGname,agl.dns_name,
-replica_server_name,
-ADC.database_name,
-CASE WHEN  (primary_replica  = replica_server_name) THEN  1
-ELSE  '' END AS IsPrimaryServer,
-secondary_role_allow_connections_desc AS ReadableSecondary,
-[availability_mode]  AS [Synchronous],
-failover_mode_desc, read_only_routing_url, availability_mode_desc
-INTO #aginfo
-FROM master.sys.availability_groups Groups
-INNER JOIN master.sys.availability_replicas Replicas ON Groups.group_id = Replicas.group_id
-INNER JOIN master.sys.dm_hadr_availability_group_states States ON Groups.group_id = States.group_id
-INNER JOIN  sys.availability_databases_cluster ADC ON ADC.group_id = Groups.group_id
-inner join sys.availability_group_listeners agl on agl.group_id = groups.group_id
-	   if @@ROWCOUNT = 0 
-	   begin 
-	   set @agname =  'No AlwaysON'
-	   set @listnername =  'No AlwaysON'
-	   set @primaryserver = 'No AlwaysON'
-	   set @agserverlist = 'No AlwaysON'
-	   set @agdblist =  'No AlwaysON'
-	   end
-	   else 
-	   begin
-	          SELECT  distinct top 1 @agname = a.AGName, @listnername = a.DNS_Name , @primaryserver = (select distinct replica_server_name from #aginfo b where IsPrimaryServer = 1 and a.agname = b.agname  and a.dns_name = b.dns_name ), @agserverlist = SUBSTRING(
-        (
-            SELECT DISTINCT ', ' + b.replica_server_name
-            FROM #aginfo b  where a.agname = b.agname  and a.dns_name = b.dns_name  FOR xml PATH('') 
-        ) , 3, 8000), @agdblist = SUBSTRING(
-        (
-            SELECT DISTINCT ', ' + b.database_name
-            FROM #aginfo b  where a.agname = b.agname  and a.dns_name = b.dns_name order by 1 FOR xml PATH('') 
-       ) , 3, 8000)  from #aginfo a
-	   end
-end 
-else begin
-   set @agname =  'No AlwaysON'
-	   set @listnername =  'No AlwaysON'
-	   set @primaryserver = 'No AlwaysON'
-	   set @agserverlist = 'No AlwaysON'
-	   set @agdblist =  'No AlwaysON'
-end 
+    DECLARE @agname SYSNAME, @listnername VARCHAR(128), @primaryserver VARCHAR(128), @agserverlist VARCHAR(MAX), @agdblist VARCHAR(MAX);
+    IF
+    (
+        SELECT compatibility_level
+        FROM sys.databases
+        WHERE database_id = 1
+    ) >= 110
+        BEGIN
+            SELECT name AS AGname, 
+                   agl.dns_name, 
+                   replica_server_name, 
+                   ADC.database_name,
+                   CASE
+                       WHEN(primary_replica = replica_server_name)
+                       THEN 1
+                       ELSE ''
+                   END AS IsPrimaryServer, 
+                   secondary_role_allow_connections_desc AS ReadableSecondary, 
+                   [availability_mode] AS [Synchronous], 
+                   failover_mode_desc, 
+                   read_only_routing_url, 
+                   availability_mode_desc
+            INTO #aginfo
+            FROM master.sys.availability_groups Groups
+                 INNER JOIN master.sys.availability_replicas Replicas ON Groups.group_id = Replicas.group_id
+                 INNER JOIN master.sys.dm_hadr_availability_group_states States ON Groups.group_id = States.group_id
+                 INNER JOIN sys.availability_databases_cluster ADC ON ADC.group_id = Groups.group_id
+                 INNER JOIN sys.availability_group_listeners agl ON agl.group_id = groups.group_id;
+            IF @@ROWCOUNT = 0
+                BEGIN
+                    SET @agname = 'No AlwaysON';
+                    SET @listnername = 'No AlwaysON';
+                    SET @primaryserver = 'No AlwaysON';
+                    SET @agserverlist = 'No AlwaysON';
+                    SET @agdblist = 'No AlwaysON';
+                END;
+                ELSE
+                BEGIN
+                    SELECT DISTINCT TOP 1 @agname = a.AGName, 
+                                          @listnername = a.DNS_Name, 
+                                          @primaryserver =
+                    (
+                        SELECT DISTINCT 
+                               replica_server_name
+                        FROM #aginfo b
+                        WHERE IsPrimaryServer = 1
+                              AND a.agname = b.agname
+                              AND a.dns_name = b.dns_name
+                    ), 
+                                          @agserverlist = SUBSTRING(
+                    (
+                        SELECT DISTINCT 
+                               ', ' + b.replica_server_name
+                        FROM #aginfo b
+                        WHERE a.agname = b.agname
+                              AND a.dns_name = b.dns_name FOR XML PATH('')
+                    ), 3, 8000), 
+                                          @agdblist = SUBSTRING(
+                    (
+                        SELECT DISTINCT 
+                               ', ' + b.database_name
+                        FROM #aginfo b
+                        WHERE a.agname = b.agname
+                              AND a.dns_name = b.dns_name
+                        ORDER BY 1 FOR XML PATH('')
+                    ), 3, 8000)
+                    FROM #aginfo a;
+                END;
+        END;
+        ELSE
+        BEGIN
+            SET @agname = 'No AlwaysON';
+            SET @listnername = 'No AlwaysON';
+            SET @primaryserver = 'No AlwaysON';
+            SET @agserverlist = 'No AlwaysON';
+            SET @agdblist = 'No AlwaysON';
+        END;
     IF OBJECT_ID('tempdb..#InstanceName') IS NOT NULL
         DROP TABLE #InstanceName;
     CREATE TABLE #InstanceName
@@ -244,11 +270,11 @@ end
            END SQLVersionDesc, 
            SERVERPROPERTY(N'ProductVersion') SQLVersion, 
            SERVERPROPERTY('ProductLevel') ServicePack, 
-		   @agname AGName,
-		   @listnername AGListenerName,
-		   @primaryserver AGPrimaryServer,
-		   @agserverlist  AGServerList,
-		   @agdblist AGDBList,
+           @agname AGName, 
+           @listnername AGListenerName, 
+           @primaryserver AGPrimaryServer, 
+           @agserverlist AGServerList, 
+           @agdblist AGDBList, 
     (
         SELECT COUNT(*)
         FROM #InstanceName
@@ -282,7 +308,8 @@ end
     (
         SELECT COUNT(*)
         FROM sys.sysdatabases
-        WHERE dbid > 4 and status <> 1073808392
+        WHERE dbid > 4
+              AND STATUS <> 1073808392
     ) DBCount, 
     (
         SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
