@@ -229,16 +229,14 @@ BEGIN TRY
         WHERE dbid > 4
     ) DBCount, 
     (
-        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
-        FROM sys.dm_os_performance_counters
-        WHERE instance_name LIKE '%_Total%'
-              AND counter_name LIKE 'Data File(s) Size (KB)%'
+        SELECT sum(size)/128.0
+        FROM sys.master_files
+      where is_sparse = 0 and type = 0
     ) TotalDataSizeMB, 
     (
-        SELECT CAST(cntr_value / 1024.0 AS DECIMAL(10, 2))
-        FROM sys.dm_os_performance_counters
-        WHERE instance_name LIKE '%_Total%'
-              AND counter_name LIKE 'Log File(s) Size (KB)%'
+   SELECT sum(size)/128.0
+        FROM sys.master_files
+      where is_sparse = 0 and type = 1
     ) TotalLogSizeMB, 
            SERVERPROPERTY('Collation') ServerCollation, 
     (
