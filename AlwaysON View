@@ -1,5 +1,5 @@
 SELECT
-name as AGname,
+name as AGname,agl.dns_name
 replica_server_name,
 ADC.database_name,
 CASE WHEN  (primary_replica  = replica_server_name) THEN  1
@@ -11,4 +11,5 @@ FROM master.sys.availability_groups Groups
 INNER JOIN master.sys.availability_replicas Replicas ON Groups.group_id = Replicas.group_id
 INNER JOIN master.sys.dm_hadr_availability_group_states States ON Groups.group_id = States.group_id
 INNER JOIN  sys.availability_databases_cluster ADC ON ADC.group_id = Groups.group_id
+inner join sys.availability_group_listeners agl on agl.group_id = groups.group_id
 
