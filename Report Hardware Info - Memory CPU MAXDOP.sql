@@ -336,7 +336,8 @@ BEGIN TRY
            SERVERPROPERTY(N'Edition') Edition, 
            SERVERPROPERTY('ErrorLogFileName') ErrorLogLocation, 
            @DefaultData AS 'Data Files', 
-           @DefaultLog AS 'Log Files', 
+           @DefaultLog AS 'Log Files',
+		   @SQLDataRoot SQLDataRoot,
            @BackupPath DefaultBackup, 
     (
         SELECT COUNT(*)
