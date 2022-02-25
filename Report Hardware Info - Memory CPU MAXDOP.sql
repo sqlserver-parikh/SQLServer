@@ -110,7 +110,7 @@ BEGIN TRY
                                           @agserverlist = SUBSTRING(
                     (
                         SELECT DISTINCT 
-                               ', ' + b.replica_server_name
+                               ', ' + b.replica_server_name + '(' + failover_mode_desc + ', ' + availability_mode_desc + ')'
                         FROM #aginfo b
                         WHERE a.agname = b.agname
                               AND a.dns_name = b.dns_name FOR XML PATH('')
