@@ -169,6 +169,36 @@ BEGIN TRY
      Value  NVARCHAR(30), 
      CValue NVARCHAR(30)
     );
+    DECLARE @SQLDataRoot NVARCHAR(512);
+    DECLARE @DefaultData NVARCHAR(512);
+    DECLARE @DefaultLog NVARCHAR(512);
+
+    --Installation Root Info
+    EXEC master.dbo.xp_instance_regread 
+         N'HKEY_LOCAL_MACHINE', 
+         N'Software\Microsoft\MSSQLServer\Setup', 
+         N'SQLDataRoot', 
+         @SQLDataRoot OUTPUT;
+
+    -- SQL Data file Info
+    EXEC master.dbo.xp_instance_regread 
+         N'HKEY_LOCAL_MACHINE', 
+         N'Software\Microsoft\MSSQLServer\MSSQLServer', 
+         N'DefaultData', 
+         @DefaultData OUTPUT;
+
+    -- SQL Default Default Log file info
+    EXEC master.dbo.xp_instance_regread 
+         N'HKEY_LOCAL_MACHINE', 
+         N'Software\Microsoft\MSSQLServer\MSSQLServer', 
+         N'DefaultLog', 
+         @DefaultLog OUTPUT;
+    DECLARE @BackupPath NVARCHAR(4000);
+    EXEC master.dbo.xp_instance_regread 
+         N'HKEY_LOCAL_MACHINE', 
+         N'Software\Microsoft\MSSQLServer\MSSQLServer', 
+         N'BackupDirectory', 
+         @BackupPath OUTPUT;
     INSERT INTO #cpudetails
     EXEC xp_msver 
          ProcessorCount;
@@ -305,6 +335,9 @@ BEGIN TRY
            END AllNodes, 
            SERVERPROPERTY(N'Edition') Edition, 
            SERVERPROPERTY('ErrorLogFileName') ErrorLogLocation, 
+           @DefaultData AS 'Data Files', 
+           @DefaultLog AS 'Log Files', 
+           @BackupPath DefaultBackup, 
     (
         SELECT COUNT(*)
         FROM sys.sysdatabases
@@ -312,14 +345,18 @@ BEGIN TRY
               AND STATUS <> 1073808392
     ) DBCount, 
     (
-        SELECT convert(decimal(25,0),SUM(size/128.0))
+        SELECT CONVERT(DECIMAL(25, 0), SUM(size / 128.0))
         FROM sys.master_files
-        WHERE is_sparse = 0 and database_id <> 2 and type_desc = 'ROWS'
+        WHERE is_sparse = 0
+              AND database_id <> 2
+              AND type_desc = 'ROWS'
     ) TotalDataSizeMB, 
     (
-        SELECT convert(decimal(25,0),SUM(size/128.0))
+        SELECT CONVERT(DECIMAL(25, 0), SUM(size / 128.0))
         FROM sys.master_files
-        WHERE is_sparse = 0 and database_id <> 2 and type_desc = 'LOG'
+        WHERE is_sparse = 0
+              AND database_id <> 2
+              AND type_desc = 'LOG'
     ) TotalLogSizeMB, 
            SERVERPROPERTY('Collation') ServerCollation, 
     (
