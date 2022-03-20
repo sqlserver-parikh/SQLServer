@@ -1,0 +1,21 @@
+#https://sqlnuggets.com/patching-multiple-sql-servers-with-powershell-and-dbatools/
+
+#create a credential
+$cred = Get-Credential DOMAIN\your.account
+
+#Update the Build Reference so DBATOOLS is aware of the latest SP/CU versions
+#Set the versions to whatever version you're using
+Get-DbaBuildReference -MajorVersion 2016 -ServicePack 2 -Update
+ 
+#create a list of servers that you want to patch
+$ServerList = 'SQL01','SQL02','SQL03'
+ 
+#create a credential to pass in to the Update-DbaInstance command; this will prompt for your password
+$cred = Get-Credential DOMAIN\your.account
+ 
+#Set the version that you want to update to
+$version = '2016SP2CU5'
+ 
+#Start Patching! The -Restart option will allow it to restart the SQL Server as needed
+Update-DbaInstance -ComputerName $ServerList -Path '\\network\share\path\SQLSERVER\2016\SP2\' -Credential $cred -Version $version -Restart
+ 
