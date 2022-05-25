@@ -6,10 +6,20 @@ TempDB Free space troubleshoot
 5.	If still issue run dbcc freesystemcache('all') and try to shrink 
 6.	If still issue work with BCC and application/business owner that we need to restart SQL.
 
-SELECT 'DBCC SHRINKFILE(''' + name + ''', 8192)' ShrinkCommand,
-'ALTER DATABASE [tempdb] MODIFY FILE ( NAME = N''' + name + ''', SIZE = ' + CONVERT(NVARCHAR(20),CONVERT(DECIMAL(20,0), FLOOR(SIZE/128.0) + 10)) + 'MB )' IncreaseBy10MB
-,CONVERT(decimal(20,0), size/128.0) CurrentSizeMB from tempdb.sys.database_files 
-order by data_space_id desc, file_id
+USE TEMPDB;
+DBCC FREEPROCCACHE;
+GO
+DBCC DROPCLEANBUFFERS; 
+GO
+DBCC FREESYSTEMCACHE('all');
+GO
+SELECT 'DBCC SHRINKFILE(''' + name + ''', 8192)' ShrinkCommand, 
+       'ALTER DATABASE [tempdb] MODIFY FILE ( NAME = N''' + name + ''', SIZE = ' + CONVERT(NVARCHAR(20), CONVERT(DECIMAL(20, 0), FLOOR(SIZE / 128.0) + 10)) + 'MB )' IncreaseBy10MB, 
+       CONVERT(DECIMAL(20, 0), size / 128.0) CurrentSizeMB
+FROM tempdb.sys.database_files
+ORDER BY data_space_id DESC, 
+         file_id;
+
 
 ;WITH task_space_usage AS (
     -- SUM alloc/delloc pages
