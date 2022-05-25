@@ -1,34 +1,34 @@
-USE [master]
+USE [master];
 GO
+
 /****** Object:  StoredProcedure [dbo].[sp_RestoreFromAllFilesInDirectory]    Script Date: 5/24/2022 1:33:58 PM ******/
-SET ANSI_NULLS ON
-GO
-SET QUOTED_IDENTIFIER ON
-GO
 
-
-CREATE OR ALTER PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @DatabaseName nvarchar(500) = NULL,
-															@BackupFiles NVARCHAR(500), 
-                                                           @DataFile1       NVARCHAR(500) = NULL, 
-                                                           @DataFile2      NVARCHAR(500) = NULL, 
-                                                           @DataFile3      NVARCHAR(500) = NULL, 
-                                                           @DataFile4      NVARCHAR(500) = NULL, 
-                                                           @DataFile5      NVARCHAR(500) = NULL, 
-                                                           @DataFile6      NVARCHAR(500) = NULL, 
-														   @DataFile7      NVARCHAR(500) = NULL, 
-                                                           @LogFile      NVARCHAR(500) = NULL, 
-                                                           @BackupInLastXDays    INT           = 7, 
-                                                           @MaxBackupSizeInGB    INT           = 500, 
-                                                           @PrintOnly            BIT           = 0, --1 prints command, 0 execute script
-														   @DropDatabase		 BIT			= 0,
-														   @DeleteBackupFile	 BIT			= 0,
-														   @RunCheckDB			 BIT		    = 1	,
-														   	@BufferCount INT = NULL,
-	@MaxTransferSize INT = NULL,
-	@BlockSize INT = NULL,
-	@runrecovery bit = 1
+SET ANSI_NULLS ON;
+GO
+SET QUOTED_IDENTIFIER ON;
+GO
+CREATE OR ALTER PROCEDURE [dbo].[sp_RestoreFromAllFilesInDirectory] @DatabaseName      NVARCHAR(500) = NULL, 
+                                                                    @BackupFiles       NVARCHAR(500), 
+                                                                    @DataFile1         NVARCHAR(500) = NULL, 
+                                                                    @DataFile2         NVARCHAR(500) = NULL, 
+                                                                    @DataFile3         NVARCHAR(500) = NULL, 
+                                                                    @DataFile4         NVARCHAR(500) = NULL, 
+                                                                    @DataFile5         NVARCHAR(500) = NULL, 
+                                                                    @DataFile6         NVARCHAR(500) = NULL, 
+                                                                    @DataFile7         NVARCHAR(500) = NULL, 
+                                                                    @LogFile           NVARCHAR(500) = NULL, 
+                                                                    @BackupInLastXDays INT           = 7, 
+                                                                    @MaxBackupSizeInGB INT           = 500, 
+                                                                    @PrintOnly         BIT           = 0, --1 prints command, 0 execute script
+                                                                    @DropDatabase      BIT           = 0, 
+                                                                    @DeleteBackupFile  BIT           = 0, 
+                                                                    @RunCheckDB        BIT           = 1, 
+                                                                    @BufferCount       INT           = NULL, 
+                                                                    @MaxTransferSize   INT           = NULL, 
+                                                                    @BlockSize         INT           = NULL, 
+                                                                    @runrecovery       BIT           = 1
 AS
-   
+
 /*
 EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
 		@BackupFiles  = N'U:\,V:\'
@@ -53,75 +53,75 @@ EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
 */
 
      SET NOCOUNT ON;
-
-	 IF NOT @MaxTransferSize IS NULL
-BEGIN
-	IF @MaxTransferSize > 4194304
-	BEGIN
-		RAISERROR('@MaxTransferSize can not be greater then 4194304', 0, 1) WITH NOWAIT;
-	END
-
-	IF @MaxTransferSize % 64 <> 0
-	BEGIN
-		RAISERROR('@MaxTransferSize has to be a multiple of 65536', 0, 1) WITH NOWAIT;
-	END
-END;
-
-IF NOT @BlockSize IS NULL
-BEGIN
-	IF @BlockSize NOT IN (512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
-	BEGIN
-		RAISERROR('Supported values for @BlockSize are 512, 1024, 2048, 4096, 8192, 16384, 32768, and 65536', 0, 1) WITH NOWAIT;
-	END
-END
-
-declare @BackupParameters nvarchar(max) = ''
-
-	IF NOT @BufferCount IS NULL
-	BEGIN
-		SET @BackupParameters += N', BufferCount=' + cast(@BufferCount as NVARCHAR(10))
-	END
-
-	IF NOT @MaxTransferSize IS NULL
-	BEGIN
-		SET @BackupParameters += N', MaxTransferSize=' + cast(@MaxTransferSize as NVARCHAR(7))
-	END
-
-	IF NOT @BlockSize IS NULL
-	BEGIN
-		SET @BackupParameters += N', BlockSize=' + cast(@BlockSize as NVARCHAR(5))
-	END
-
-	if @runrecovery = 0
-	begin
-	set @BackupParameters += N' , NORECOVERY'
-	end
-
-	 DECLARE @TotalDrives int
+     IF NOT @MaxTransferSize IS NULL
+         BEGIN
+             IF @MaxTransferSize > 4194304
+                 BEGIN
+                     RAISERROR('@MaxTransferSize can not be greater then 4194304', 0, 1) WITH NOWAIT;
+                 END;
+             IF @MaxTransferSize % 64 <> 0
+                 BEGIN
+                     RAISERROR('@MaxTransferSize has to be a multiple of 65536', 0, 1) WITH NOWAIT;
+                 END;
+         END;
+     IF NOT @BlockSize IS NULL
+         BEGIN
+             IF @BlockSize NOT IN(512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
+                 BEGIN
+                     RAISERROR('Supported values for @BlockSize are 512, 1024, 2048, 4096, 8192, 16384, 32768, and 65536', 0, 1) WITH NOWAIT;
+                 END;
+         END;
+     DECLARE @BackupParameters NVARCHAR(MAX)= '';
+     IF NOT @BufferCount IS NULL
+         BEGIN
+             SET @BackupParameters+=N', BufferCount=' + CAST(@BufferCount AS NVARCHAR(10));
+         END;
+     IF NOT @MaxTransferSize IS NULL
+         BEGIN
+             SET @BackupParameters+=N', MaxTransferSize=' + CAST(@MaxTransferSize AS NVARCHAR(7));
+         END;
+     IF NOT @BlockSize IS NULL
+         BEGIN
+             SET @BackupParameters+=N', BlockSize=' + CAST(@BlockSize AS NVARCHAR(5));
+         END;
+     IF @runrecovery = 0
+         BEGIN
+             SET @BackupParameters+=N' , NORECOVERY';
+         END;
+     DECLARE @TotalDrives INT;
      IF @DataFile1 IS NULL
          SET @DataFile1 = CONVERT(NVARCHAR(500), SERVERPROPERTY('InstanceDefaultDataPath'));
-		 	 set @totaldrives = count(@DataFile1) + count(@DataFile2) + count(@DataFile3) + count(@DataFile4) + count(@DataFile5) + count(@DataFile6) + count(@DataFile7) 
-    IF @LogFile IS NULL
+     SET @totaldrives = COUNT(@DataFile1) + COUNT(@DataFile2) + COUNT(@DataFile3) + COUNT(@DataFile4) + COUNT(@DataFile5) + COUNT(@DataFile6) + COUNT(@DataFile7);
+     IF @LogFile IS NULL
          SET @LogFile = CONVERT(NVARCHAR(500), SERVERPROPERTY('InstanceDefaultLogPath'));
      IF @DataFile7 IS NULL
-         SET @DataFile7 = isnull(@DataFile6, isnull(@DataFile5, isnull(@DataFile4, isnull(@DataFile3, isnull(@DataFile2, @DataFile1)))))
-		 --SELECT @DataFile7 , @TotalDrives
-DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
-	 declare @StartTime datetime
+         SET @DataFile7 = ISNULL(@DataFile6, ISNULL(@DataFile5, ISNULL(@DataFile4, ISNULL(@DataFile3, ISNULL(@DataFile2, @DataFile1)))));
+     --SELECT @DataFile7 , @TotalDrives
+     DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
+     DECLARE @StartTime DATETIME;
      --Table to hold each backup file name in
-	 create table #xpfixeddrives (drive varchar(100), MBFree bigint)
-	 insert into #xpfixeddrives
-	 exec xp_fixeddrives
-
-	select full_filesystem_path as dir, level as depth, '1' as isfile,file_or_directory_name as fname Into #files
-	 from string_split(@BackupFiles,',') a cross apply sys.dm_os_enumerate_filesystem(a.value,'*') 
-	 where size_in_bytes <> 0 and last_write_time > (DATEADD(year,-7,getdate()))
-		and file_or_directory_name like '%bak' and full_filesystem_path not like '%recycle%'
+     CREATE TABLE #xpfixeddrives
+     (drive  VARCHAR(100), 
+      MBFree BIGINT
+     );
+     INSERT INTO #xpfixeddrives
+     EXEC xp_fixeddrives;
+     SELECT full_filesystem_path AS dir, 
+            level AS depth, 
+            '1' AS isfile, 
+            file_or_directory_name AS fname
+     INTO #files
+     FROM STRING_SPLIT(@BackupFiles, ',') a
+          CROSS APPLY sys.dm_os_enumerate_filesystem(a.value, '*')
+     WHERE size_in_bytes <> 0
+           AND last_write_time > (DATEADD(year, -7, GETDATE()))
+           AND file_or_directory_name LIKE '%bak'
+           AND full_filesystem_path NOT LIKE '%recycle%';
 
      --Table to hold the result from RESTORE HEADERONLY. Needed to get the database name out from
 
      DECLARE @BackupDT DATETIME;
-     DECLARE @sql nVARCHAR(MAX);
+     DECLARE @sql NVARCHAR(MAX);
      DECLARE @ProductVersion NVARCHAR(128);
      DECLARE @ProductVersionNumber TINYINT;
      SET @ProductVersion = CONVERT(NVARCHAR(128), SERVERPROPERTY('ProductVersion'));
@@ -186,7 +186,7 @@ DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
       BackupSetGUID          UNIQUEIDENTIFIER, 
       CompressedBackupSize   BIGINT
      );
-	 DECLARE @CompressedBackupSize BIGINT;
+     DECLARE @CompressedBackupSize BIGINT;
      IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(4)) AS FLOAT) = 11 -- Greater than SQL 2005 
          BEGIN
              ALTER TABLE #bdev
@@ -268,8 +268,8 @@ DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
       [IsCompressed]         [BIT] NULL, 
       [BackupLocation]       [VARCHAR](300) NULL, 
       [Scripts]              [NVARCHAR](MAX), 
-	  DBName				nvarchar(500),
-	  CompressedBackupSize					bigint,
+      DBName                 NVARCHAR(500), 
+      CompressedBackupSize   BIGINT, 
       TimeRun                DATETIME DEFAULT GETDATE()
      )
      ON [PRIMARY] TEXTIMAGE_ON [PRIMARY];
@@ -280,7 +280,7 @@ DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
      DECLARE @type CHAR(1);
      DECLARE @DbName SYSNAME;
      DECLARE @Size NUMERIC(35, 0), @fileid BIGINT;
-	-- select * from #files
+     -- select * from #files
      DECLARE files CURSOR
      FOR SELECT Dir
          FROM #files
@@ -311,14 +311,46 @@ DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
 
              --Get database name from RESTORE HEADERONLY, assumes there's only one backup on each backup file.
              TRUNCATE TABLE #bdev;
-			 BEGIN TRY
-             INSERT INTO #bdev
-             EXEC ('RESTORE HEADERONLY FROM DISK = '''+@dirfile+'''');
-			 END TRY
-			 BEGIN CATCH
-	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
-    VALUES (ISNULL(@DbName,''), convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore header FAILED',  isnull( @dirfile,''), isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
-	END CATCH 
+             BEGIN TRY
+                 INSERT INTO #bdev
+                 EXEC ('RESTORE HEADERONLY FROM DISK = '''+@dirfile+'''');
+             END TRY
+             BEGIN CATCH
+                 INSERT INTO master.dbo.CommandLog
+                 (DatabaseName, 
+                  SchemaName, 
+                  ObjectName, 
+                  ObjectType, 
+                  IndexName, 
+                  IndexType, 
+                  StatisticsName, 
+                  PartitionNumber, 
+                  ExtendedInfo, 
+                  CommandType, 
+                  Command, 
+                  StartTime, 
+                  EndTime, 
+                  ErrorNumber, 
+                  ErrorMessage
+                 )
+                 VALUES
+                 (ISNULL(@DbName, ''), 
+                  CONVERT(VARCHAR(30), @CompressedBackupSize), 
+                  NULL, 
+                  NULL, 
+                  NULL, 
+                  NULL, 
+                  NULL, 
+                  NULL, 
+                  NULL, 
+                  'Restore header FAILED', 
+                  ISNULL(@dirfile, ''), 
+                  ISNULL(@StartTime, GETDATE()), 
+                  GETDATE(), 
+                  ERROR_NUMBER(), 
+                  ERROR_MESSAGE()
+                 );
+             END CATCH; 
              --SELECT *
              --FROM #bdev;
              SET @DbName =
@@ -328,35 +360,39 @@ DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
                  WHERE BackupStartDate > DATEADD(dd, -@BackupInLastXDays, GETDATE())
                        AND CompressedBackupSize / (1024 * 1024 * 1024) < @MaxBackupSizeInGB
                        AND BackupType = 1
-					   AND DatabaseName LIKE ISNULL(@DatabaseName,'%')
+                       AND DatabaseName LIKE ISNULL(@DatabaseName, '%')
                  ORDER BY BackupStartDate DESC
              );
-			 SET @CompressedBackupSize = ( SELECT  TOP 1 CompressedBackupSize FROM #bdev)
+             SET @CompressedBackupSize =
+             (
+                 SELECT TOP 1 CompressedBackupSize
+                 FROM #bdev
+             );
              TRUNCATE TABLE #restorelabel;
-			 begin try
-             INSERT INTO #restoreLabel
-             EXEC ('RESTORE labelonly FROM DISK = '''+@dirfile+'''');
-	 END TRY
-			 BEGIN CATCH
-	Print 'Restore LabelOnly failed'
-	END CATCH 
+             BEGIN TRY
+                 INSERT INTO #restoreLabel
+                 EXEC ('RESTORE labelonly FROM DISK = '''+@dirfile+'''');
+             END TRY
+             BEGIN CATCH
+                 PRINT 'Restore LabelOnly failed';
+             END CATCH; 
              --Construct the beginning for the RESTORE DATABASE command
              SET @sql = 'RESTORE DATABASE [' + @DbName + '] ' + @crlf + 'FROM DISK = ''' + @dirfile + '''' + @crlf + ' WITH REPLACE' + @crlf + ',STATS = 5' + @BackupParameters + @crlf + ',MOVE ';
              --select * from #dbfiles
              --Get information about database files from backup device into temp table
              TRUNCATE TABLE #dbfiles;
-			 BEGIN TRY
-             INSERT INTO #dbfiles
-             EXEC ('RESTORE FILELISTONLY FROM DISK = '''+@dirfile+'''');
-			 END TRY
-	BEGIN CATCH
-	 Print 'Restore FilelistOnly failed'
-	END CATCH 
+             BEGIN TRY
+                 INSERT INTO #dbfiles
+                 EXEC ('RESTORE FILELISTONLY FROM DISK = '''+@dirfile+'''');
+             END TRY
+             BEGIN CATCH
+                 PRINT 'Restore FilelistOnly failed';
+             END CATCH; 
              --SELECT *
              --FROM #dbfiles
              --ORDER BY type, 
              --         size DESC;
- 
+
              OPEN dbfiles;
              DECLARE @count INT= 1;
              --For each database file that the database uses
@@ -369,47 +405,44 @@ DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
                          BREAK;
                      IF @type = 'D'
                          BEGIN
-                             IF ( @count%@TotalDrives = 1 )
+                             IF(@count % @TotalDrives = 1)
                                  BEGIN
                                      SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DataFile1 + @LogicalName + '.mdf''' + @crlf;
                                      SET @sql = @sql + ' ,MOVE ';
                                  END;
                                  ELSE
-                             IF ( @count%@TotalDrives = 2 )
+                                 IF(@count % @TotalDrives = 2)
                                      BEGIN
                                          SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DataFile2 + @LogicalName + '.mdf ''' + @crlf;
                                          SET @sql = @sql + ' ,MOVE ';
                                      END;
                                      ELSE
-                                                          IF ( @count%@TotalDrives = 3 )
-            BEGIN
+                                     IF(@count % @TotalDrives = 3)
+                                         BEGIN
                                              SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DataFile3 + @LogicalName + '.mdf ''' + @crlf;
                                              SET @sql = @sql + ' ,MOVE ';
                                          END;
                                          ELSE
-                                                                    IF ( @count%@TotalDrives = 4 )
-
+                                         IF(@count % @TotalDrives = 4)
                                              BEGIN
                                                  SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DataFile4 + @LogicalName + '.mdf ''' + @crlf;
                                                  SET @sql = @sql + ' ,MOVE ';
                                              END;
                                              ELSE
-                                                                      IF ( @count%@TotalDrives = 5 )
-
+                                             IF(@count % @TotalDrives = 5)
                                                  BEGIN
                                                      SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DataFile5 + @LogicalName + '.mdf ''' + @crlf;
                                                      SET @sql = @sql + ' ,MOVE ';
                                                  END;
                                                  ELSE
-                                                                       IF ( @count%@TotalDrives = 6 )
-
+                                                 IF(@count % @TotalDrives = 6)
                                                      BEGIN
                                                          SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DataFile6 + @LogicalName + '.mdf ''' + @crlf;
                                                          SET @sql = @sql + ' ,MOVE ';
                                                      END;
                                                      ELSE
                                                      BEGIN
-                                                        SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DataFile7 + @LogicalName + '.mdf ''' + @crlf;
+                                                         SET @sql = @sql + '''' + @LogicalName + ''' TO ''' + @DataFile7 + @LogicalName + '.mdf ''' + @crlf;
                                                          SET @sql = @sql + ' ,MOVE ';
                                                      END;
                          END;
@@ -438,53 +471,153 @@ DECLARE @crlf CHAR(2)= CHAR(13) + CHAR(10);
                          PRINT @sql; 
                          --Remove the comment below if you want the procedure to actually execute the restore command. 
                          ELSE
-						 begin 
-						 set @StartTime = GETDATE()
-						 BEGIN TRY
-                         EXEC (@sql);
-						 waitfor delay '00:00:01'
-						  INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
-    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore completed', @sql, @StartTime,getdate(), ERROR_NUMBER(),ERROR_message())
-if @RunCheckDB = 1
-begin
-EXECUTE dbo.DatabaseIntegrityCheck
-@Databases = @dbname,
-@CheckCommands = 'CheckDB',
-@LogToTable = 'Y';
-end
-	END TRY
-	BEGIN CATCH
-	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
-    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore FAILED', @sql, isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
-	END CATCH 
-						 end
+                         BEGIN
+                             SET @StartTime = GETDATE();
+                             BEGIN TRY
+                                 EXEC (@sql);
+                                 WAITFOR DELAY '00:00:01';
+                                 INSERT INTO master.dbo.CommandLog
+                                 (DatabaseName, 
+                                  SchemaName, 
+                                  ObjectName, 
+                                  ObjectType, 
+                                  IndexName, 
+                                  IndexType, 
+                                  StatisticsName, 
+                                  PartitionNumber, 
+                                  ExtendedInfo, 
+                                  CommandType, 
+                                  Command, 
+                                  StartTime, 
+                                  EndTime, 
+                                  ErrorNumber, 
+                                  ErrorMessage
+                                 )
+                                 VALUES
+                                 (@DbName, 
+                                  CONVERT(VARCHAR(30), @CompressedBackupSize), 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  'Restore completed', 
+                                  @sql, 
+                                  @StartTime, 
+                                  GETDATE(), 
+                                  ERROR_NUMBER(), 
+                                  ERROR_MESSAGE()
+                                 );
+                                 IF @RunCheckDB = 1
+                                     BEGIN
+                                         EXECUTE dbo.DatabaseIntegrityCheck 
+                                                 @Databases = @dbname, 
+                                                 @CheckCommands = 'CheckDB', 
+                                                 @LogToTable = 'Y';
+                                     END;
+                             END TRY
+                             BEGIN CATCH
+                                 INSERT INTO master.dbo.CommandLog
+                                 (DatabaseName, 
+                                  SchemaName, 
+                                  ObjectName, 
+                                  ObjectType, 
+                                  IndexName, 
+                                  IndexType, 
+                                  StatisticsName, 
+                                  PartitionNumber, 
+                                  ExtendedInfo, 
+                                  CommandType, 
+                                  Command, 
+                                  StartTime, 
+                                  EndTime, 
+                                  ErrorNumber, 
+                                  ErrorMessage
+                                 )
+                                 VALUES
+                                 (@DbName, 
+                                  CONVERT(VARCHAR(30), @CompressedBackupSize), 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  'Restore FAILED', 
+                                  @sql, 
+                                  ISNULL(@StartTime, GETDATE()), 
+                                  GETDATE(), 
+                                  ERROR_NUMBER(), 
+                                  ERROR_MESSAGE()
+                                 );
+                             END CATCH;
+                         END;
                      SET @sql = 'drop database ' + QUOTENAME(@dbname);
                      IF @PrintOnly = 1
                          PRINT @sql;
-                         ELSE if @DropDatabase = 1
-						 begin try
-                         EXEC sp_executesql 
-                              @sql;
-							  	 END TRY
-			 BEGIN CATCH
-	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
-    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Drop database FAILED',  isnull( @sql,''), isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
-	END CATCH 
+                         ELSE
+                         IF @DropDatabase = 1
+                             BEGIN TRY
+                                 EXEC sp_executesql 
+                                      @sql;
+                             END TRY
+                             BEGIN CATCH
+                                 INSERT INTO master.dbo.CommandLog
+                                 (DatabaseName, 
+                                  SchemaName, 
+                                  ObjectName, 
+                                  ObjectType, 
+                                  IndexName, 
+                                  IndexType, 
+                                  StatisticsName, 
+                                  PartitionNumber, 
+                                  ExtendedInfo, 
+                                  CommandType, 
+                                  Command, 
+                                  StartTime, 
+                                  EndTime, 
+                                  ErrorNumber, 
+                                  ErrorMessage
+                                 )
+                                 VALUES
+                                 (@DbName, 
+                                  CONVERT(VARCHAR(30), @CompressedBackupSize), 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  NULL, 
+                                  'Drop database FAILED', 
+                                  ISNULL(@sql, ''), 
+                                  ISNULL(@StartTime, GETDATE()), 
+                                  GETDATE(), 
+                                  ERROR_NUMBER(), 
+                                  ERROR_MESSAGE()
+                                 );
+                             END CATCH;
                      WAITFOR DELAY '00:00:01';
                      IF @PrintOnly = 1
                          PRINT '--exec xp_delete_file 0,''' + @dirfile + '''';
-                         ELSE if @DeleteBackupFile = 1
-						exec xp_delete_file 0, @dirfile;
-                  END;
+                         ELSE
+                         IF @DeleteBackupFile = 1
+                             EXEC xp_delete_file 
+                                  0, 
+                                  @dirfile;
+                 END;
                  ELSE
                  BEGIN
                      --PRINT 'this file is multi backup restore ' + @dirfile + @sql;
                      INSERT INTO [#multifilerestore]
                             SELECT *, 
                                    @dirfile BackupLocation, 
-                                   @sql Scripts,
-								   @DbName, 
-								   @CompressedBackupSize,
+                                   @sql Scripts, 
+                                   @DbName, 
+                                   @CompressedBackupSize, 
                                    GETDATE()
                             FROM #restoreLabel;
                  END;
@@ -502,7 +635,9 @@ end
                     (', DISK = ''' + backuplocation + '''')
              FROM [#multifilerestore] b
              WHERE a.mediasetid = b.mediasetid FOR XML PATH('')
-         ), 9, 8000)), DBName, CompressedBackupSize 
+         ), 9, 8000)), 
+                DBName, 
+                CompressedBackupSize
          FROM [#multifilerestore] a
          WHERE familysequencenumber = 1
                AND Scripts IS NOT NULL;
@@ -515,28 +650,100 @@ end
              IF @PRINTONLY = 1
                  PRINT @SQL;
                  ELSE
-				 BEGIN 
-				 begin try
-				 set @StartTime = GETDATE()
-                 EXEC sp_executesql 
-                      @sql;
-					   waitfor delay '00:00:01'
-						  INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
-    VALUES (@DbName,  convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Restore completed', @sql, @StartTime, getdate(), ERROR_NUMBER(),ERROR_message())
-if @RunCheckDB = 1
-begin
-EXECUTE dbo.DatabaseIntegrityCheck
-@Databases = @dbname,
-@CheckCommands = 'CheckDB',
-@LogToTable = 'Y'
-end
-		 END TRY
-			 BEGIN CATCH
-	 INSERT INTO master.dbo.CommandLog (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime,EndTime,ErrorNumber,ErrorMessage)
-    VALUES (@DbName, convert(varchar(30),@CompressedBackupSize), null, null, null, null, null, null, null, 'Multifile Restore FAILED', isnull( @sql,''), isnull(@StartTime,GETDATE()),getdate(), ERROR_NUMBER(),ERROR_message())
-	END CATCH 
-	end
-             FETCH NEXT FROM multirestore INTO @sql,@dbname, @CompressedBackupSize;
+                 BEGIN
+                     BEGIN TRY
+                         SET @StartTime = GETDATE();
+                         EXEC sp_executesql 
+                              @sql;
+                         WAITFOR DELAY '00:00:01';
+                         INSERT INTO master.dbo.CommandLog
+                         (DatabaseName, 
+                          SchemaName, 
+                          ObjectName, 
+                          ObjectType, 
+                          IndexName, 
+                          IndexType, 
+                          StatisticsName, 
+                          PartitionNumber, 
+                          ExtendedInfo, 
+                          CommandType, 
+                          Command, 
+                          StartTime, 
+                          EndTime, 
+                          ErrorNumber, 
+                          ErrorMessage
+                         )
+                         VALUES
+                         (@DbName, 
+                          CONVERT(VARCHAR(30), @CompressedBackupSize), 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          'Restore completed', 
+                          @sql, 
+                          @StartTime, 
+                          GETDATE(), 
+                          ERROR_NUMBER(), 
+                          ERROR_MESSAGE()
+                         );
+                         IF @RunCheckDB = 1
+                             BEGIN
+                                 EXECUTE dbo.DatabaseIntegrityCheck 
+                                         @Databases = @dbname, 
+                                         @CheckCommands = 'CheckDB', 
+                                         @LogToTable = 'Y';
+                             END;
+                         --IF @DeleteBackupFile = 1
+                         --    BEGIN
+                         --        EXEC master.sys.xp_delete_file 
+                         --             0, 
+                         --             @BackupFiles, 
+                         --             'BAK', 
+                         --             0;
+                         --    END;
+                     END TRY
+                     BEGIN CATCH
+                         INSERT INTO master.dbo.CommandLog
+                         (DatabaseName, 
+                          SchemaName, 
+                          ObjectName, 
+                          ObjectType, 
+                          IndexName, 
+                          IndexType, 
+                          StatisticsName, 
+                          PartitionNumber, 
+                          ExtendedInfo, 
+                          CommandType, 
+                          Command, 
+                          StartTime, 
+                          EndTime, 
+                          ErrorNumber, 
+                          ErrorMessage
+                         )
+                         VALUES
+                         (@DbName, 
+                          CONVERT(VARCHAR(30), @CompressedBackupSize), 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          NULL, 
+                          'Multifile Restore FAILED', 
+                          ISNULL(@sql, ''), 
+                          ISNULL(@StartTime, GETDATE()), 
+                          GETDATE(), 
+                          ERROR_NUMBER(), 
+                          ERROR_MESSAGE()
+                         );
+                     END CATCH;
+                 END;
+             FETCH NEXT FROM multirestore INTO @sql, @dbname, @CompressedBackupSize;
          END;
      CLOSE multirestore;
      DEALLOCATE multirestore;
