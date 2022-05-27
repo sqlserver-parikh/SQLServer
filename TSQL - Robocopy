@@ -1,7 +1,7 @@
 CREATE OR ALTER PROCEDURE [dbo].[spRoboCopyV2]
     @Source varchar(max)
   , @Destination varchar(max) = 'U:\Backup\'
-  , @Destination2 varchar(max) = 'V:\Backup\' --This will copy multiple files alternatively to U and V drive sorted by size asc
+  , @Destination2 varchar(max) = 'V:\Backup\' --This will copy multiple files alternatively to U and V drive sorted by size asc, please pass null to copy all files to one destination
   , @FileName varchar(max) = '%.bak'
   , @MAXAge int = 7
   , @PrintOnly bit = 0
