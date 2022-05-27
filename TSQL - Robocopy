@@ -1,13 +1,16 @@
 CREATE OR ALTER PROCEDURE [dbo].[spRoboCopy]
-    @Source varchar(max)
+    @Source varchar(max) = '\\DC1-SQL-BACKUPS\'
   , @Destination varchar(max) = 'U:\Backup\'
-  , @Destination2 varchar(max) = 'V:\Backup\' --This will copy multiple files alternatively to U and V drive sorted by size asc, please pass null to copy all files to one destination
+  , @Destination2 varchar(max) = 'V:\Backup\' --This will copy multiple files alternatively to U and V drive sorted by size asc
   , @FileName varchar(max) = '%.bak'
-  , @MAXAge int = 7
+  , @MAXAge int = 10
   , @PrintOnly bit = 0
 AS
 DECLARE @Command   varchar(1000)
-      , @StartTime datetime;
+      , @StartTime datetime
+	  , @ErrorLog varchar(1024);
+SET @ErrorLog = CONVERT(VARCHAR(1024),SERVERPROPERTY('ErrorLogFileName'))
+SET @ErrorLog = LEFT(@ErrorLog, LEN(@ErrorLog)-8)
 SET @Destination2 = isnull(@Destination2, @Destination)
 IF EXISTS
 (
@@ -48,7 +51,7 @@ as (select 'robocopy ' + parent_directory + ' ' + case
                                                       else
                                                           @Destination2
                                                   end + ' ' + file_or_directory_name
-           + ' /S /r:3 /w:10 /log:I:\MSSQL13.MSSQLSERVER\MSSQL\Log\' + replace(file_or_directory_name, '.', '_') + '_'
+           + ' /S /r:3 /w:10 /log:' + @ErrorLog + replace(file_or_directory_name, '.', '_') + '_'
            + convert(varchar(8), getdate(), 112) + '_' + convert(varchar(4), ranks) + '.txt /XF' Robocopy
     from cte
    )
