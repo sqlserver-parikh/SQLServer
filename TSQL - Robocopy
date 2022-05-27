@@ -30,7 +30,7 @@ begin
 end;
 with cte
 as (select *
-         , RANK() over (order by size_in_bytes) Ranks
+         , ROW_NUMBER() over (order by size_in_bytes) Ranks
     from tempdb..files with (nolock)
     WHERE file_or_directory_name LIKE @FileName
           AND file_or_directory_name NOT LIKE '%master%'
