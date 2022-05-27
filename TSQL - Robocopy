@@ -1,0 +1,87 @@
+CREATE OR ALTER PROCEDURE [dbo].[spRoboCopyV2]
+    @Source varchar(max)
+  , @Destination varchar(max) = 'U:\Backup\'
+  , @Destination2 varchar(max) = 'V:\Backup\' --This will copy multiple files alternatively to U and V drive sorted by size asc
+  , @FileName varchar(max) = '%.bak'
+  , @MAXAge int = 7
+  , @PrintOnly bit = 0
+AS
+DECLARE @Command   varchar(1000)
+      , @StartTime datetime;
+SET @Destination2 = isnull(@Destination2, @Destination)
+IF EXISTS
+(
+    SELECT *
+    FROM tempdb.sys.objects
+    WHERE object_id = OBJECT_ID(N'[dbo].[files]')
+          AND type in ( N'U' )
+          and create_date < DATEADD(dd, -2, getdate())
+)
+begin
+    drop table tempdb..Files
+    select *
+    Into tempdb..Files
+    from string_split(@Source, ',')a
+        cross apply sys.dm_os_enumerate_filesystem(a.value, '*')
+    where size_in_bytes <> 0
+          and last_write_time > (DATEADD(dd, -@MAXAge, getdate()))
+          and file_or_directory_name like @FileName
+          and full_filesystem_path not like '%recycle%'
+end;
+with cte
+as (select *
+         , RANK() over (order by size_in_bytes) Ranks
+    from tempdb..files with (nolock)
+    WHERE file_or_directory_name LIKE @FileName
+          AND file_or_directory_name NOT LIKE '%master%'
+          AND file_or_directory_name NOT LIKE '%msdb%'
+          AND file_or_directory_name NOT LIKE '%zdba%'
+          AND file_or_directory_name NOT LIKE '%model%'
+          AND file_or_directory_name NOT LIKE '%pubs%'
+          AND file_or_directory_name NOT LIKE '%ag_test%'
+          AND file_or_directory_name NOT LIKE '%view_test%'
+   )
+   , cte2
+as (select 'robocopy ' + parent_directory + ' ' + case
+                                                      when ranks % 2 = 1 then
+                                                          @Destination
+                                                      else
+                                                          @Destination2
+                                                  end + ' ' + file_or_directory_name
+           + ' /S /r:3 /w:10 /log:I:\MSSQL13.MSSQLSERVER\MSSQL\Log\' + replace(file_or_directory_name, '.', '_') + '_'
+           + convert(varchar(8), getdate(), 112) + '_' + convert(varchar(4), ranks) + '.txt /XF' Robocopy
+    from cte
+   )
+select *
+into #robocopy
+from cte2
+select *
+from #robocopy
+DECLARE filecopy CURSOR FOR select * from #robocopy
+OPEN filecopy;
+FETCH NEXT FROM filecopy
+INTO @Command;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    set @StartTime = getdate()
+    PRINT @Command
+    if @PrintOnly = 0
+        exec xp_cmdshell @Command
+    insert into master..CommandLog
+    (
+        command
+      , CommandType
+      , StartTime
+      , endtime
+    )
+    select @Command
+         , 'ROBOCOPY'
+         , @StartTime
+         , getdate()
+    FETCH NEXT FROM filecopy
+    INTO @Command;
+end
+CLOSE filecopy;
+DEALLOCATE filecopy;
+drop table #robocopy
+GO
