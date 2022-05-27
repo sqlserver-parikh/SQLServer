@@ -1,4 +1,4 @@
-CREATE OR ALTER PROCEDURE [dbo].[spRoboCopyV2]
+CREATE OR ALTER PROCEDURE [dbo].[spRoboCopy]
     @Source varchar(max)
   , @Destination varchar(max) = 'U:\Backup\'
   , @Destination2 varchar(max) = 'V:\Backup\' --This will copy multiple files alternatively to U and V drive sorted by size asc, please pass null to copy all files to one destination
