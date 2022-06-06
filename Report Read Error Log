@@ -1,0 +1,17 @@
+DROP TABLE IF EXISTS #errorlog;  -- this is new syntax in SQL 2016
+  (
+     LogDate       DATETIME
+     , ProcessInfo VARCHAR(128)
+     , [Text]      NVARCHAR(MAX)
+  );
+
+INSERT INTO #errorLog
+EXEC sp_readerrorlog
+  0 -- specify the log number or use nothing for active error log
+SELECT *
+FROM   #errorlog a
+WHERE  EXISTS (SELECT *
+               FROM   #errorLog b
+               WHERE  [Text] LIKE '%failed%'
+                      AND a.LogDate = b.LogDate
+                      AND a.ProcessInfo = b.ProcessInfo) 
