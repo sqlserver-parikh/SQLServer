@@ -1,9 +1,16 @@
-CREATE OR ALTER PROCEDURE [dbo].[spRoboCopy]
-    @Source varchar(max) = '\\DC1-SQL-BACKUPS\'
+USE [master]
+GO
+/****** Object:  StoredProcedure [dbo].[spRoboCopy]    Script Date: 6/30/2022 8:53:57 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER   PROCEDURE [dbo].[spRoboCopy]
+    @Source varchar(max) = '\\myserver.com\BACKUPS\'
   , @Destination varchar(max) = 'U:\Backup\'
   , @Destination2 varchar(max) = 'V:\Backup\' --This will copy multiple files alternatively to U and V drive sorted by size asc
   , @FileName varchar(max) = '%.bak'
-  , @MAXAge int = 10
+  , @MAXAge int = 8
   , @PrintOnly bit = 0
 AS
 DECLARE @Command   varchar(1000)
@@ -16,12 +23,24 @@ IF EXISTS
 (
     SELECT *
     FROM tempdb.sys.objects
-    WHERE object_id = OBJECT_ID(N'[dbo].[files]')
-          AND type in ( N'U' )
-          and create_date < DATEADD(dd, -2, getdate())
+    WHERE object_id = OBJECT_ID(N'[tempdb].[dbo].[Files]')
+          AND type in ( N'U' ) --and create_date < DATEADD(dd,-2,getdate())
 )
 begin
-    drop table tempdb..Files
+    TRUNCATE TABLE tempdb..Files
+	INSERT INTO tempdb..Files
+	select *
+    from string_split(@Source, ',')a
+        cross apply sys.dm_os_enumerate_filesystem(a.value, '*')
+    where size_in_bytes <> 0
+          and last_write_time > (DATEADD(dd, -@MAXAge, getdate()))
+          and file_or_directory_name like @FileName
+          and full_filesystem_path not like '%recycle%'
+order by size_in_bytes
+END
+ELSE
+BEGIN
+
     select *
     Into tempdb..Files
     from string_split(@Source, ',')a
@@ -30,8 +49,9 @@ begin
           and last_write_time > (DATEADD(dd, -@MAXAge, getdate()))
           and file_or_directory_name like @FileName
           and full_filesystem_path not like '%recycle%'
-end;
-with cte
+order by size_in_bytes
+end
+;with cte
 as (select *
          , ROW_NUMBER() over (order by size_in_bytes) Ranks
     from tempdb..files with (nolock)
@@ -87,4 +107,3 @@ end
 CLOSE filecopy;
 DEALLOCATE filecopy;
 drop table #robocopy
-GO
