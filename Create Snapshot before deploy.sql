@@ -1,7 +1,7 @@
 --If you run below script it will create script to create snapshot of database, restore of created snapshot and drop snapshot
 --This will be useful if you are doing deployment and need to take snapshot backup of database
 --Snapshot will be created on Backup drive
-create PROCEDURE spDBSnapshot
+ALTER PROCEDURE spDBSnapshot
 (
     @dbname sysname,
     @retainhours int = 24,
@@ -23,20 +23,15 @@ where source_database_id = DB_ID(@dbname)
 IF @sql IS NOT NULL
 BEGIN
     IF @printonly = 0
-        EXEC sp_executesql @sql;
-    PRINT '--' + @sql
+    EXEC sp_executesql @sql;
+	PRINT '--' + @sql
 END
 
-IF NOT EXISTS
-(
-    SELECT name
-    FROM sys.databases
-    where source_database_id = DB_ID(@dbname)
-)
+IF NOT EXISTS (SELECT name FROM sys.databases
+where source_database_id = DB_ID(@dbname))
 BEGIN
     SELECT @sql
-        = 'CREATE DATABASE [' + DB_NAME() + '_SNAPSHOT_' + CONVERT(VARCHAR(10), GETDATE(), 112)
-          + replace(CONVERT(varchar(8), getdate(), 114), ':', '') + '] ON '
+        = 'CREATE DATABASE [' + @dbname + '_SNAPSHOT_' + CONVERT(VARCHAR(10), GETDATE(), 112) + replace(CONVERT(varchar(8),getdate(), 114),':','') + '] ON '
           + STUFF(
             (
                 SELECT ', (NAME = ''' + name + ''', FILENAME = ''' + @DefaultBackupDirectory + '\' + name
@@ -51,7 +46,7 @@ BEGIN
             ''
                  ) +
     (
-        SELECT ' AS SNAPSHOT OF ' + QUOTENAME(DB_NAME())
+        SELECT ' AS SNAPSHOT OF ' + @dbname
     )
     IF @printonly = 0
     BEGIN
@@ -62,11 +57,11 @@ END
 
 If @sql IS NOT NULL
 BEGIN
-    select @sql = 'RESTORE DATABASE ' + QUOTENAME(@dbname) + ' FROM DATABASE_SNAPSHOT = ' + QUOTENAME(name)
-    from sys.databases
-    where source_database_id = db_id(@dbname)
+select @sql
+    = 'RESTORE DATABASE ' + QUOTENAME( @dbname ) + ' FROM DATABASE_SNAPSHOT = ' + QUOTENAME(name) 
+	  from sys.databases where source_database_id = db_id( @dbname)
 
-    print '--' + @sql
+print '--' + @sql
 --EXEC sp_executesql  @sql;
 
 END
