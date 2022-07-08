@@ -1,7 +1,7 @@
 --If you run below script it will create script to create snapshot of database, restore of created snapshot and drop snapshot
 --This will be useful if you are doing deployment and need to take snapshot backup of database
 --Snapshot will be created on Backup drive
-DECLARE @sql NVARCHAR(1024);
+DECLARE @sql NVARCHAR(max);
 DECLARE @DefaultBackupDirectory VARCHAR(1024);
 EXECUTE master..xp_instance_regread
         N'HKEY_LOCAL_MACHINE',
