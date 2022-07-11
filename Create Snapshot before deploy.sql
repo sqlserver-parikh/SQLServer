@@ -1,11 +1,12 @@
 --If you run below script it will create script to create snapshot of database, restore of created snapshot and drop snapshot
 --This will be useful if you are doing deployment and need to take snapshot backup of database
 --Snapshot will be created on Backup drive
-ALTER PROCEDURE spDBSnapshot
+CREATE OR ALTER PROCEDURE spDBSnapshot
 (
     @dbname sysname,
-    @retainhours int = 24,
-    @printonly bit = 0
+    @retainhours int = 0,
+    @printonly bit = 0,
+	@DropSnapshotOnly bit = 0
 )
 as
 DECLARE @sql NVARCHAR(max);
@@ -28,7 +29,7 @@ BEGIN
 END
 
 IF NOT EXISTS (SELECT name FROM sys.databases
-where source_database_id = DB_ID(@dbname))
+where source_database_id = DB_ID(@dbname)) and @DropSnapshotOnly = 0
 BEGIN
     SELECT @sql
         = 'CREATE DATABASE [' + @dbname + '_SNAPSHOT_' + CONVERT(VARCHAR(10), GETDATE(), 112) + replace(CONVERT(varchar(8),getdate(), 114),':','') + '] ON '
@@ -65,4 +66,3 @@ print '--' + @sql
 --EXEC sp_executesql  @sql;
 
 END
-
