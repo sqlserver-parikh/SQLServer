@@ -1,7 +1,7 @@
 USE master;
 GO
 DECLARE @name SYSNAME, @dbname sysname, @filename varchar(128);
-DECLARE @location VARCHAR(MAX);
+DECLARE @location VARCHAR(MAX),@sizemb bigint;
 DECLARE @command VARCHAR(MAX);
 DECLARE @newdrive VARCHAR(12);
 SET @newdrive = 'C:\';
@@ -9,20 +9,20 @@ SET @dbname = 'tempdb';
 SET @filename = '%log' 
 DECLARE db_cursor CURSOR
 FOR SELECT name AS [LogicalName], 
-           physical_name AS [Location]
+           physical_name AS [Location], CEILING( size/128.0) SizeMB
     FROM sys.master_files
     WHERE database_id = db_id( @dbname) AND name like @filename;
 OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @name, @location;
+FETCH NEXT FROM db_cursor INTO @name, @location, @SizeMB;
 WHILE @@FETCH_STATUS = 0
     BEGIN
         SET @command = 'ALTER DATABASE ' + quotename(@dbname) + ' MODIFY FILE (NAME = ' + @name + ', FILENAME = ''' + @location + ''');';
-		set @command = '/* ROLLBACK ' + CHAR(10) + @command + CHAR(10) + '*/' ;
+		set @command = '/* ROLLBACK ' + 'FileName ' +  @name + ', CurrentLocation: ' + @location + ', Current Size: ' + convert(varchar(14), @sizemb ) + 'MB' + CHAR(10) + @command + CHAR(10) + '*/' ;
 		PRINT @COMMAND
         SET @location = @newdrive + RIGHT(@LOCATION, LEN(@LOCATION) - 3);
         SET @command =  '-- INSTALL ' + CHAR(10) + 'ALTER DATABASE ' + quotename(@dbname) + ' MODIFY FILE (NAME = ' + @name + ', FILENAME = ''' + @location + ''');';
         PRINT @command;
-        FETCH NEXT FROM db_cursor INTO @name, @location;
+        FETCH NEXT FROM db_cursor INTO @name, @location, @SizeMB;
     END;
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
