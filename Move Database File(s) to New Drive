@@ -5,8 +5,8 @@ DECLARE @name SYSNAME, @dbname sysname, @filename varchar(128), @oldlocation VAR
 SET @ErrorLog = CONVERT(VARCHAR(1024),SERVERPROPERTY('ErrorLogFileName'))
 SET @ErrorLog = LEFT(@ErrorLog, LEN(@ErrorLog)-8)
 SET @newdrive = 'C:\';
-SET @dbname = 'tempdb';
-SET @filename = '%log' 
+SET @dbname = 'compare';
+SET @filename = '%' 
 DECLARE db_cursor CURSOR
 FOR SELECT name AS [LogicalName], 
            physical_name AS [Location], CEILING( size/128.0) SizeMB
@@ -31,3 +31,6 @@ WHILE @@FETCH_STATUS = 0
     END;
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
+if @dbname = 'tempdb'  PRINT '--Restart SQL this will recreate file on new drive'
+else 
+PRINT '/*' + CHAR(10) + ' ALTER DATABASE ' + @DBNAME + ' SET SINGLE_USER WITH ROLLBACK IMMEDIATE' + CHAR(10) + ' ALTER DATABASE ' + @DBNAME + ' SET MULTI_USER' + CHAR(10) + ' ALTER DATABASE ' + @DBNAME + ' SET OFFLINE' + CHAR(10) + '*/'
