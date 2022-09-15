@@ -1,36 +1,46 @@
 USE master;
 GO
-DECLARE @name SYSNAME, @dbname sysname, @filename varchar(128), @oldlocation VARCHAR(MAX),@sizemb bigint, @command VARCHAR(MAX)
-, @newdrive VARCHAR(12), @newlocation varchar(max), @ErrorLog varchar(1024);
-SET @ErrorLog = CONVERT(VARCHAR(1024),SERVERPROPERTY('ErrorLogFileName'))
-SET @ErrorLog = LEFT(@ErrorLog, LEN(@ErrorLog)-8)
-SET @newdrive = 'C:\';
-SET @dbname = 'compare';
-SET @filename = '%' 
+DECLARE @name        SYSNAME
+      , @dbname      SYSNAME
+      , @filename    VARCHAR(128)
+      , @oldlocation VARCHAR(MAX)
+      , @sizemb      BIGINT
+      , @command     VARCHAR(MAX)
+      , @newdrive    VARCHAR(12)
+      , @newlocation VARCHAR(MAX)
+      , @errorlog    VARCHAR(1024);
+SET @errorlog = CONVERT(VARCHAR(1024), SERVERPROPERTY('ErrorLogFileName'));
+SET @errorlog = LEFT(@errorlog, LEN(@errorlog) - 8);
+SET @newdrive = 'I:\';
+SET @dbname = 'tempdb';
+SET @filename = '%';
 DECLARE db_cursor CURSOR
 FOR SELECT name AS [LogicalName], 
-           physical_name AS [Location], CEILING( size/128.0) SizeMB
+           physical_name AS [Location], 
+           CEILING(size / 128.0) SizeMB
     FROM sys.master_files
-    WHERE database_id = db_id( @dbname) AND name like @filename;
+    WHERE database_id = DB_ID(@dbname)
+          AND name LIKE @filename;
 OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @name, @oldlocation, @SizeMB;
-WHILE @@FETCH_STATUS = 0
+FETCH NEXT FROM db_cursor INTO @name
+                             , @oldlocation
+                             , @sizemb;
+WHILE @@fetch_status = 0
     BEGIN
-        SET @command = 'ALTER DATABASE ' + quotename(@dbname) + ' MODIFY FILE (NAME = ' + @name + ', FILENAME = ''' + @oldlocation + ''');';
-		set @command = '/* ROLLBACK ' + 'FileName ' +  @name + ', CurrentLocation: ' + @oldlocation + ', Current Size: ' + convert(varchar(14), @sizemb ) + 'MB' + CHAR(10) + @command + CHAR(10) + '*/' ;
-		PRINT @COMMAND
-        SET @newlocation = @newdrive + RIGHT(@oldLOCATION, LEN(@oldLOCATION) - 3);
-        SET @command =  '-- INSTALL ' + CHAR(10) + 'ALTER DATABASE ' + quotename(@dbname) + ' MODIFY FILE (NAME = ' + @name + ', FILENAME = ''' + @newlocation + ''');';
+        SET @command = 'ALTER DATABASE ' + QUOTENAME(@dbname) + ' MODIFY FILE (NAME = ' + @name + ', FILENAME = ''' + @oldlocation + ''');';
+        SET @command = '/* ROLLBACK ' + 'FileName ' + @name + ', CurrentLocation: ' + @oldlocation + ', Current Size: ' + CONVERT(VARCHAR(14), @sizemb) + 'MB' + CHAR(10) + @command + CHAR(10) + '*/';
         PRINT @command;
-		print '/* ROBOCOPY ' + CHAR(10) + 'robocopy ' + LEFT(@oldlocation,LEN(@oldlocation) - charindex('\',reverse(@oldlocation),1) + 1)  
-		+ ' '  + LEFT(@newlocation,LEN(@newlocation) - charindex('\',reverse(@newlocation),1) + 1) + ' ' 
-		+  RIGHT(@oldlocation, CHARINDEX('\', REVERSE(@oldlocation)) -1) 
-           + ' /S /r:3 /w:10 /log:' + @ErrorLog + @name + '_robocopy_'
-           + convert(varchar(8), getdate(), 112) + '.txt /XF' + CHAR(10) + '*/'
-        FETCH NEXT FROM db_cursor INTO @name, @oldlocation, @SizeMB;
+        SET @newlocation = @newdrive + RIGHT(@oldlocation, LEN(@oldlocation) - 3);
+        SET @command = '-- INSTALL ' + CHAR(10) + 'ALTER DATABASE ' + QUOTENAME(@dbname) + ' MODIFY FILE (NAME = ' + @name + ', FILENAME = ''' + @newlocation + ''');';
+        PRINT @command;
+        PRINT '/* ROBOCOPY ' + CHAR(10) + 'robocopy ' + LEFT(@oldlocation, LEN(@oldlocation) - CHARINDEX('\', REVERSE(@oldlocation), 1) + 1) + ' ' + LEFT(@newlocation, LEN(@newlocation) - CHARINDEX('\', REVERSE(@newlocation), 1) + 1) + ' ' + RIGHT(@oldlocation, CHARINDEX('\', REVERSE(@oldlocation)) - 1) + ' /S /r:3 /w:10 /log:' + @errorlog + @name + '_robocopy_' + CONVERT(VARCHAR(8), GETDATE(), 112) + '.txt /XF' + CHAR(10) + '*/';
+        FETCH NEXT FROM db_cursor INTO @name
+                                     , @oldlocation
+                                     , @sizemb;
     END;
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
-if @dbname = 'tempdb'  PRINT '--Restart SQL this will recreate file on new drive'
-else 
-PRINT '/*' + CHAR(10) + ' ALTER DATABASE ' + @DBNAME + ' SET SINGLE_USER WITH ROLLBACK IMMEDIATE' + CHAR(10) + ' ALTER DATABASE ' + @DBNAME + ' SET MULTI_USER' + CHAR(10) + ' ALTER DATABASE ' + @DBNAME + ' SET OFFLINE' + CHAR(10) + '*/'
+IF @dbname = 'tempdb'
+    PRINT '--Restart SQL this will recreate file on new drive';
+    ELSE
+    PRINT '/*' + CHAR(10) + ' ALTER DATABASE ' + @dbname + ' SET SINGLE_USER WITH ROLLBACK IMMEDIATE' + CHAR(10) + ' ALTER DATABASE ' + @dbname + ' SET MULTI_USER' + CHAR(10) + ' ALTER DATABASE ' + @dbname + ' SET OFFLINE' + CHAR(10) + '*/';
