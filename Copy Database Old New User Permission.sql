@@ -53,6 +53,20 @@ ORDER BY perm.permission_name ASC,
          
 /*
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 USE [master]
 GO
 --============================================
@@ -60,13 +74,13 @@ GO
 -- Created:     2010/04/16
 -- Description: Copies rights of old user to new user
 --==================================================
-CREATE OR ALTER PROCEDURE sp_CloneRights
+CREATE OR ALTER PROCEDURE #sp_CloneRights
 (
-    @oldUser sysname,            --Old user from which to copy right
-    @newUser sysname,            --New user to which copy rights
-    @printOnly bit = 1,          --When 1 then only script is printed on screen, when 0 then also script is executed, when NULL, script is only executed and not printed
+    @oldUser sysname,             --Old user from which to copy right
+    @newUser sysname,             --New user to which copy rights
+    @printOnly bit = 1,           --When 1 then only script is printed on screen, when 0 then also script is executed, when NULL, script is only executed and not printed
     @NewLoginName sysname = null, --When a NewLogin name is provided also a creation of user is part of the final script
-	@ServerLevel bit = 0
+    @ServerLevel bit = 0
 )
 AS
 BEGIN
@@ -120,10 +134,10 @@ BEGIN
     INTO @permission;
     WHILE @@FETCH_STATUS = 0
     BEGIN
-		if @ServerLevel = 1
-		begin
-        print @permission;
-		end
+        if @ServerLevel = 1
+        begin
+            print @permission;
+        end
         FETCH NEXT FROM SRoles
         INTO @permission;
     END
@@ -142,8 +156,8 @@ BEGIN
        )
     BEGIN
         SET @msg = '--Source user ' + QUOTENAME(@oldUser) + ' doesn''t exists in database ' + @dbName
-       -- RAISERROR(@msg, 11, 1)
-	   PRINT @MSG
+        -- RAISERROR(@msg, 11, 1)
+        PRINT @MSG
         RETURN
     END
 
@@ -299,39 +313,47 @@ BEGIN
 
     DROP TABLE #output
 END
-/*
+
+
+GO
+GO
 declare @olduser varchar(128) = 'testing'
 declare @newuser varchar(128) = 'NEWUSER'
 declare @dbname varchar(128);
-Declare DBs cursor for 
-SELECT
-  sd.[name] AS 'DBName'
+Declare DBs cursor for
+SELECT sd.[name] AS 'DBName'
 FROM master.sys.databases sd
 WHERE HAS_DBACCESS(sd.[name]) = 1
-AND sd.[is_read_only] = 0
-AND sd.[state_desc] = 'ONLINE'
-AND sd.[user_access_desc] = 'MULTI_USER'
-AND sd.[is_in_standby] = 0;
-declare @command varchar(2048);
-    OPEN dbs;
+      AND sd.[is_read_only] = 0
+      AND sd.[state_desc] = 'ONLINE'
+      AND sd.[user_access_desc] = 'MULTI_USER'
+      AND sd.[is_in_standby] = 0;
+declare @command Nvarchar(2048);
+OPEN dbs;
+FETCH NEXT FROM dbs
+INTO @dbname;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    set @command
+        = 'USE ' + QUOTENAME(@DBNAME) + '; EXECUTE #sp_CloneRights ''' + @olduser + '''' + ',''' + @newuser + ''''
+    --print @command 
+    EXEC SP_EXECUTESQL @COMMAND
     FETCH NEXT FROM dbs
     INTO @dbname;
-	    WHILE @@FETCH_STATUS = 0
-    BEGIN
-	set @command = 'USE ' + QUOTENAME(@DBNAME) + '; EXECUTE sp_CloneRights ''' + @olduser + '''' + ',''' + @newuser + ''''
-	print @command 
-	        FETCH NEXT FROM dbs
-        INTO @dbname;
-    END
-    CLOSE dbs;
-    DEALLOCATE dbs;
-*/
+END
+CLOSE dbs;
+DEALLOCATE dbs;
 
-GO
-EXECUTE sp_ms_marksystemobject 'dbo.sp_CloneRights'
-GO
 
-	GO
+
+
+
+
+
+
+
+
+
 
 
 */
