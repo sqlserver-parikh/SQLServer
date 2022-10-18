@@ -78,8 +78,8 @@ CREATE OR ALTER PROCEDURE #sp_CloneRights
 (
     @oldUser sysname,             --Old user from which to copy right
     @newUser sysname,             --New user to which copy rights
-    @printOnly bit = 1,           --When 1 then only script is printed on screen, when 0 then also script is executed, when NULL, script is only executed and not printed
     @NewLoginName sysname = null, --When a NewLogin name is provided also a creation of user is part of the final script
+    @printOnly bit = 1,           --When 1 then only script is printed on screen, when 0 then also script is executed, when NULL, script is only executed and not printed
     @ServerLevel bit = 0
 )
 AS
@@ -324,7 +324,7 @@ Declare DBs cursor for
 SELECT sd.[name] AS 'DBName'
 FROM master.sys.databases sd
 WHERE HAS_DBACCESS(sd.[name]) = 1
-      AND sd.[is_read_only] = 0
+      --and sd.name = 'master_old'
       AND sd.[state_desc] = 'ONLINE'
       AND sd.[user_access_desc] = 'MULTI_USER'
       AND sd.[is_in_standby] = 0;
@@ -336,6 +336,7 @@ WHILE @@FETCH_STATUS = 0
 BEGIN
     set @command
         = 'USE ' + QUOTENAME(@DBNAME) + '; EXECUTE #sp_CloneRights ''' + @olduser + '''' + ',''' + @newuser + ''''
+          + ',''' + @newuser + ''''
     --print @command 
     EXEC SP_EXECUTESQL @COMMAND
     FETCH NEXT FROM dbs
@@ -343,6 +344,7 @@ BEGIN
 END
 CLOSE dbs;
 DEALLOCATE dbs;
+
 
 
 
