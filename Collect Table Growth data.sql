@@ -46,7 +46,8 @@ EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[spTableGrowthDetai
 END
 GO
 
-ALTER PROCEDURE [dbo].[spTableGrowthDetail](@retaindays INT = 15)
+
+ALTER PROCEDURE [dbo].[spTableGrowthDetail](@retaindays INT = 15, @ResultOnly bit = 0)
 AS
      CREATE TABLE #indexsize
      (dbname    SYSNAME,
@@ -168,7 +169,6 @@ SUM(ps.used_page_count) AS used
 FROM ?.sys.dm_db_partition_stats ps
 INNER JOIN ?.sys.internal_tables it ON (it.object_id = ps.object_id) WHERE it.internal_type IN (202,204) GROUP BY it.parent_id) AS a4 ON (a4.parent_id = a1.object_id) INNER JOIN ?.sys.all_objects a2 ON ( a1.object_id = a2.object_id ) INNER JOIN ?.sys.schemas a3 ON (a2.schema_id = a3.schema_id) left JOIN ?.sys.tables ST on ST.object_id = a2.object_id left JOIN ?.sys.partitions SP on SP.object_id = ST.object_id left JOIN ?.sys.change_tracking_tables CTT on a2.object_id = CTT.object_id --WHERE db_name(db_id("?")) not in (''master'',''model'',''tempdb'',''msdb'')
 ';
-     INSERT INTO DBATasks.[dbo].[tblTableGrowthDetail]
             SELECT DISTINCT
                    [DatabaseName],
                    SchemaName,
@@ -191,16 +191,25 @@ INNER JOIN ?.sys.internal_tables it ON (it.object_id = ps.object_id) WHERE it.in
                    i.IndexName AS [IndexName:Size],
                    i.IndexCount,
                    GETDATE() AS ReportRun
+			INTO #Report
             FROM #tableReport AS n
                  LEFT JOIN #temps AS i ON n.DatabaseName = i.dbname
                                           AND n.TableName = i.tablename
             WHERE DatabaseName NOT LIKE 'tempdb'
             ORDER BY TotalSize DESC;
+
+			if @ResultOnly = 1 
+			select * from #Report
+			else 
+			begin 
+			     INSERT INTO DBATasks.[dbo].[tblTableGrowthDetail]
+				select * from #Report
      DELETE DBATasks.dbo.tblTableGrowthDetail
      WHERE ReportRun < DATEADD(DD, -@retaindays, GETDATE());
      DELETE DBATasks.dbo.tblTableGrowthDetail
      WHERE RowsCount < 10000
            AND ReportRun < DATEADD(DD, -4, GETDATE());
+		   end
      DROP TABLE #tableReport;
      DROP TABLE #temps;
      DROP TABLE #indexsize;
