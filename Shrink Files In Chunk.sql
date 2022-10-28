@@ -40,10 +40,10 @@ WHILE @@FETCH_STATUS = 0
                     BREAK;
                 IF @CurrentSize < @ShrinkTo
                     BREAK;
-                IF @LoopCurrentSize -@BatchSize < @ShrinkTo
+                IF @LoopCurrentSize - @BatchSize < @ShrinkTo
                     BREAK;
                 SET @LoopCurrentSize = @LoopCurrentSize - @BatchSize;
-                SET @sql = 'DBCC SHRINKFILE(' + QUOTENAME(@filename) + ', ' + CAST(@LoopCurrentSize AS VARCHAR) + ')' + CHAR(10) + CHAR(13) + 'GO' + +CHAR(10) + CHAR(13);
+                SET @sql = 'DBCC SHRINKFILE(' + QUOTENAME(@filename) + ', ' + CAST(FLOOR(@LoopCurrentSize) AS VARCHAR) + ')' + CHAR(10) + CHAR(13) + 'GO' + +CHAR(10) + CHAR(13);
                 PRINT @SQL;
             END;
         FETCH NEXT FROM ShrinkDatabase INTO @FileName, @CurrentSize, @ShrinkTo;
@@ -51,7 +51,6 @@ WHILE @@FETCH_STATUS = 0
 CLOSE ShrinkDatabase;
 DEALLOCATE ShrinkDatabase;
 DROP TABLE #temp;
-
 
 
 
