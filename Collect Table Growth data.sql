@@ -1,4 +1,4 @@
-ALTER PROCEDURE spTableGrowthDetail
+CREATE OR ALTER PROCEDURE spTableGrowthData
 (
     @LowRowsRetentionDays INT = 4,
     @AllRowsRetentionDays int = 15,
