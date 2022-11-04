@@ -122,10 +122,13 @@ IF(@version >= 10.502200)
                --, CAST(s.total_bytes / (1024*1048576.0) as decimal(20,2)) [DriveTotalGB] 
                DB_NAME(f.database_id) AS DatabaseName, 
                f.name AS FileName, 
-               f.type_desc AS FileType,
+               case when f.type_desc = 'ROWS' then 'Data'
+			   when f.type_desc = 'Log' then 'Log' 
+			   else f.type_desc end as FileType,
+			   FILEGROUP_NAME(f.data_space_id) FGName,
                CASE
                    WHEN f.type_desc = 'ROWS'
-                   THEN 'Data File'
+                   THEN '-'
                    ELSE
         (
             SELECT CONVERT(VARCHAR(5), fi.vlf_count) + ' - ' + log_reuse_wait_desc
@@ -171,6 +174,7 @@ IF(@version >= 10.502200)
                NULL, 
                NULL, 
                NULL, 
+			   null,
                NULL, 
                NULL, 
                NULL, 
