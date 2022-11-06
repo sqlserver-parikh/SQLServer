@@ -39,6 +39,17 @@ CREATE TABLE #dbcc_log_info_2012
  Parity         BIGINT, 
  CreateLSN      NUMERIC(38)
 );
+create table #filegroupname
+(
+    DBName sysname,
+   FGName sysname NULL,
+    file_id int,
+    physical_name varchar(256)
+    
+)
+insert into #filegroupname
+exec sp_MSForeachdb 'use [?];
+select "?",filegroup_name(data_space_id), file_id, physical_name from sys.database_files '
 
 /******************************************************************************/
 
@@ -125,7 +136,7 @@ IF(@version >= 10.502200)
                case when f.type_desc = 'ROWS' then 'Data'
 			   when f.type_desc = 'Log' then 'Log' 
 			   else f.type_desc end as FileType,
-			   FILEGROUP_NAME(f.data_space_id) FGName,
+			   FG.FGName,
                CASE
                    WHEN f.type_desc = 'ROWS'
                    THEN '-'
@@ -161,6 +172,7 @@ IF(@version >= 10.502200)
              INNER JOIN master..sysaltfiles AS b ON b.dbid = f.database_id
                                                     AND b.fileid = f.file_id
              INNER JOIN #log_file_info fi ON fi.database_name = DB_NAME(f.database_id)
+			 left join #filegroupname fg on fg.file_id = f.file_id and fg.physical_name = f.physical_name
              INNER JOIN sys.databases SD ON SD.database_id = f.database_id 
         --where cast((CAST(s.available_bytes / 1048576.0 as decimal(20,2))) / CAST(s.total_bytes / 1048576.0 as decimal(20,2)) *100 as decimal (20,2))< 20 or convert(decimal(15,2), (100* cast((f.size * 8 / 1024.0) - (d.spaceused / 128.0) as decimal(15,2)))/ ( f.size * 8 / 1024.0 )) < 20.0
         UNION
@@ -188,7 +200,7 @@ IF(@version >= 10.502200)
             FROM sys.master_files AS f
                  CROSS APPLY sys.dm_os_volume_stats(f.database_id, f.file_id) AS s
         )
-        ORDER BY 9 DESC;
+        order by 10 DESC;
         DROP TABLE #tmpspaceusedR2;
 END;
 
@@ -294,7 +306,7 @@ get-wmiobject win32_volume
                         SELECT LEFT(b.filename, 1)
                         FROM sysaltfiles AS b
                     )
-                    ORDER BY 9 DESC;
+                    order by 10 DESC;
             END;
                 ELSE
                 BEGIN
@@ -370,7 +382,7 @@ get-wmiobject win32_volume
                         SELECT LEFT(b.physical_name, 1)
                         FROM sys.master_files AS b
                     )
-                    ORDER BY 9 DESC;
+                    order by 10 DESC;
             END;
     END;
 GO
@@ -386,3 +398,5 @@ IF OBJECT_ID('tempdb..#tmpspaceused') IS NOT NULL
     DROP TABLE #tmpspaceused;
 IF OBJECT_ID('tempdb..#tmpspaceusedR2') IS NOT NULL
     DROP TABLE #tmpspaceusedR2;
+IF OBJECT_ID('tempdb..#filegroupname') IS NOT NULL
+    DROP TABLE #filegroupname;
