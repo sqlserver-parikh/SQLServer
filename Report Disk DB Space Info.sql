@@ -136,7 +136,7 @@ IF(@version >= 10.502200)
                case when f.type_desc = 'ROWS' then 'Data'
 			   when f.type_desc = 'Log' then 'Log' 
 			   else f.type_desc end as FileType,
-			   ISNULL (FG.FGName, 'LogFile'),
+			   ISNULL (FG.FGName, 'LogFile') FGName,
                CASE
                    WHEN f.type_desc = 'ROWS'
                    THEN '-'
@@ -144,7 +144,7 @@ IF(@version >= 10.502200)
         (
             SELECT CONVERT(VARCHAR(5), fi.vlf_count) + ' - ' + log_reuse_wait_desc
             FROM sys.databases x
-            WHERE x.database_id = f.database_id
+            WHERE x.database_id = f.database_id  
         )
                END VLFInfo, 
                f.size / 128.0 AS FileSizeMB, 
@@ -171,7 +171,7 @@ IF(@version >= 10.502200)
                                                 AND f.database_id = DB_ID(dbname)
              INNER JOIN master..sysaltfiles AS b ON b.dbid = f.database_id
                                                     AND b.fileid = f.file_id
-             INNER JOIN #log_file_info fi ON fi.database_name = DB_NAME(f.database_id)
+             left JOIN #log_file_info fi ON fi.database_name = DB_NAME(f.database_id) and fi.file_id = f.file_id
 			 left join #filegroupname fg on fg.file_id = f.file_id and fg.physical_name = f.physical_name
              INNER JOIN sys.databases SD ON SD.database_id = f.database_id 
         --where cast((CAST(s.available_bytes / 1048576.0 as decimal(20,2))) / CAST(s.total_bytes / 1048576.0 as decimal(20,2)) *100 as decimal (20,2))< 20 or convert(decimal(15,2), (100* cast((f.size * 8 / 1024.0) - (d.spaceused / 128.0) as decimal(15,2)))/ ( f.size * 8 / 1024.0 )) < 20.0
