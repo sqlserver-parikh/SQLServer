@@ -131,12 +131,12 @@ IF(@version >= 10.502200)
                END AS AvailableDiskSpace,
                --, CAST(s.available_bytes / (1024*1048576.0) as decimal(20,2)) [DriveAvailableGB]
                --, CAST(s.total_bytes / (1024*1048576.0) as decimal(20,2)) [DriveTotalGB] 
-               DB_NAME(f.database_id) AS DatabaseName, 
-               f.name AS FileName, 
+               DB_NAME(f.database_id) + ' (' + convert(varchar(5), f.database_id) + ')' AS DatabaseName, 
+               f.name + ' (' + convert(varchar(5), f.file_id) + ')' AS FileName, 
                case when f.type_desc = 'ROWS' then 'Data'
 			   when f.type_desc = 'Log' then 'Log' 
 			   else f.type_desc end as FileType,
-			   FG.FGName,
+			   ISNULL (FG.FGName, 'LogFile'),
                CASE
                    WHEN f.type_desc = 'ROWS'
                    THEN '-'
