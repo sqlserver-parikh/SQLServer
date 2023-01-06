@@ -4,7 +4,7 @@ SELECT OBJECT_SCHEMA_NAME(pstats.object_id) AS SchemaName,
        CASE
            WHEN P.data_compression_desc = 'NONE'
            THEN 'ALTER TABLE ' + OBJECT_SCHEMA_NAME(pstats.object_id) + '.' + OBJECT_NAME(pstats.object_id) + ' REBUILD PARTITION = ' + CONVERT(VARCHAR(5), pstats.partition_number) + ' WITH(DATA_COMPRESSION = PAGE )'
-           ELSE 'Already compressed'
+           ELSE 'Already compressed' + ' --  ALTER TABLE ' + OBJECT_SCHEMA_NAME(pstats.object_id) + '.' + OBJECT_NAME(pstats.object_id) + ' REBUILD PARTITION = ' + CONVERT(VARCHAR(5), pstats.partition_number) + ' WITH(DATA_COMPRESSION = PAGE )'
        END CompressionScript, 
        ps.name AS PartitionSchemeName, 
        ds.name AS PartitionFilegroupName, 
@@ -19,7 +19,6 @@ SELECT OBJECT_SCHEMA_NAME(pstats.object_id) AS SchemaName,
            THEN 'Upper Boundary'
            ELSE 'Lower Boundary'
        END AS PartitionBoundary, 
-       prv.value AS PartitionBoundaryValue, 
        c.name AS PartitionKey,
        CASE
            WHEN pf.boundary_value_on_right = 0
@@ -30,9 +29,13 @@ SELECT OBJECT_SCHEMA_NAME(pstats.object_id) AS SchemaName,
                 ORDER BY pstats.object_id, 
                          pstats.partition_number), 'Infinity') AS VARCHAR(100))
        END AS PartitionRange, 
+       'ALTER PARTITION FUNCTION ' + CONVERT(VARCHAR(40), pf.name) + '() MERGE RANGE(''' MergeScript1, 
+       prv.value AS PartitionBoundaryValueMergeScript2, 
+       ''')' MergeScript3, 
        pstats.partition_number AS PartitionNumber, 
        pstats.row_count AS PartitionRowCount, 
        p.data_compression_desc AS DataCompression
+INTO #TEMP
 FROM sys.dm_db_partition_stats AS pstats
      INNER JOIN sys.partitions AS p ON pstats.partition_id = p.partition_id
      INNER JOIN sys.destination_data_spaces AS dds ON pstats.partition_number = dds.destination_id
@@ -58,10 +61,35 @@ FROM sys.dm_db_partition_stats AS pstats
                                                                                        ELSE(prv.boundary_id + 1)
                                                                                    END)
 WHERE 1 = 1
---AND data_compression_desc LIKE 'NONE'
---AND OBJECT_NAME(pstats.object_id) like '%tblname%'
+--   AND data_compression_desc LIKE 'NONE'
+--AND OBJECT_NAME(pstats.object_id) like '%StagingDetectorData%'
 --AND pstats.row_count > 10000
-ORDER BY OBJECT_NAME(pstats.object_id), 
-         --pstats.row_count, 
-         PartitionNumber;
-GO
+ORDER BY 2, 
+         pstats.partition_number; 
+--GO
+--SELECT DISTINCT 
+--       s.name, 
+--       t.name, 
+--       i.name, 
+--       'ALTER INDEX ' + QUOTENAME(i.name) + ' ON ' + QUOTENAME(S.name) + '.' + QUOTENAME(T.name) + ' REBUILD PARTITION = ' + CONVERT(VARCHAR(3), partition_number) + ' WITH (SORT_IN_TEMPDB = OFF, DATA_COMPRESSION = PAGE )', 
+--       i.type, 
+--       i.index_id, 
+--       p.partition_number, 
+--       p.rows, 
+--       data_compression_desc
+--FROM sys.tables t
+--     LEFT JOIN sys.indexes i ON t.object_id = i.object_id
+--     JOIN sys.schemas s ON t.schema_id = s.schema_id
+--     LEFT JOIN sys.partitions p ON i.index_id = p.index_id
+--                                   AND t.object_id = p.object_id
+--WHERE t.type = 'U'
+--      AND p.data_compression_desc = 'NONE'
+--      AND partition_number > 1
+--      AND P.rows < 100000
+--ORDER BY p.rows ASC;
+
+SELECT *
+FROM #TEMP;
+--where PartitionRowCount = 0 and PartitionBoundaryValue is not null
+
+DROP TABLE #TEMP;
