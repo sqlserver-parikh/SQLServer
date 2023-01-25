@@ -1,0 +1,103 @@
+USE [master]
+GO
+/****** Object: Table [dbo].[RG_BackgroundJobs] Script Date: 8/11/2021 5:02:09 PM ******/
+IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[RG_BackgroundJobs]') AND type in (N'U'))
+DROP TABLE [dbo].[RG_BackgroundJobs]
+GO
+/****** Object: Table [dbo].[RG_BackgroundJobs] Script Date: 8/11/2021 5:02:09 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[RG_BackgroundJobs](
+[job_id] [uniqueidentifier] NULL,
+[name] [sysname] NOT NULL,
+[match_string] [nvarchar](256) NOT NULL,
+PRIMARY KEY CLUSTERED
+(
+[match_string] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+ALTER AUTHORIZATION ON [dbo].[RG_BackgroundJobs] TO SCHEMA OWNER
+GO
+INSERT [dbo].[RG_BackgroundJobs] ([job_id], [name], [match_string])
+SELECT
+job_id, name, N'SQLAgent - TSQL JobStep (Job '
++ CONVERT(VARCHAR(36), CONVERT(BINARY(16), job_id), 1) + '%'
+FROM msdb.dbo.sysjobs
+WHERE name like 'DatabaseBackup - USER_DATABASES - FULL'-- you need to filter here
+
+GO
+
+CREATE FUNCTION dbo.classifier_BackgroundJobs()
+RETURNS SYSNAME
+WITH SCHEMABINDING
+AS
+BEGIN
+DECLARE
+-- BEWARE OF SPOOFING:
+@app NVARCHAR(256)= APP_NAME(), @group SYSNAME= N'default';
+IF @app LIKE N'%TSQL JobStep%'
+BEGIN
+IF EXISTS
+(
+SELECT 1
+FROM dbo.RG_BackgroundJobs
+WHERE @app LIKE match_string
+)
+BEGIN
+SET @group = N'db_maintenance_wg';
+END;
+END;
+RETURN(@group);
+END;
+GO
+
+ALTER RESOURCE GOVERNOR WITH (CLASSIFIER_FUNCTION = [dbo].[classifier_BackgroundJobs]);
+GO
+
+ALTER RESOURCE GOVERNOR RECONFIGURE;
+GO
+
+USE [master]
+GO
+
+IF EXISTS ( SELECT name FROM sys.resource_governor_resource_pools WHERE name = N'db_maintenance_pool')
+BEGIN
+DROP RESOURCE POOL [db_maintenance_pool]
+
+END
+GO
+
+/****** Object: ResourcePool [db_maintenance_pool] Script Date: 8/11/2021 2:26:44 PM ******/
+CREATE RESOURCE POOL [db_maintenance_pool] WITH(min_cpu_percent=0,
+max_cpu_percent=25,
+min_memory_percent=0,
+max_memory_percent=100,
+cap_cpu_percent=40,
+AFFINITY SCHEDULER = AUTO
+)
+GO
+
+USE [master]
+GO
+
+IF EXISTS ( SELECT name FROM sys.resource_governor_workload_groups WHERE name = N'db_maintenance_wg')
+BEGIN
+DROP WORKLOAD GROUP [db_maintenance_wg]
+END
+GO
+
+/****** Object: WorkloadGroup [db_maintenance_wg] Script Date: 8/11/2021 2:27:01 PM ******/
+CREATE WORKLOAD GROUP [db_maintenance_wg] WITH(group_max_requests=0,
+importance=Medium,
+request_max_cpu_time_sec=0,
+request_max_memory_grant_percent=25,
+request_memory_grant_timeout_sec=0,
+max_dop=0) USING [db_maintenance_pool]
+GO
+
+ALTER RESOURCE GOVERNOR RECONFIGURE;
+GO
+
