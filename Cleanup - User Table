@@ -8,37 +8,42 @@ CREATE OR ALTER procedure [dbo].[spCleanupTable]
     @batchsize int = 50000,
     @maxbatchcount int = 2,
     @disablecontraint bit = 0
-as
-declare @executesql nvarchar(max),
+AS
+SET NOCOUNT ON;
+DECLARE @executesql nvarchar(max),
         @clean nvarchar(5)
-if @retentiontill = ''
+IF @retentiontill = ''
     set @retentiontill = getdate()
-if @entiretable = 1
-begin
-    set @clean = '--'
-	set @maxbatchcount = 2147483646
-end
-else
-    set @clean = ''
-if @disablecontraint = 1
-    set @executesql = 'ALTER TABLE ' + QUOTENAME(@tablename) + ' NOCHECK CONSTRAINT ALL;'
-EXEC sp_executesql @executesql
-PRINT @executesql;
+IF @entiretable = 1
+BEGIN
+    SET @clean = '--'
+    SET @maxbatchcount = 2147483646
+END
+ELSE
+    SET @clean = ''
+IF @disablecontraint = 1
+BEGIN
+    SET @executesql = 'ALTER TABLE ' + QUOTENAME(@tablename) + ' NOCHECK CONSTRAINT ALL;'
+    EXEC sp_executesql @executesql
+    PRINT @executesql;
+END
 SET @executesql
-    = 'declare @batchcount int =' + convert(varchar(19), @maxbatchcount) + char(13) + ' while (@batchcount >'
-      + convert(varchar(10), 0) + ')' + char(10) + char(13) + 'BEGIN 
+    = 'DECLARE @batchcount INT =' + CONVERT(varchar(19), @maxbatchcount) + char(13) + 'WHILE (@batchcount >'
+      + CONVERT(varchar(10), 0) + ')' + char(13) + 'BEGIN 
 DELETE TOP ('     + CONVERT(VARCHAR(9), @batchsize) + ')
  FROM '           + @tablename + char(13) + @clean + ' WHERE ' + @filtercolumnName + ' < DATEADD(' + @retentiondatepart
       + ', -' + convert(varchar(9), @retentionNumber) + ', ''' + convert(varchar(8), @retentiontill, 112) + ''''
       + ');
- if @@rowcount < ' + CONVERT(VARCHAR(9), @batchsize) + char(13) + ' BREAK; 
- set @batchcount = @batchcount -1 ; ' + char(13) + 'end;'
+ IF @@rowcount < ' + CONVERT(VARCHAR(9), @batchsize) + char(13) + ' BREAK; 
+ SET @batchcount = @batchcount -1 ; ' + char(13) + 'END;'
 
-execute sp_executesql @executesql
-print @executesql
+EXECUTE sp_executesql @executesql
+--PRINT @executesql
 
-if @disablecontraint = 1
-    set @executesql = 'ALTER TABLE ' + QUOTENAME(@tablename) + ' CHECK CONSTRAINT ALL;'
-EXEC sp_executesql @executesql
-PRINT @executesql;
+IF @disablecontraint = 1
+BEGIN
+    SET @executesql = 'ALTER TABLE ' + QUOTENAME(@tablename) + ' CHECK CONSTRAINT ALL;'
+    EXEC sp_executesql @executesql
+    PRINT @executesql
+END
 GO
