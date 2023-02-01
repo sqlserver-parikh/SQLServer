@@ -1,14 +1,4 @@
-
-DROP PROCEDURE IF EXISTS [dbo].[spCleanupTable]
-GO
-
-SET ANSI_NULLS ON
-GO
-
-SET QUOTED_IDENTIFIER ON
-GO
-
-CREATE procedure [dbo].[spCleanupTable]
+CREATE OR ALTER procedure [dbo].[spCleanupTable]
     @tablename nvarchar(256) = 'incident',
     @entiretable bit = 0,
     @filtercolumnName nvarchar(256) = 'createat',
@@ -19,10 +9,9 @@ CREATE procedure [dbo].[spCleanupTable]
     @maxbatchcount int = 2,
     @disablecontraint bit = 0
 as
-set nocount on;
 declare @executesql nvarchar(max),
         @clean nvarchar(5)
-if @retentiontill is null
+if @retentiontill = ''
     set @retentiontill = getdate()
 if @entiretable = 1
 begin
@@ -53,5 +42,3 @@ if @disablecontraint = 1
 EXEC sp_executesql @executesql
 PRINT @executesql;
 GO
-
-
