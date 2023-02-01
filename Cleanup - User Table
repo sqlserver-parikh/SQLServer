@@ -1,0 +1,57 @@
+
+DROP PROCEDURE IF EXISTS [dbo].[spCleanupTable]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE procedure [dbo].[spCleanupTable]
+    @tablename nvarchar(256) = 'incident',
+    @entiretable bit = 0,
+    @filtercolumnName nvarchar(256) = 'createat',
+    @retentiondatepart varchar(9) = 'dd',
+    @retentionNumber int = '365',
+    @retentiontill datetime = '',
+    @batchsize int = 50000,
+    @maxbatchcount int = 2,
+    @disablecontraint bit = 0
+as
+set nocount on;
+declare @executesql nvarchar(max),
+        @clean nvarchar(5)
+if @retentiontill is null
+    set @retentiontill = getdate()
+if @entiretable = 1
+begin
+    set @clean = '--'
+	set @maxbatchcount = 2147483646
+end
+else
+    set @clean = ''
+if @disablecontraint = 1
+    set @executesql = 'ALTER TABLE ' + QUOTENAME(@tablename) + ' NOCHECK CONSTRAINT ALL;'
+EXEC sp_executesql @executesql
+PRINT @executesql;
+SET @executesql
+    = 'declare @batchcount int =' + convert(varchar(19), @maxbatchcount) + char(13) + ' while (@batchcount >'
+      + convert(varchar(10), 0) + ')' + char(10) + char(13) + 'BEGIN 
+DELETE TOP ('     + CONVERT(VARCHAR(9), @batchsize) + ')
+ FROM '           + @tablename + char(13) + @clean + ' WHERE ' + @filtercolumnName + ' < DATEADD(' + @retentiondatepart
+      + ', -' + convert(varchar(9), @retentionNumber) + ', ''' + convert(varchar(8), @retentiontill, 112) + ''''
+      + ');
+ if @@rowcount < ' + CONVERT(VARCHAR(9), @batchsize) + char(13) + ' BREAK; 
+ set @batchcount = @batchcount -1 ; ' + char(13) + 'end;'
+
+execute sp_executesql @executesql
+print @executesql
+
+if @disablecontraint = 1
+    set @executesql = 'ALTER TABLE ' + QUOTENAME(@tablename) + ' CHECK CONSTRAINT ALL;'
+EXEC sp_executesql @executesql
+PRINT @executesql;
+GO
+
+
