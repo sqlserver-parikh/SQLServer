@@ -101,3 +101,12 @@ GO
 ALTER RESOURCE GOVERNOR RECONFIGURE;
 GO
 
+ALTER RESOURCE POOL [db_maintenance_pool] WITH (Max_IOPS_PER_VOLUME=1000);
+ALTER RESOURCE GOVERNOR RECONFIGURE;
+GO
+
+SELECT pool_id, name, min_iops_per_volume, max_iops_per_volume, read_io_queued_total,
+read_io_issued_total, read_io_completed_total,read_io_throttled_total, read_bytes_total,
+read_io_stall_total_ms, read_io_stall_queued_ms, io_issue_violations_total,io_issue_delay_total_ms
+FROM   sys.dm_resource_governor_resource_pools
+WHERE  name <> 'internal'; 
