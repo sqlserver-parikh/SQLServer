@@ -4,7 +4,7 @@ SET ANSI_NULLS ON;
 GO
 SET QUOTED_IDENTIFIER ON;
 GO
-CREATE PROCEDURE [dbo].[usp_PartitionMaintenance] @TableName               VARCHAR(128) = '', 
+ALTER PROCEDURE [dbo].[usp_PartitionMaintenance] @TableName               VARCHAR(128) = '', 
                                                   @CleanupXDaysOldData     INT          = 30, 
                                                   @Execute                 BIT          = 0, 
                                                   @NextPartitionAfterXDays INT          = 30, 
@@ -179,7 +179,14 @@ AS
      -----------------------------------------------------------------------------------------------------------------------------------------------------------
      IF @PartitionALIGNEDIndex = 1
          BEGIN
-             WITH CTE_PartCount
+			SELECT i.[name] AS IndexName
+    ,SUM(s.[used_page_count]) * 8 AS IndexSizeKB into #temp
+FROM sys.dm_db_partition_stats AS s
+INNER JOIN sys.indexes AS i ON s.[object_id] = i.[object_id]
+    AND s.[index_id] = i.[index_id]
+GROUP BY i.[name]
+ORDER BY i.[name]
+             ;WITH CTE_PartCount
                   AS (SELECT P.object_id, 
                              P.index_id, 
                              COUNT(P.partition_number) AS PartitionCount
@@ -215,6 +222,7 @@ AS
                          S.SchemaName, 
                          S.ObjectName, 
                          S.IndexName, 
+						             T.IndexSizeKB,
                          S.IndexType, 
                          S.PartitionCount, 
                          IsPartitioned = CASE
@@ -228,6 +236,7 @@ AS
                                          ELSE ''
                                      END
                   FROM CTE_Summary AS S
+				  inner join #temp t on s.IndexName = t.IndexName
                   WHERE S.TablePartCount <> 1
                   ORDER BY IsAligned;
          END;
