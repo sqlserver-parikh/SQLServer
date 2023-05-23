@@ -51,3 +51,11 @@ FROM
   JOIN dbo.syssubscriptions s ON sa.artid = s.artid 
   JOIN master.dbo.sysservers srv ON s.srvid = srv.srvid;
 
+
+USE SubscriberDB
+select 
+  'EXEC sp_dropsubscription @publication = ''' + publication + ''', @subscriber = '''  + UPPER(@@servername)  + ''', @article = N''all'' , @destination_db = '''  + DB_NAME() + ''';' AS DropSubscriptionCommand,
+  'EXEC sp_addsubscription @publication = ''' + publication + ''', @subscriber = ''MyNewSubscriberServer'', @destination_db = '''  + DB_NAME() + ''', @sync_type = ''none'', @article = N''all'';' AS AddSubscriptionCommand
+,* from MSreplication_subscriptions
+
+order by publisher
