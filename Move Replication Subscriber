@@ -41,15 +41,16 @@ where 1=1
 and ss.srvname like '%DBSQL01'
 ORDER BY 1,2,3
 
-USE PublicationDB
-SELECT 
-  'EXEC sp_dropsubscription @publication = ''' + sp.name + ''', @subscriber = '''  + UPPER(srv.srvname)  + ''', @article = N''all'' , @destination_db = '''  + sa.name + ''';' AS DropSubscriptionCommand,
-  'EXEC sp_addsubscription @publication = ''' + sp.name + ''', @subscriber = ''MyNewSubscriberServer'', @destination_db = '''  + sa.name + ''', @sync_type = ''none'', @article = N''all'';' AS AddSubscriptionCommand
+use PuslishDB 
+SELECT Distinct
+  'EXEC sp_dropsubscription @publication = ''' + sp.name + ''', @subscriber = '''  + UPPER(srv.srvname)  + ''', @article = N''all'' , @destination_db = '''  + S.dest_db + ''';' AS DropSubscriptionCommand,
+  'EXEC sp_addsubscription @publication = ''' + sp.name + ''', @subscriber = ''MyNewSubscriberServer'', @destination_db = '''  + s.dest_db + ''', @sync_type = ''none'', @article = N''all'';' AS AddSubscriptionCommand
 FROM 
   dbo.syspublications sp  
   JOIN dbo.sysarticles sa ON sp.pubid = sa.pubid 
   JOIN dbo.syssubscriptions s ON sa.artid = s.artid 
-  JOIN master.dbo.sysservers srv ON s.srvid = srv.srvid;
+  JOIN master.dbo.sysservers srv ON s.srvid = srv.srvid
+  where srv.srvname like '%my%';
 
 --Clean up invalid subscription
 USE SubscriberDB
