@@ -276,6 +276,13 @@ BEGIN TRY
             'HARDWARE\DESCRIPTION\System\CentralProcessor\1', 
             '~MHz', 
             @param = @CPU_1_MHz OUTPUT;
+	DECLARE @IFIValue INT;
+
+EXEC master.dbo.xp_regread
+    @rootkey = 'HKEY_LOCAL_MACHINE',
+    @key = 'SYSTEM\CurrentControlSet\Services\SqlServer',
+    @value_name = 'InstantFileInitializationEnabled',
+    @value = @IFIValue OUTPUT;
     SELECT SERVERPROPERTY('ServerName') ServerName, 
            CONNECTIONPROPERTY('local_tcp_port') PortNumber,
            CASE
@@ -386,7 +393,11 @@ BEGIN TRY
     ) MaxMemory,
            --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
            @WinName WindowsName, 
-           @WindowsRDP WindowsRDPPort, 
+           @WindowsRDP WindowsRDPPort,
+		  case when @IFIValue = 1 then 
+     'Instant file initialization is enabled.'
+else 
+     'Instant file initialization is disabled.' end As InstantFileInitialization,
            ISNULL(@SystemManufacturer, 'VMware, Inc.') AS SystemManufacturer,
            CASE
                WHEN @SystemManufacturer <> 'VMware, Inc.'
