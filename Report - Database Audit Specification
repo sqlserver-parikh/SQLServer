@@ -1,0 +1,62 @@
+-- Find server audit name and location of the audit file
+DECLARE @AuditName SYSNAME
+
+-- Get audit name
+SELECT @AuditName = name
+FROM sys.server_audits
+WHERE is_state_enabled = 1
+
+-- Create temporary table
+CREATE TABLE #AuditSpecTable (
+    DatabaseName SYSNAME,
+    AuditSpecificationName SYSNAME,
+    AuditActionName NVARCHAR(4000)
+)
+
+-- Find all database audit specifications, their actions, and consolidate the output for all databases
+DECLARE @DatabaseName SYSNAME
+
+DECLARE DatabaseCursor CURSOR FOR
+SELECT name
+FROM sys.databases
+WHERE state = 0 -- Exclude offline databases
+  AND database_id > 4 -- Exclude system databases
+
+OPEN DatabaseCursor
+
+FETCH NEXT FROM DatabaseCursor INTO @DatabaseName
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    PRINT 'Database: ' + @DatabaseName
+
+    EXEC ('USE [' + @DatabaseName + '];
+           INSERT INTO #AuditSpecTable
+           SELECT
+               ''' + @DatabaseName + ''' AS DatabaseName,
+               das.name AS AuditSpecificationName,
+               act.name AS AuditActionName
+           FROM sys.database_audit_specifications AS das
+           INNER JOIN sys.database_audit_specification_details AS dets ON das.database_specification_id = dets.database_specification_id
+           INNER JOIN sys.dm_audit_actions AS act ON dets.audit_action_id = act.action_id COLLATE DATABASE_DEFAULT
+           WHERE das.is_state_enabled = 1
+           ORDER BY das.name')
+
+    FETCH NEXT FROM DatabaseCursor INTO @DatabaseName
+END
+
+CLOSE DatabaseCursor
+DEALLOCATE DatabaseCursor
+
+-- Consolidated Output
+SELECT DISTINCT 
+	@@SERVERNAME AS ServerName,
+    @AuditName AS ServerAuditName,
+    DatabaseName,
+    AuditSpecificationName,
+    AuditActionName
+FROM #AuditSpecTable
+ORDER BY DatabaseName, AuditSpecificationName, AuditActionName
+
+-- Drop temporary table
+DROP TABLE #AuditSpecTable
