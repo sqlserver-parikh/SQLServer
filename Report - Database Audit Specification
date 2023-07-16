@@ -57,6 +57,8 @@ SELECT DISTINCT
     AuditActionName
 FROM #AuditSpecTable
 
+
+-----Server Audit Specification
 DECLARE @AuditName SYSNAME
 
 -- Get audit name
