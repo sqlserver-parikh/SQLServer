@@ -56,6 +56,42 @@ SELECT DISTINCT
     AuditSpecificationName,
     AuditActionName
 FROM #AuditSpecTable
+
+DECLARE @AuditName SYSNAME
+
+-- Get audit name
+SELECT @AuditName = name
+FROM sys.server_audits
+WHERE is_state_enabled = 1
+
+-- Create temporary table
+CREATE TABLE #ServerAuditSpecTable (
+    AuditSpecificationName SYSNAME,
+    AuditActionName NVARCHAR(4000)
+)
+
+-- Find all server audit specifications and their actions
+INSERT INTO #ServerAuditSpecTable
+SELECT aud_spec.name AS AuditSpecificationName,
+       act.name AS AuditActionName
+FROM sys.server_audit_specifications AS aud_spec
+INNER JOIN sys.server_audit_specification_details AS aud_spec_dets ON aud_spec.server_specification_id = aud_spec_dets.server_specification_id
+INNER JOIN sys.dm_audit_actions AS act ON aud_spec_dets.audit_action_id = act.action_id COLLATE DATABASE_DEFAULT
+WHERE aud_spec.is_state_enabled = 1
+ORDER BY aud_spec.name
+
+-- Output server audit name
+SELECT DISTINCT
+    @@SERVERNAME AS ServerName,
+    @AuditName AS ServerAuditName,
+    AuditSpecificationName,
+    AuditActionName
+FROM #ServerAuditSpecTable
+ORDER BY AuditSpecificationName, AuditActionName
+
+-- Drop temporary table
+DROP TABLE #ServerAuditSpecTable
+
 ORDER BY DatabaseName, AuditSpecificationName, AuditActionName
 
 -- Drop temporary table
