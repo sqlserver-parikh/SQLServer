@@ -57,13 +57,13 @@ SELECT DISTINCT
     AuditActionName
 FROM #AuditSpecTable
 
-
+/****************************************************************
 -----Server Audit Specification
-
-DECLARE @AuditName SYSNAME
+****************************************************************/
+DECLARE @ServerAuditName SYSNAME
 
 -- Get audit name
-SELECT @AuditName = name
+SELECT @ServerAuditName = name
 FROM sys.server_audits
 WHERE is_state_enabled = 1
 
@@ -86,7 +86,7 @@ ORDER BY aud_spec.name
 -- Output server audit name
 SELECT DISTINCT
     @@SERVERNAME AS ServerName,
-    @AuditName AS ServerAuditName,
+    @ServerAuditName AS ServerAuditName,
     AuditSpecificationName,
     AuditActionName
 FROM #ServerAuditSpecTable
@@ -94,3 +94,4 @@ ORDER BY AuditSpecificationName, AuditActionName
 
 -- Drop temporary table
 DROP TABLE #ServerAuditSpecTable
+DROP TABLE #AuditSpecTable
