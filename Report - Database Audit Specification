@@ -53,7 +53,7 @@ SELECT DISTINCT
 	@@SERVERNAME AS ServerName,
     @AuditName AS AuditName,
     DatabaseName,
-    AuditSpecificationName DatabaseSpecificationName,
+    AuditSpecificationName DatabaseAuditSpecificationName,
     AuditActionName DatabaseAuditActionName
 FROM #AuditSpecTable
 
