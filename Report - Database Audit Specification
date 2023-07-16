@@ -59,6 +59,7 @@ FROM #AuditSpecTable
 
 
 -----Server Audit Specification
+
 DECLARE @AuditName SYSNAME
 
 -- Get audit name
@@ -79,7 +80,7 @@ SELECT aud_spec.name AS AuditSpecificationName,
 FROM sys.server_audit_specifications AS aud_spec
 INNER JOIN sys.server_audit_specification_details AS aud_spec_dets ON aud_spec.server_specification_id = aud_spec_dets.server_specification_id
 INNER JOIN sys.dm_audit_actions AS act ON aud_spec_dets.audit_action_id = act.action_id COLLATE DATABASE_DEFAULT
-WHERE aud_spec.is_state_enabled = 1
+--WHERE aud_spec.is_state_enabled = 1
 ORDER BY aud_spec.name
 
 -- Output server audit name
@@ -93,8 +94,3 @@ ORDER BY AuditSpecificationName, AuditActionName
 
 -- Drop temporary table
 DROP TABLE #ServerAuditSpecTable
-
-ORDER BY DatabaseName, AuditSpecificationName, AuditActionName
-
--- Drop temporary table
-DROP TABLE #AuditSpecTable
