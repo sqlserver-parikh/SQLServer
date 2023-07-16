@@ -51,10 +51,10 @@ DEALLOCATE DatabaseCursor
 -- Consolidated Output
 SELECT DISTINCT 
 	@@SERVERNAME AS ServerName,
-    @AuditName AS ServerAuditName,
+    @AuditName AS AuditName,
     DatabaseName,
-    AuditSpecificationName,
-    AuditActionName
+    AuditSpecificationName DatabaseSpecificationName,
+    AuditActionName DatabaseAuditActionName
 FROM #AuditSpecTable
 
 /****************************************************************
@@ -86,9 +86,9 @@ ORDER BY aud_spec.name
 -- Output server audit name
 SELECT DISTINCT
     @@SERVERNAME AS ServerName,
-    @ServerAuditName AS ServerAuditName,
-    AuditSpecificationName,
-    AuditActionName
+    @ServerAuditName AS AuditName,
+    AuditSpecificationName ServerAuditSpecificationName,
+    AuditActionName ServerAuditActionName
 FROM #ServerAuditSpecTable
 ORDER BY AuditSpecificationName, AuditActionName
 
