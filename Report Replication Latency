@@ -1,0 +1,78 @@
+IF (OBJECT_ID('tempdb..#AgentHealth')) IS NOT NULL
+    DROP TABLE #AgentHealth
+
+CREATE TABLE #AgentHealth (
+    Agent_id INT NOT NULL,
+    DistributorAgentName SYSNAME NOT NULL,
+    RunStatus VARCHAR(20) NULL,
+    Publisher SYSNAME NOT NULL,
+    PublisherDB SYSNAME NOT NULL,
+    Publication SYSNAME NOT NULL,
+    Subscriber SYSNAME NOT NULL,
+    SubscribingDB SYSNAME NOT NULL,
+    LatencyInMinute INT NOT NULL,
+    CmdsDeliveredPerSec INT NULL,
+    Health CHAR(10) NOT NULL,
+    LastTransactionTime DATETIME NULL,
+    Comments NVARCHAR(4000) NULL
+)
+
+SELECT
+    Agent.agent_id,
+    Agent.AgentName,
+    CASE Agent.runstatus
+        WHEN 1 THEN 'Start'
+        WHEN 2 THEN 'Succeed'
+        WHEN 3 THEN 'In Progress'
+        WHEN 4 THEN 'Idle'
+        WHEN 5 THEN 'Retry'
+        ELSE 'Fail'
+    END AS RunStatus,
+    Agent.publisher,
+    Agent.publisher_db,
+    Agent.publication,
+    Agent.Subscriber,
+    Agent.subscriber_db,
+    DATEDIFF(MINUTE, T.entry_time, GETDATE()) AS 'LatencyInMinutes',
+    CONVERT(INT, Agent.delivery_rate) AS CmdsDeliveredPerSec,
+    CASE
+        WHEN (DATEDIFF(MINUTE, T.entry_time, GETDATE()) < 11 AND RunStatus NOT IN (5, 6)) THEN 'Excellent'
+        WHEN (DATEDIFF(MINUTE, T.entry_time, GETDATE()) BETWEEN 11 AND 30 AND RunStatus NOT IN (5, 6)) THEN 'Good'
+        WHEN (DATEDIFF(MINUTE, T.entry_time, GETDATE()) BETWEEN 31 AND 60 AND RunStatus NOT IN (5, 6)) THEN 'Caution'
+        ELSE 'Critical'
+    END AS Health,
+    T.entry_time,
+    Agent.comments
+FROM (
+    SELECT
+        H.agent_id,
+        A.name AS AgentName,
+        H.xact_seqno,
+        H.runstatus,
+        A.publisher_database_id,
+        S1.srvname AS publisher,
+        A.publisher_id,
+        A.publisher_db,
+        S.srvname AS Subscriber,
+        A.subscriber_id,
+        A.subscriber_db,
+        A.publication,
+        delivery_rate,
+        H.comments,
+        H.start_time,
+        H.time
+    FROM msdistribution_history H WITH (NOLOCK)
+    INNER JOIN (
+        SELECT
+            agent_id,
+            MAX(time) AS time
+        FROM msdistribution_history WITH (NOLOCK)
+        GROUP BY agent_id
+    ) AS Active
+    ON H.agent_id = Active.agent_id AND H.time = Active.time
+    INNER JOIN MSdistribution_agents A WITH (NOLOCK) ON H.agent_id = A.id
+    INNER JOIN master..sysservers S WITH (NOLOCK) ON A.subscriber_id = S.srvid
+    INNER JOIN master..sysservers S1 WITH (NOLOCK) ON A.publisher_id = S1.srvid
+) AS Agent
+INNER JOIN MSrepl_transactions T WITH (NOLOCK) ON Agent.publisher_database_id = T.publisher_database_id AND Agent.xact_seqno = T.xact_seqno
+ORDER BY LatencyInMinutes DESC, Agent.Subscriber, Agent.publication;
