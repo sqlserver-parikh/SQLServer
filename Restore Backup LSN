@@ -1,0 +1,14 @@
+-- Specify the target LSN you want to find
+DECLARE @TargetLSN VARCHAR(50) = '3599396000003668000001';
+
+-- Find the transaction log backup that includes the specified LSN
+SELECT TOP 1
+       bs.database_name AS 'DatabaseName',
+       bmf.physical_device_name AS 'BackupFile',
+       bs.backup_start_date AS 'BackupStartDate'
+FROM msdb.dbo.backupset bs
+INNER JOIN msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
+WHERE bs.type = 'L'  -- 'L' represents transaction log backups
+      AND bs.first_lsn <= @TargetLSN
+      AND bs.last_lsn >= @TargetLSN
+ORDER BY bs.backup_start_date DESC;
