@@ -1,0 +1,95 @@
+# Define source and destination server and database information
+$sourceServer = "MYSourceDBServer"
+$sourceDatabase = "Pubs"
+$destinationServer = "MyDestDBServer" 
+$destinationDatabase = "Pubs"
+$tableName = "PSTest"
+
+$sourceConnectionString = "Server=$sourceServer;Database=$sourceDatabase;Integrated Security=True"
+$destinationConnectionString = "Server=$destinationServer;Database=$destinationDatabase;Integrated Security=True"
+
+$sourceConnection = New-Object System.Data.SqlClient.SqlConnection
+$sourceConnection.ConnectionString = $sourceConnectionString
+$sourceConnection.Open()
+
+$destinationConnection = New-Object System.Data.SqlClient.SqlConnection
+$destinationConnection.ConnectionString = $destinationConnectionString
+$destinationConnection.Open()
+
+# Retrieve the table schema from the source database
+$command = $sourceConnection.CreateCommand()
+$command.CommandText = "SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$tableName'"
+$reader = $command.ExecuteReader()
+
+# Create a script to recreate the table in the destination database
+$createTableScript = @()
+$createTableScript += "USE [$destinationDatabase]"
+$createTableScript += "CREATE TABLE [$tableName] ("
+
+while ($reader.Read()) {
+    $columnName = $reader["COLUMN_NAME"]
+    $dataType = $reader["DATA_TYPE"]
+    $maxLength = $reader["CHARACTER_MAXIMUM_LENGTH"]
+    $isNullable = $reader["IS_NULLABLE"]
+
+    $columnDefinition = "[$columnName] $dataType"
+
+    if ($maxLength -ne [DBNull]::Value) {
+        $columnDefinition += "($maxLength)"
+    }
+
+    if ($isNullable -eq "NO") {
+        $columnDefinition += " NOT NULL"
+    }
+
+    $createTableScript += $columnDefinition + ","
+}
+
+$createTableScript[-1] = $createTableScript[-1].TrimEnd(',')
+$createTableScript += ")"
+
+# Execute the script on the destination database
+$command = $destinationConnection.CreateCommand()
+$command.CommandText = $createTableScript -join "`r`n"
+$command.ExecuteNonQuery()
+
+# Clean up
+$sourceConnection.Close()
+$destinationConnection.Close()
+
+Write-Host "Schema of $tableName copied from $sourceDatabase on $sourceServer to $destinationDatabase on $destinationServer."
+
+# Create a connection to the source and destination databases
+$sourceConnectionString = "Server=$sourceServer;Database=$sourceDatabase;Integrated Security=True"
+$destinationConnectionString = "Server=$destinationServer;Database=$destinationDatabase;Integrated Security=True"
+
+$sourceConnection = New-Object System.Data.SqlClient.SqlConnection
+$sourceConnection.ConnectionString = $sourceConnectionString
+$sourceConnection.Open()
+
+$destinationConnection = New-Object System.Data.SqlClient.SqlConnection
+$destinationConnection.ConnectionString = $destinationConnectionString
+$destinationConnection.Open()
+
+# Create a SQL Bulk Copy object for data transfer
+$bulkCopy = New-Object Data.SqlClient.SqlBulkCopy($destinationConnection)
+$bulkCopy.DestinationTableName = $tableName
+
+# Retrieve data from the source table
+$sourceCommand = $sourceConnection.CreateCommand()
+$sourceCommand.CommandText = "SELECT * FROM $tableName"
+$sourceAdapter = New-Object Data.SqlClient.SqlDataAdapter $sourceCommand
+$sourceDataSet = New-Object Data.DataSet
+$sourceAdapter.Fill($sourceDataSet)
+
+# Get the number of rows to be copied
+$rowCount = $sourceDataSet.Tables[0].Rows.Count
+
+# Use SqlBulkCopy to copy data to the destination table
+$bulkCopy.WriteToServer($sourceDataSet.Tables[0])
+
+# Clean up
+$sourceConnection.Close()
+$destinationConnection.Close()
+
+Write-Host "Copied $rowCount rows from $tableName in $sourceDatabase ($sourceServer) to $destinationDatabase ($destinationServer)."
