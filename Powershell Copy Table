@@ -1,9 +1,11 @@
 # Define source and destination server and database information
-$sourceServer = "MYSourceDBServer"
+$sourceServer = "S1SQL"
 $sourceDatabase = "Pubs"
-$destinationServer = "MyDestDBServer" 
+$destinationServer = "D1SQL" 
 $destinationDatabase = "Pubs"
 $tableName = "PSTest"
+
+
 
 $sourceConnectionString = "Server=$sourceServer;Database=$sourceDatabase;Integrated Security=True"
 $destinationConnectionString = "Server=$destinationServer;Database=$destinationDatabase;Integrated Security=True"
@@ -16,46 +18,68 @@ $destinationConnection = New-Object System.Data.SqlClient.SqlConnection
 $destinationConnection.ConnectionString = $destinationConnectionString
 $destinationConnection.Open()
 
-# Retrieve the table schema from the source database
-$command = $sourceConnection.CreateCommand()
-$command.CommandText = "SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$tableName'"
+# Check if the table exists in the destination database
+$tableExists = $false
+$command = $destinationConnection.CreateCommand()
+$command.CommandText = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$tableName'"
 $reader = $command.ExecuteReader()
+if ($reader.Read()) {
+    $tableExists = $true
+}
+$reader.Close()
 
-# Create a script to recreate the table in the destination database
-$createTableScript = @()
-$createTableScript += "USE [$destinationDatabase]"
-$createTableScript += "CREATE TABLE [$tableName] ("
+# If the table exists, truncate it and insert new data
+if ($tableExists) {
+    $truncateCommand = $destinationConnection.CreateCommand()
+    $truncateCommand.CommandText = "TRUNCATE TABLE [$tableName]"
+    $truncateCommand.ExecuteNonQuery()
+    
+    Write-Host "Table $tableName truncated in $destinationDatabase on $destinationServer."
+} else {
+    # Retrieve the table schema from the source database
+    $command = $sourceConnection.CreateCommand()
+    $command.CommandText = "SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$tableName'"
+    $reader = $command.ExecuteReader()
 
-while ($reader.Read()) {
-    $columnName = $reader["COLUMN_NAME"]
-    $dataType = $reader["DATA_TYPE"]
-    $maxLength = $reader["CHARACTER_MAXIMUM_LENGTH"]
-    $isNullable = $reader["IS_NULLABLE"]
+    # Create a script to recreate the table in the destination database
+    $createTableScript = @()
+    $createTableScript += "USE [$destinationDatabase]"
+    $createTableScript += "CREATE TABLE [$tableName] ("
 
-    $columnDefinition = "[$columnName] $dataType"
+    while ($reader.Read()) {
+        $columnName = $reader["COLUMN_NAME"]
+        $dataType = $reader["DATA_TYPE"]
+        $maxLength = $reader["CHARACTER_MAXIMUM_LENGTH"]
+        $isNullable = $reader["IS_NULLABLE"]
 
-    if ($maxLength -ne [DBNull]::Value) {
-        $columnDefinition += "($maxLength)"
+        $columnDefinition = "[$columnName] $dataType"
+
+        if ($maxLength -ne [DBNull]::Value) {
+            $columnDefinition += "($maxLength)"
+        }
+
+        if ($isNullable -eq "NO") {
+            $columnDefinition += " NOT NULL"
+        }
+
+        $createTableScript += $columnDefinition + ","
     }
 
-    if ($isNullable -eq "NO") {
-        $columnDefinition += " NOT NULL"
-    }
+    $createTableScript[-1] = $createTableScript[-1].TrimEnd(',')
+    $createTableScript += ")"
 
-    $createTableScript += $columnDefinition + ","
+    # Execute the script on the destination database
+    $command = $destinationConnection.CreateCommand()
+    $command.CommandText = $createTableScript -join "`r`n"
+    $command.ExecuteNonQuery()
+    
+    Write-Host "Table $tableName created in $destinationDatabase on $destinationServer."
 }
 
-$createTableScript[-1] = $createTableScript[-1].TrimEnd(',')
-$createTableScript += ")"
-
-# Execute the script on the destination database
-$command = $destinationConnection.CreateCommand()
-$command.CommandText = $createTableScript -join "`r`n"
-$command.ExecuteNonQuery()
-
-# Clean up
+# Close the database connections
 $sourceConnection.Close()
 $destinationConnection.Close()
+
 
 Write-Host "Schema of $tableName copied from $sourceDatabase on $sourceServer to $destinationDatabase on $destinationServer."
 
@@ -92,4 +116,4 @@ $bulkCopy.WriteToServer($sourceDataSet.Tables[0])
 $sourceConnection.Close()
 $destinationConnection.Close()
 
-Write-Host "Copied $rowCount rows from $tableName in $sourceDatabase ($sourceServer) to $destinationDatabase ($destinationServer)."
+Write-Host "Copied $rowCount rows in table $tableName from $sourceDatabase ($sourceServer) to $destinationDatabase ($destinationServer)."
