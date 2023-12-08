@@ -9,22 +9,14 @@ $lastStartTime = Get-WinEvent -LogName System | Where-Object { $_.ID -eq 12 } | 
 
 # Display last reboot, last shutdown, and last system start times
 
-# Get installed Windows updates in the last 7 days
-$updates = Get-WindowsUpdateLog -LogPath "$env:windir\WindowsUpdate.log" -MaxDays 7
+# Calculate date 7 days ago
+$startDate = (Get-Date).AddDays(-7)
+
+# Get installed updates in the last 7 days
+Get-HotFix | Where-Object { $_.InstalledOn -gt $startDate }
 
 # Get events related to system startup
-$events = Get-WinEvent -LogName System | Where-Object { $_.ID -eq 1074 -or $_.ID -eq 6005 -or $_.ID -eq 6006 } | Select-Object TimeCreated, Id, @{Name='User';Expression={$_.Properties[6].Value}}
-
-# Display the events
-$events
-
-# Display installed updates
-if ($updates) {
-    "Installed Updates in the Last 7 Days:"
-    $updates | Select-Object Date, Title, Description
-} else {
-    "No updates installed in the last 7 days."
-}
+Get-WinEvent -LogName System | Where-Object { $_.ID -eq 1074 -or $_.ID -eq 6005 -or $_.ID -eq 6006 } 
 
 "Last Reboot Time: $($lastRebootTime.TimeCreated)"
 "Last Shutdown Time: $($lastShutdownTime.TimeCreated)"
