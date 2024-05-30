@@ -70,3 +70,30 @@ EXEC msdb.dbo.sp_add_alert @name=N'Respond to DEADLOCK',
   @wmi_query=N'SELECT * FROM DEADLOCK_GRAPH',
   @job_name=N'DBA - Save Deadlock Graph'
 GO
+
+
+
+--------------------------------------------------------
+/*
+
+CREATE TABLE #errorlog (
+            LogDate DATETIME 
+            , ProcessInfo VARCHAR(100)
+            , [Text] VARCHAR(MAX)
+            );
+DECLARE @tag VARCHAR (MAX) , @path VARCHAR(MAX);
+INSERT INTO #errorlog EXEC sp_readerrorlog;
+SELECT @tag = text
+FROM #errorlog 
+WHERE [Text] LIKE 'Logging%MSSQL\Log%';
+DROP TABLE #errorlog;
+SET @path = SUBSTRING(@tag, 38, CHARINDEX('MSSQL\Log', @tag) - 29);
+SELECT 
+  CONVERT(xml, event_data).query('/event/data/value/child::*') AS DeadlockReport,
+  CONVERT(xml, event_data).value('(event[@name="xml_deadlock_report"]/@timestamp)[1]', 'datetime') 
+  AS Execution_Time
+FROM sys.fn_xe_file_target_read_file(@path + '\system_health*.xel', NULL, NULL, NULL)
+WHERE OBJECT_NAME like 'xml_deadlock_report';
+
+--https://www.sqlshack.com/monitoring-sql-server-deadlocks-using-the-system_health-extended-event/
+*/
