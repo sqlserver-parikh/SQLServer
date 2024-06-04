@@ -74,7 +74,7 @@ WHERE (bh.rn = 1 AND bh.backup_finish_date BETWEEN i.IntervalStart AND i.Interva
     WHERE database_name IS NULL
     GROUP BY i.DBName
 )
-SELECT @@SERVERNAME ServerName, * FROM cte4
+SELECT @@SERVERNAME ServerName, *, CONVERT (DECIMAL(10,2),(TotalFailed*100)/(convert(decimal (5,2),TotalIntervals))) PCTFailed FROM cte4
 ORDER BY 1 DESC;
 GO
 
