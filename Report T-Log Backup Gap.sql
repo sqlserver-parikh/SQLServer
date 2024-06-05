@@ -79,7 +79,7 @@ WHERE (bh.rn = 1 AND bh.backup_finish_date BETWEEN i.IntervalStart AND i.Interva
     WHERE database_name IS NULL
     GROUP BY i.DBName
 )
-SELECT @@SERVERNAME ServerName, *
+SELECT @@SERVERNAME ServerName, *, CONVERT(DECIMAL(6,2), TotalFailed*1.0/TotalIntervals*1.0*100) PctFailed
 , case 
 	WHEN @backuptype = 'L' THEN 'LOG'
 	WHEN @backuptype = 'I' THEN 'DIFFERENTIAL'
