@@ -1,7 +1,7 @@
 USE msdb;
-DECLARE @lookbackdays INT = 15;
-DECLARE @intervalhours INT = 100;
-DECLARE @backuptype char(1) = 'D' -- D is for full, I for differential, L is for Log
+DECLARE @lookbackdays INT = 1;
+DECLARE @intervalhours INT = 2;
+DECLARE @backuptype char(1) = 'L' -- D is for full, I for differential, L is for Log
 DECLARE @CurrentTime DATETIME = GETDATE();
 DECLARE @RoundedTime DATETIME;
 DECLARE @RECOVERYMODEL int;
@@ -29,7 +29,7 @@ DECLARE @IntervalStart DATETIME = @StartDate;
 -- Assuming you have a list of database names (replace with actual database names)
 DECLARE @DatabaseNames TABLE (DBName NVARCHAR(255));
 INSERT INTO @DatabaseNames (DBName)
-SELECT name FROM sys.databases d WHERE d.state_desc = 'ONLINE' AND database_id <> 2;
+SELECT name FROM sys.databases d WHERE d.state_desc = 'ONLINE' AND database_id <> 2 AND recovery_model < @RECOVERYMODEL;
 
 WHILE @IntervalStart < @EndDate
 BEGIN
