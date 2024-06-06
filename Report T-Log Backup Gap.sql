@@ -1,7 +1,9 @@
-USE msdb;
-DECLARE @lookbackdays INT = 1;
-DECLARE @intervalhours INT = 2;
-DECLARE @backuptype char(1) = 'L' -- D is for full, I for differential, L is for Log
+USE tempdb;
+GO
+ALTER PROCEDURE usp_ReportBackupGap
+(@lookbackdays INT = 3, @intervalhours INT = 3, @backuptype char(1) = 'L' -- D is for full, I for differential, L is for Log
+)
+AS
 DECLARE @CurrentTime DATETIME = GETDATE();
 DECLARE @RoundedTime DATETIME;
 DECLARE @RECOVERYMODEL int;
@@ -87,7 +89,6 @@ SELECT @@SERVERNAME ServerName, *, CONVERT(DECIMAL(6,2), TotalFailed*1.0/TotalIn
   END BackupReport 
 FROM cte4
 ORDER BY 1 DESC;
-GO
-
 -- Clean up the temporary table
 DROP TABLE #Intervals;
+GO
