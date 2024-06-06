@@ -1,6 +1,6 @@
 USE tempdb;
 GO
-ALTER PROCEDURE usp_ReportBackupGap
+CREATE OR ALTER PROCEDURE usp_ReportBackupGap
 (@lookbackdays INT = 3, @intervalhours INT = 3, @backuptype char(1) = 'L' -- D is for full, I for differential, L is for Log
 )
 AS
