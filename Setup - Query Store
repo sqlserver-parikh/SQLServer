@@ -1,49 +1,49 @@
-USE [master];
-GO
---https://blogs.msdn.microsoft.com/docast/2017/07/27/troubleshoot-sql-query-performance-issues-using-query-store/
-DECLARE @dbname SYSNAME= 'DBATasks';
-DECLARE @sql NVARCHAR(MAX);
-SET @sql = 'ALTER DATABASE ['+@dbname+'] SET QUERY_STORE = ON
-ALTER DATABASE ['+@dbname+'] SET QUERY_STORE (OPERATION_MODE = READ_WRITE, INTERVAL_LENGTH_MINUTES = 15, MAX_STORAGE_SIZE_MB = 512,   CLEANUP_POLICY = (STALE_QUERY_THRESHOLD_DAYS = 60))
-ALTER DATABASE [' + @dbname + '] SET QUERY_STORE CLEAR; 
-USE ' + QUOTENAME(@dbname) +'; 
-SELECT
-   DB_NAME() DatabaseName,
-   actual_state_desc ActualState,
-   FORMAT(current_storage_size_mb, ''N0'') CurrentStorageSize_MB,
-   FORMAT(max_storage_size_mb, ''N0'') MaxStorageSize_MB,
-   CAST(current_storage_size_mb AS FLOAT)/CAST(max_storage_size_mb AS FLOAT) TotalUtilization_PCT,
-   CASE
-      WHEN readonly_reason = 1 THEN ''Database in read-only mode''
-      WHEN readonly_reason = 2 THEN ''Database in single-user mode''
-      WHEN readonly_reason = 4 THEN ''Database in emergency mode''
-      WHEN readonly_reason = 8 THEN ''Database is secondary replica''
-      WHEN readonly_reason = 65536 THEN ''Query Store has reached the size limit set by the MAX_STORAGE_SIZE_MB option''
-      WHEN readonly_reason = 131072 THEN ''The number of different statements in Query Store has reached the internal memory limit''
-      WHEN readonly_reason = 262144 THEN ''Size of in-memory items waiting to be persisted on disk has reached the internal memory limit''
-      WHEN readonly_reason = 524288 THEN ''User database has reached disk size limit''
-      ELSE ''N\A''
-   END as ReadOnlyReason,
-   stale_query_threshold_days RetentionDays,
-   size_based_cleanup_mode_desc CleanupMode,
-   flush_interval_seconds/60 FlushInterval, 
-   max_plans_per_query MaxPlanPerQuery
-FROM ' + @dbname +'.sys.database_query_store_options';
-print @sql
+CREATE OR ALTER PROCEDURE usp_QueryStore 
+    @dbname SYSNAME = 'DBASupport', @maxsize int = 512, @Rollback bit = 0
+AS
+BEGIN
+SET NOCOUNT ON;
+    DECLARE @sql NVARCHAR(MAX);
+    SET @sql = N'ALTER DATABASE [' + @dbname + N'] SET QUERY_STORE = ON
+    ALTER DATABASE [' + @dbname + N'] SET QUERY_STORE
+	(OPERATION_MODE = READ_WRITE, INTERVAL_LENGTH_MINUTES = 15, MAX_STORAGE_SIZE_MB = ' + convert(varchar(4), @maxsize ) + ', CLEANUP_POLICY = (STALE_QUERY_THRESHOLD_DAYS = 15))
+    ALTER DATABASE [' + @dbname + N'] SET QUERY_STORE CLEAR; 
+    USE ' + QUOTENAME(@dbname) + N'; 
+    SELECT
+       DB_NAME() DatabaseName,
+       actual_state_desc ActualState,
+       FORMAT(current_storage_size_mb, ''N0'') CurrentStorageSize_MB,
+       FORMAT(max_storage_size_mb, ''N0'') MaxStorageSize_MB,
+       CAST(current_storage_size_mb AS FLOAT)/CAST(max_storage_size_mb AS FLOAT) TotalUtilization_PCT,
+       CASE
+          WHEN readonly_reason = 1 THEN ''Database in read-only mode''
+          WHEN readonly_reason = 2 THEN ''Database in single-user mode''
+          WHEN readonly_reason = 4 THEN ''Database in emergency mode''
+          WHEN readonly_reason = 8 THEN ''Database is secondary replica''
+          WHEN readonly_reason = 65536 THEN ''Query Store has reached the size limit set by the MAX_STORAGE_SIZE_MB option''
+          WHEN readonly_reason = 131072 THEN ''The number of different statements in Query Store has reached the internal memory limit''
+          WHEN readonly_reason = 262144 THEN ''Size of in-memory items waiting to be persisted on disk has reached the internal memory limit''
+          WHEN readonly_reason = 524288 THEN ''User database has reached disk size limit''
+          ELSE ''N\A''
+       END as ReadOnlyReason,
+       stale_query_threshold_days RetentionDays,
+       size_based_cleanup_mode_desc CleanupMode,
+       flush_interval_seconds/60 FlushInterval, 
+       max_plans_per_query MaxPlanPerQuery
+    FROM ' + QUOTENAME(@dbname) + N'.sys.database_query_store_options';
+
+	if @Rollback = 0
+	begin
+    PRINT @sql;
+    EXEC sp_executesql @sql;
+
+    PRINT N'Query Store is now enabled for database - ' + @dbname;
+	end
+	else begin 
+SET @sql = 'ALTER DATABASE [' + @dbname + '] SET QUERY_STORE = OFF;'
 EXEC sp_executesql
      @sql;
-
-PRINT 'Query Store is now enabled for database - ' + @dbname
+PRINT 'Query Store is now disabled for database - ' + @dbname
+end
+END;
 GO
---https://docs.microsoft.com/en-us/sql/relational-databases/performance/monitoring-performance-by-using-the-query-store?view=sql-server-2017
-
---Rollback
---USE [master];
---GO
---DECLARE @dbname SYSNAME= 'DBATasks';
---DECLARE @sql NVARCHAR(MAX);
---SET @sql = 'ALTER DATABASE [' + @dbname + '] SET QUERY_STORE = OFF;'
---EXEC sp_executesql
---     @sql;
---PRINT 'Query Store is now disabled for database - ' + @dbname
---GO
