@@ -1,0 +1,34 @@
+DECLARE @LogicalCPUs INT;
+DECLARE @MaxWorkerThreads INT;
+DECLARE @current_workers_count INT;
+ 
+-- Get the number of logical CPUs
+SELECT @LogicalCPUs = cpu_count
+FROM sys.dm_os_sys_info;
+ 
+-- Calculate the maximum number of worker threads
+IF @LogicalCPUs <= 4
+    SET @MaxWorkerThreads = 512;
+ELSE IF @LogicalCPUs > 4 AND @LogicalCPUs <= 64
+    SET @MaxWorkerThreads = 512 + (@LogicalCPUs - 4) * 16;
+ELSE
+    SET @MaxWorkerThreads = 512 + (@LogicalCPUs - 4) * 32;
+
+
+SELECT @current_workers_count = active_worker_count
+FROM sys.dm_os_nodes WITH (NOLOCK) 
+WHERE node_state_desc <> N'ONLINE DAC' OPTION (RECOMPILE);
+------
+-- Output the result
+SELECT @LogicalCPUs AS LogicalCPUs, @MaxWorkerThreads AS MaxWorkerThreads, @current_workers_count CurrentWorkerThreads;
+
+GO
+SELECT 
+    r.session_id AS SPID,
+    COUNT(t.task_address) AS ThreadCount
+FROM 
+    sys.dm_exec_requests r
+INNER JOIN 
+    sys.dm_os_tasks t ON r.task_address = t.task_address
+GROUP BY 
+    r.session_id;
