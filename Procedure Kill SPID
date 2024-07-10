@@ -1,0 +1,64 @@
+GO
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[usp_KillSpid]') AND type in (N'P', N'PC'))
+BEGIN
+EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[usp_KillSpid] AS' 
+END
+GO
+ALTER PROCEDURE [dbo].usp_KillSpid  
+    @status NVARCHAR(50) = 'sleeping',  
+    @loginTimeThreshold INT = 1,
+	@loginname varchar(200) = '%',
+	@printonly bit = 0
+AS  
+BEGIN  
+    SET NOCOUNT ON;  
+  
+    DECLARE @spid INT;  
+    DECLARE @thresholdTime DATETIME;  
+    DECLARE @sql NVARCHAR(MAX);  
+  
+    -- Calculate the threshold time by subtracting the specified hours from the current time  
+    SET @thresholdTime = DATEADD(HOUR, -@loginTimeThreshold, GETDATE());  
+  
+    -- Create a temporary table to store the SPIDs  
+    CREATE TABLE #MatchingSPIDs (SPID INT);  
+  
+    -- Insert the SPIDs of transactions matching the provided status and login_time threshold into the temporary table  
+    INSERT INTO #MatchingSPIDs (SPID)  
+    SELECT spid  
+    FROM sys.sysprocesses  
+    WHERE spid > 50  
+        AND login_time < @thresholdTime  
+  AND loginame LIKE @loginname
+        AND status = @status;  
+  
+    -- Loop through the SPIDs and kill the corresponding transactions  
+    DECLARE MatchingSPIDs CURSOR LOCAL FAST_FORWARD FOR  
+    SELECT SPID FROM #MatchingSPIDs;  
+  
+    OPEN MatchingSPIDs;  
+    FETCH NEXT FROM MatchingSPIDs INTO @spid;  
+  
+    WHILE @@FETCH_STATUS = 0  
+    BEGIN  
+        SET @sql = 'KILL ' + CAST(@spid AS NVARCHAR(10));  
+		IF @printonly = 0
+        EXEC sp_executesql @sql; 
+		ELSE PRINT @SQL
+  
+        FETCH NEXT FROM MatchingSPIDs INTO @spid;  
+    END;  
+  
+    CLOSE MatchingSPIDs;  
+    DEALLOCATE MatchingSPIDs;  
+  
+    -- Drop the temporary table  
+    DROP TABLE #MatchingSPIDs;  
+END;  
+GO
