@@ -139,8 +139,8 @@ IF(@version >= 10.502200)
                END AS AvailableDiskSpace,
                --, CAST(s.available_bytes / (1024*1048576.0) as decimal(20,2)) [DriveAvailableGB]
                --, CAST(s.total_bytes / (1024*1048576.0) as decimal(20,2)) [DriveTotalGB] 
-               DB_NAME(f.database_id) + ' (DBID:' + convert(varchar(5), f.database_id) + ' ,  RecoveryModel:' +  sd.recovery_model_desc  + ' , LogReuseWaitDesc:' + SD.LOG_REUSE_WAIT_DESC + ')' AS DatabaseName, 
-               f.name + ' (' + convert(varchar(5), f.file_id) + ')' AS FileName, 
+               DB_NAME(f.database_id) + ' (DBID:' + convert(varchar(5), f.database_id) + ' ,  RecoveryModel:' +  sd.recovery_model_desc + ')' AS DatabaseName, 
+               f.name + ' (FileID:' + convert(varchar(5), f.file_id) + ')' AS FileName, 
                case when f.type_desc = 'ROWS' then 'Data'
 			   when f.type_desc = 'Log' then 'Log' 
 			   else f.type_desc end as FileType,
@@ -218,6 +218,23 @@ IF(@version >= 10.502200)
         order by 10 DESC;
         DROP TABLE #tmpspaceusedR2;
 END;
+
+/*
+
+get-wmiobject win32_volume 
+#-computername ServerName
+
+ | select name, label, BlockSize, @{Name="Capacity(GB)";expression={[math]::round(($_.Capacity/ 1073741824),2)}}, @{Name="FreeSpace(GB)";expression={[math]::round(($_.FreeSpace / 1073741824),2)}},@{Name="Free(%)";expression={[math]::round(((($_.FreeSpace / 1073741824)/($_.Capacity / 1073741824)) * 100),0)}} |format-table
+
+
+*/
+
+        --$TotalGB = @{Name="Capacity(GB)";expression={[math]::round(($_.Capacity/ 1073741824),2)}}
+        --$FreeGB = @{Name="FreeSpace(GB)";expression={[math]::round(($_.FreeSpace / 1073741824),2)}}
+        --$FreePerc = @{Name="Free(%)";expression={[math]::round(((($_.FreeSpace / 1073741824)/($_.Capacity / 1073741824)) * 100),0)}}
+        --Get-WmiObject $server win32_volume | Where-object {$_.DriveLetter -eq $null} $volumes | Select SystemName, Label, $TotalGB, $FreeGB, $FreePerc | Format-Table -AutoSize
+        --------------
+ 
 GO
 IF OBJECT_ID('tempdb..#dbcc_log_info_2008') IS NOT NULL
     DROP TABLE #dbcc_log_info_2008;
@@ -235,7 +252,6 @@ IF OBJECT_ID('tempdb..#filegroupname') IS NOT NULL
     DROP TABLE #filegroupname;
 IF OBJECT_ID('tempdb..#HelpDB') IS NOT NULL
     DROP TABLE #HelpDB;
-
 
 
 /*
