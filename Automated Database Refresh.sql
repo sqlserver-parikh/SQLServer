@@ -10,6 +10,29 @@ INSERT INTO master..RefreshDBs
        SELECT 'ServerName\InstanceName', 'SourceDBName','DestinationDBName, 1;
 */
 
+/*
+# Define the servers, databases, and file paths
+$sourceServer = "mysourceserver.domain.com"
+$destServer = "mydestserver.domain.com"
+$sourceDatabase = "SecretDatabase"
+$destDatabase = "DevSecret"
+$timestamp = Get-Date -Format "yyyyMMddHHmmss"
+$backupPath = "\\myshare\myfolder\${sourceDatabase}_$timestamp.bak"
+$permissionsPath = "\\myshare\myfolder\${destDatabase}_permissions_before_restore.sql"
+
+# Step 1: Backup the source database
+Backup-DbaDatabase -SqlInstance $sourceServer -Database $sourceDatabase -BackupFileName $backupPath
+
+# Step 2: Script out the destination database permissions
+Export-DbaUser -SqlInstance $destServer -Database $destDatabase -FilePath $permissionsPath
+
+# Step 3: Restore the database on the destination server
+Restore-DbaDatabase -SqlInstance $destServer -Database $destDatabase -Path $backupPath -WithReplace
+
+# Step 4: Apply the permissions script to the restored database
+Invoke-DbaQuery -SqlInstance $destServer -Database $destDatabase -File $permissionsPath
+*/
+
 USE master;
 GO
 IF OBJECT_ID('master..RefreshDBs', 'U') IS NOT NULL
