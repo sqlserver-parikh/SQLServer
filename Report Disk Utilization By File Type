@@ -1,14 +1,17 @@
+DECLARE @drivefolder varchar(max) = 'c:\USERS\'
 SELECT
 file_or_directory_name,
     (size_in_bytes / (1024 * 1024)) AS SizeMB,
     (size_in_bytes / (1024 * 1024 * 1024)) AS SizeGB,
+	size_in_bytes,
     parent_directory, 
 	full_filesystem_path, is_directory, is_read_only, is_system, is_hidden, is_sparse, creation_time, last_access_time, last_write_time
 FROM 
-    String_split('D:\', ',') a
+    String_split(@drivefolder, ',') a
     CROSS APPLY sys.dm_os_enumerate_filesystem(a.value, '*')
 WHERE 
-    size_in_bytes <> 0
+	1=1 
+--    AND (size_in_bytes / (1024 * 1024)) > 1
     AND full_filesystem_path NOT LIKE '%recycle%'
 ORDER BY 
     size_in_bytes DESC
@@ -18,10 +21,11 @@ SELECT
     SUM(size_in_bytes) / (1024 * 1024) AS TotalSizeMB,
     SUM(size_in_bytes) / (1024 * 1024 * 1024) AS TotalSizeGB
 FROM 
-    String_split('D:\\', ',') a
+    String_split(@drivefolder, ',') a
     CROSS APPLY sys.dm_os_enumerate_filesystem(a.value, '*')
 WHERE 
-    size_in_bytes > 1
+	1=1 
+--    AND (size_in_bytes / (1024 * 1024)) > 1
     AND full_filesystem_path NOT LIKE '%recycle%'
 GROUP BY 
     RIGHT(file_or_directory_name, 3)
