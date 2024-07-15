@@ -32,3 +32,76 @@ GROUP BY
 Having SUM(size_in_bytes) / (1024 * 1024) > 0
 ORDER BY 
     TotalSizeMB DESC
+
+
+
+
+---------------------------------------------------------------------------
+
+
+-- Create a stored procedure to calculate the folder size
+CREATE OR ALTER PROCEDURE #usp_foldersize @drivefolder VARCHAR(MAX)
+AS
+BEGIN
+    SELECT 
+        @drivefolder AS UserName,
+        SUM(size_in_bytes) / (1024 * 1024) AS TotalSizeMB,
+        SUM(size_in_bytes) / (1024 * 1024 * 1024) AS TotalSizeGB
+    FROM 
+        String_split(@drivefolder, ',') a
+        CROSS APPLY sys.dm_os_enumerate_filesystem(a.value, '*')
+    WHERE 
+        full_filesystem_path NOT LIKE '%recycle%'
+    HAVING 
+        SUM(size_in_bytes) / (1024 * 1024) > 0
+END
+GO
+
+-- Create a temporary table to store the subdirectories
+CREATE TABLE #UserDirectories (
+    Subdirectory VARCHAR(MAX)
+)
+
+DECLARE @parentfolder NVARCHAR(MAX), @sql NVARCHAR(MAX)
+SET @parentfolder = 'C:\Users\'
+
+-- Prepare the dynamic SQL command
+SET @sql = 'INSERT INTO #UserDirectories (Subdirectory) EXEC master..xp_subdirs ''' + @parentfolder + ''''
+
+-- Execute the dynamic SQL command
+EXEC sp_executesql @sql
+
+-- Create a temporary table to store the folder sizes
+CREATE TABLE #FolderSizes (
+    UserName VARCHAR(255),
+    TotalSizeMB DECIMAL(18, 2),
+    TotalSizeGB DECIMAL(18, 2)
+)
+-- Iterate over each subdirectory and get the folder size
+DECLARE directory_cursor CURSOR FOR 
+SELECT  @parentfolder + Subdirectory + '\' FROM #UserDirectories
+
+DECLARE @CurrentDirectory VARCHAR(MAX)
+
+OPEN directory_cursor
+FETCH NEXT FROM directory_cursor INTO @CurrentDirectory
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+	PRINT @CurrentDirectory
+    -- Call the stored procedure for each subdirectory
+	INSERT INTO #FolderSizes
+    EXEC #usp_foldersize  @CurrentDirectory
+    FETCH NEXT FROM directory_cursor INTO @CurrentDirectory
+END
+
+CLOSE directory_cursor
+DEALLOCATE directory_cursor
+
+-- Select the final report with folder sizes
+SELECT * FROM #FolderSizes
+GO
+-- Clean up
+DROP TABLE #UserDirectories
+DROP TABLE #FolderSizes
+DROP PROCEDURE #usp_foldersize
