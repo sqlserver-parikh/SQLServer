@@ -1,13 +1,11 @@
 USE [master]
 GO
-
+/****** Object:  StoredProcedure [dbo].[sp_DatabaseRestore]    Script Date: 7/17/2024 3:23:09 PM ******/
 SET ANSI_NULLS ON
 GO
-
 SET QUOTED_IDENTIFIER ON
 GO
-
-CREATE OR ALTER PROCEDURE [dbo].[sp_DatabaseRestore]
+ALTER PROCEDURE [dbo].[sp_DatabaseRestore]
     @Database NVARCHAR(128) = NULL, 
     @RestoreDatabaseName NVARCHAR(128) = NULL, 
     @BackupPathFull NVARCHAR(260) = NULL, 
@@ -28,7 +26,7 @@ CREATE OR ALTER PROCEDURE [dbo].[sp_DatabaseRestore]
     @StandbyMode BIT = 0,
     @StandbyUndoPath NVARCHAR(MAX) = NULL,
     @RunRecovery BIT = 0, 
-	@MaxHours int = 200000,    
+	   @MaxHours int = 2000,    
     @ForceSimpleRecovery BIT = 0,
     @ExistingDBAction tinyint = 0,
     @StopAt NVARCHAR(14) = NULL,
@@ -664,7 +662,6 @@ BEGIN
 			AND
 			(REPLACE( RIGHT( REPLACE( BackupFile, RIGHT( BackupFile, PATINDEX( '%_[0-9][0-9]%', REVERSE( BackupFile ) ) ), '' ), 16 ), '_', '' ) > @StopAt);
 	END
-	select * from @filelist
     -- Find latest full backup 
     SELECT @LastFullBackup = MAX(BackupFile)
     FROM @FileList
@@ -684,7 +681,7 @@ BEGIN
 			    We can and find all related files with the same timestamp but different index.
 			    This option is simpler and requires less changes to this procedure */
 
-    IF @LastFullBackup IS NULL
+    IF @LastFullBackup IS NULL and @ContinueLogs = 0
     BEGIN
         RAISERROR('No backups for "%s" found in "%s"', 16, 1, @Database, @BackupPathFull) WITH NOWAIT;
         RETURN;
@@ -747,7 +744,7 @@ BEGIN
     END;
 
     --Ensure we are looking at the expected backup, but only if we expect to restore a FULL backups
-    IF NOT EXISTS (SELECT * FROM #Headers h WHERE h.DatabaseName = @Database)
+    IF ( NOT EXISTS (SELECT * FROM #Headers h WHERE h.DatabaseName = @Database) ) and @ContinueLogs = 0
     BEGIN
         RAISERROR('Backupfile "%s" does not match @Database parameter "%s"', 16, 1, @LastFullBackup, @Database) WITH NOWAIT;
         RETURN;
@@ -1589,9 +1586,7 @@ IF @TestRestore = 1
 IF OBJECT_ID( 'tempdb..#SplitFullBackups' ) IS NOT NULL DROP TABLE #SplitFullBackups;
 IF OBJECT_ID( 'tempdb..#SplitDiffBackups' ) IS NOT NULL DROP TABLE #SplitDiffBackups;
 IF OBJECT_ID( 'tempdb..#SplitLogBackups' ) IS NOT NULL DROP TABLE #SplitLogBackups;
-GO
-
-
+go
  
 SET NOCOUNT ON;
 DECLARE @dbname SYSNAME, @fullbackup VARCHAR(MAX), @logbackup VARCHAR(MAX), @maxtime INT;
