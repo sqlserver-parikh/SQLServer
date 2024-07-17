@@ -1,8 +1,5 @@
 USE [master];
 GO
-
-/****** Object:  StoredProcedure [dbo].[sp_RestoreFromAllFilesInDirectory]    Script Date: 5/24/2022 1:33:58 PM ******/
-
 SET ANSI_NULLS ON;
 GO
 SET QUOTED_IDENTIFIER ON;
@@ -131,8 +128,9 @@ EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
      SET @sql = '';
 
      -- THIS IS GENERIC FOR SQL SERVER 2008R2, 2012 and 2014
-
-     CREATE TABLE #bdev
+	 IF OBJECT_ID('tempdb..bdev') IS NOT NULL
+    		DROP TABLE tempdb..bdev;
+     CREATE TABLE tempdb..bdev
      (BackupName             NVARCHAR(128), 
       BackupDescription      NVARCHAR(255), 
       BackupType             SMALLINT, 
@@ -189,26 +187,25 @@ EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
      DECLARE @CompressedBackupSize BIGINT;
      IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(4)) AS FLOAT) = 11 -- Greater than SQL 2005 
          BEGIN
-             ALTER TABLE #bdev
+             ALTER TABLE tempdb..bdev
              ADD Containment BIGINT;
          END;
      IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(4)) AS FLOAT) >= 12 -- Greater than SQL 2005 
          BEGIN
-             ALTER TABLE #bdev
+             ALTER TABLE tempdb..bdev
              ADD Containment         BIGINT, 
                  KeyAlgorithm        NVARCHAR(32), 
                  EncryptorThumbprint VARBINARY(20), 
                  EncryptorType       NVARCHAR(32);
          END;
-     ALTER TABLE #bdev
+     ALTER TABLE tempdb..bdev
      ADD Seq INT NOT NULL IDENTITY(1, 1);
-
-     IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(4)) AS FLOAT) >= 16 -- Greater than SQL 2005 
+	    IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(4)) AS FLOAT) >= 16 -- Greater than SQL 2005 
 	begin 
-	IF OBJECT_ID('tempdb..#bdev') IS NOT NULL
-    		exec sp_executesql 'DROP TABLE #bdev;'
+	IF OBJECT_ID('tempdb..bdev') IS NOT NULL
+    		DROP TABLE tempdb..bdev;
 		--Table to hold the result from RESTORE HEADERONLY. Needed to get the database name out from
-exec sp_executesql 'CREATE TABLE #bdev(
+CREATE TABLE tempdb..bdev(
 BackupName nvarchar(128) 
 ,BackupDescription nvarchar(255) 
 ,BackupType smallint
@@ -268,7 +265,7 @@ BackupName nvarchar(128)
 ,LastValidRestoreTime datetime
 ,TimeZone nvarchar(32)
 ,CompressionAlgorithm nvarchar(32)
-)'
+)
 	end
      CREATE TABLE #restoreLabel
      (MediaName            NVARCHAR(128), 
@@ -320,37 +317,6 @@ BackupName nvarchar(128)
              ALTER TABLE #dbfiles
              ADD SnapshotURL NVARCHAR(360) NULL;
          END;
-     IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(2)) AS FLOAT) >= 16 -- Greater than 2022
-         BEGIN
-		IF OBJECT_ID('tempdb..#dbfiles') IS NOT NULL
-    		exec sp_executesql 'DROP TABLE #dbfiles;'
---Table to hold result from RESTORE FILELISTONLY. Need to generate the MOVE options to the RESTORE command
-exec sp_executesql 'CREATE TABLE #dbfiles(
-LogicalName nvarchar(128) 
-,PhysicalName nvarchar(260) 
-,[Type] char(1) 
-,FileGroupName nvarchar(128) 
-,Size numeric(20,0)
-,MaxSize numeric(20,0)
-,FileId bigint
-,CreateLSN numeric(25,0)
-,DropLSN numeric(25,0)
-,UniqueId uniqueidentifier
-,ReadOnlyLSN numeric(25,0)
-,ReadWriteLSN numeric(25,0)
-,BackupSizeInBytes bigint
-,SourceBlockSize bigint
-,FilegroupId bigint
-,LogGroupGUID uniqueidentifier
-,DifferentialBaseLSN numeric(25)
-,DifferentialBaseGUID uniqueidentifier
-,IsReadOnly bigint
-,IsPresent int 
-,TDEThumbprint uniqueidentifier
-,SnapshotUrl nvarchar(360)
-)'
-	 END
-
      CREATE TABLE [#multifilerestore]
      ([MediaName]            [NVARCHAR](128) NULL, 
       [MediaSetId]           [UNIQUEIDENTIFIER] NULL, 
@@ -409,9 +375,9 @@ LogicalName nvarchar(128)
              SET @dirfile = @fname;
 
              --Get database name from RESTORE HEADERONLY, assumes there's only one backup on each backup file.
-             TRUNCATE TABLE #bdev;
+             TRUNCATE TABLE tempdb..bdev;
              BEGIN TRY
-                 INSERT INTO #bdev
+                 INSERT INTO tempdb..bdev
                  EXEC ('RESTORE HEADERONLY FROM DISK = '''+@dirfile+'''');
              END TRY
              BEGIN CATCH
@@ -451,11 +417,11 @@ LogicalName nvarchar(128)
                  );
              END CATCH; 
              --SELECT *
-             --FROM #bdev;
+             --FROM tempdb..bdev;
              SET @DbName =
              (
                  SELECT TOP 1 DatabaseName
-                 FROM #bdev
+                 FROM tempdb..bdev
                  WHERE BackupStartDate > DATEADD(dd, -@BackupInLastXDays, GETDATE())
                        AND CompressedBackupSize / (1024 * 1024 * 1024) < @MaxBackupSizeInGB
                        AND BackupType = 1
@@ -465,7 +431,7 @@ LogicalName nvarchar(128)
              SET @CompressedBackupSize =
              (
                  SELECT TOP 1 CompressedBackupSize
-                 FROM #bdev
+                 FROM tempdb..bdev
              );
              TRUNCATE TABLE #restorelabel;
              BEGIN TRY
@@ -603,7 +569,7 @@ LogicalName nvarchar(128)
                                   NULL, 
                                   NULL, 
                                   'Restore completed', 
-                                  @sql, 
+                                  isnull(@sql,'Some error'), 
                                   @StartTime, 
                                   GETDATE(), 
                                   ERROR_NUMBER(), 
@@ -646,7 +612,7 @@ LogicalName nvarchar(128)
                                   NULL, 
                                   NULL, 
                                   'Restore FAILED', 
-                                  @sql, 
+                                  isnull(@sql, 'Some Error'), 
                                   ISNULL(@StartTime, GETDATE()), 
                                   GETDATE(), 
                                   ERROR_NUMBER(), 
@@ -783,7 +749,7 @@ LogicalName nvarchar(128)
                           NULL, 
                           NULL, 
                           'Restore completed', 
-                          @sql, 
+                         isnull( @sql, 'Some Error'), 
                           @StartTime, 
                           GETDATE(), 
                           ERROR_NUMBER(), 
@@ -834,7 +800,7 @@ LogicalName nvarchar(128)
                           NULL, 
                           NULL, 
                           'Multifile Restore FAILED', 
-                          ISNULL(@sql, ''), 
+                          ISNULL(@sql, 'Some Error'), 
                           ISNULL(@StartTime, GETDATE()), 
                           GETDATE(), 
                           ERROR_NUMBER(), 
@@ -847,7 +813,11 @@ LogicalName nvarchar(128)
      CLOSE multirestore;
      DEALLOCATE multirestore;
      DROP TABLE #multifilerestore;
-
+	 drop table tempdb..bdev
+	 drop table #dbfiles
+	 drop table #files
+	 drop table #restoreLabel
+	 drop table #xpfixeddrives
 /*
 --Copy all backups from multiple folders to one folder.
 Set-Location U:\Backups\SmallDB
