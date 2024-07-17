@@ -205,10 +205,10 @@ EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
 
      IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(4)) AS FLOAT) >= 16 -- Greater than SQL 2005 
 	begin 
-		IF OBJECT_ID('tempdb..#bdev') IS NOT NULL
-    		DROP TABLE #bdev;
+	IF OBJECT_ID('tempdb..#bdev') IS NOT NULL
+    		exec sp_executesql 'DROP TABLE #bdev;'
 		--Table to hold the result from RESTORE HEADERONLY. Needed to get the database name out from
-CREATE TABLE #bdev(
+exec sp_executesql 'CREATE TABLE #bdev(
 BackupName nvarchar(128) 
 ,BackupDescription nvarchar(255) 
 ,BackupType smallint
@@ -268,7 +268,7 @@ BackupName nvarchar(128)
 ,LastValidRestoreTime datetime
 ,TimeZone nvarchar(32)
 ,CompressionAlgorithm nvarchar(32)
-)
+)'
 	end
      CREATE TABLE #restoreLabel
      (MediaName            NVARCHAR(128), 
@@ -320,12 +320,12 @@ BackupName nvarchar(128)
              ALTER TABLE #dbfiles
              ADD SnapshotURL NVARCHAR(360) NULL;
          END;
-     IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(2)) AS FLOAT) > 16 -- Greater than 2014
+     IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(2)) AS FLOAT) >= 16 -- Greater than 2022
          BEGIN
 		IF OBJECT_ID('tempdb..#dbfiles') IS NOT NULL
-    		DROP TABLE #dbfiles;
+    		exec sp_executesql 'DROP TABLE #dbfiles;'
 --Table to hold result from RESTORE FILELISTONLY. Need to generate the MOVE options to the RESTORE command
-CREATE TABLE #dbfiles(
+exec sp_executesql 'CREATE TABLE #dbfiles(
 LogicalName nvarchar(128) 
 ,PhysicalName nvarchar(260) 
 ,[Type] char(1) 
@@ -348,7 +348,7 @@ LogicalName nvarchar(128)
 ,IsPresent int 
 ,TDEThumbprint uniqueidentifier
 ,SnapshotUrl nvarchar(360)
-)
+)'
 	 END
 
      CREATE TABLE [#multifilerestore]
