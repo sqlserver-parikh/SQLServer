@@ -1,6 +1,6 @@
 #Created by my teammate
 
-$PortList = @( 135,1433,5985,5986,8881 )
+$PortList = @( 135,1433,5985,5986 )
 $ServerList = @("servername.domain.com")
 
 workflow PortTest{
