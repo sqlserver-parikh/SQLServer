@@ -202,6 +202,74 @@ EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
          END;
      ALTER TABLE #bdev
      ADD Seq INT NOT NULL IDENTITY(1, 1);
+
+     IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(4)) AS FLOAT) >= 16 -- Greater than SQL 2005 
+	begin 
+		IF OBJECT_ID('tempdb..#bdev') IS NOT NULL
+    		DROP TABLE #bdev;
+		--Table to hold the result from RESTORE HEADERONLY. Needed to get the database name out from
+CREATE TABLE #bdev(
+BackupName nvarchar(128) 
+,BackupDescription nvarchar(255) 
+,BackupType smallint
+,ExpirationDate datetime
+,Compressed tinyint
+,Position smallint
+,DeviceType tinyint
+,UserName nvarchar(128) 
+,ServerName nvarchar(128) 
+,DatabaseName nvarchar(128) 
+,DatabaseVersion bigint
+,DatabaseCreationDate datetime
+,BackupSize numeric(20,0)
+,FirstLSN numeric(25,0)
+,LastLSN numeric(25,0)
+,CheckpointLSN numeric(25,0)
+,DatabaseBackupLSN numeric(25,0)
+,BackupStartDate datetime
+,BackupFinishDate datetime
+,SortOrder smallint
+,[CodePage] smallint
+,UnicodeLocaleId bigint
+,UnicodeComparisonStyle bigint
+,CompatibilityLevel tinyint
+,SoftwareVendorId bigint
+,SoftwareVersionMajor bigint
+,SoftwareVersionMinor bigint
+,SoftwareVersionBuild bigint
+,MachineName nvarchar(128) 
+,Flags bigint
+,BindingID uniqueidentifier
+,RecoveryForkID uniqueidentifier
+,Collation nvarchar(128) 
+,FamilyGUID uniqueidentifier
+,HasBulkLoggedData bigint
+,IsSnapshot bigint
+,IsReadOnly bigint
+,IsSingleUser bigint
+,HasBackupChecksums bigint
+,IsDamaged bigint
+,BegibsLogChain bigint
+,HasIncompleteMetaData bigint
+,IsForceOffline bigint
+,IsCopyOnly bigint
+,FirstRecoveryForkID uniqueidentifier
+,ForkPointLSN numeric(25,0)
+,RecoveryModel nvarchar(128) 
+,DifferentialBaseLSN numeric(25,0)
+,DifferentialBaseGUID uniqueidentifier
+,BackupTypeDescription nvarchar(128) 
+,BackupSetGUID uniqueidentifier
+,CompressedBackupSize bigint
+,Containment bigint
+,KeyAlgorithm nvarchar(32)
+,EncryptorThumbprint varbinary(20)
+,EncryptorType nvarchar(23)
+,LastValidRestoreTime datetime
+,TimeZone nvarchar(32)
+,CompressionAlgorithm nvarchar(32)
+)
+	end
      CREATE TABLE #restoreLabel
      (MediaName            NVARCHAR(128), 
       MediaSetId           UNIQUEIDENTIFIER, 
@@ -252,6 +320,37 @@ EXEC [dbo].[sp_RestoreFromAllFilesInDirectory]
              ALTER TABLE #dbfiles
              ADD SnapshotURL NVARCHAR(360) NULL;
          END;
+     IF CAST(CAST(SERVERPROPERTY('ProductVersion') AS CHAR(2)) AS FLOAT) > 16 -- Greater than 2014
+         BEGIN
+		IF OBJECT_ID('tempdb..#dbfiles') IS NOT NULL
+    		DROP TABLE #dbfiles;
+--Table to hold result from RESTORE FILELISTONLY. Need to generate the MOVE options to the RESTORE command
+CREATE TABLE #dbfiles(
+LogicalName nvarchar(128) 
+,PhysicalName nvarchar(260) 
+,[Type] char(1) 
+,FileGroupName nvarchar(128) 
+,Size numeric(20,0)
+,MaxSize numeric(20,0)
+,FileId bigint
+,CreateLSN numeric(25,0)
+,DropLSN numeric(25,0)
+,UniqueId uniqueidentifier
+,ReadOnlyLSN numeric(25,0)
+,ReadWriteLSN numeric(25,0)
+,BackupSizeInBytes bigint
+,SourceBlockSize bigint
+,FilegroupId bigint
+,LogGroupGUID uniqueidentifier
+,DifferentialBaseLSN numeric(25)
+,DifferentialBaseGUID uniqueidentifier
+,IsReadOnly bigint
+,IsPresent int 
+,TDEThumbprint uniqueidentifier
+,SnapshotUrl nvarchar(360)
+)
+	 END
+
      CREATE TABLE [#multifilerestore]
      ([MediaName]            [NVARCHAR](128) NULL, 
       [MediaSetId]           [UNIQUEIDENTIFIER] NULL, 
