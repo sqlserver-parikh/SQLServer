@@ -1,3 +1,5 @@
+#Created by my teammate
+
 $PortList = @( 135,1433,5985,5986,8881 )
 $ServerList = @("servername.domain.com")
 
@@ -6,6 +8,7 @@ param(
     [System.String[]]$Computers,
     [System.String[]]$Ports
 )
+
     Foreach -Parallel ($Computer in $Computers){
         Foreach -Parallel ($Port in $Ports){
             Test-NetConnection -ComputerName $Computer -port $Port -ErrorAction SilentlyContinue  -WarningAction SilentlyContinue
