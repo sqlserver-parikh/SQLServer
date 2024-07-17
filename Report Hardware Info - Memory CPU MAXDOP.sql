@@ -343,8 +343,7 @@ EXEC master.dbo.xp_regread
            --, SERVERPROPERTY('machinename') VirtualServerName 
            SERVERPROPERTY('ComputerNamePhysicalNetBIOS') RunningNode, 
            CONNECTIONPROPERTY('local_net_address') IPAddress, 
-           @Domain DomainName,
-		   @domainNames DomainNameList,
+           @Domain  + '(' + @domainNames +')' DomainNameList,
            CASE
                WHEN SERVERPROPERTY('IsClustered') = 1
                THEN
