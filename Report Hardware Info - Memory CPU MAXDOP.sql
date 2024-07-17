@@ -3,15 +3,16 @@ GO
 
 DECLARE @DomainNames NVARCHAR(MAX) = '';
 
-SELECT @DomainNames = STRING_AGG(DomainName, ', ')
-FROM (
-    SELECT DISTINCT 
-        LEFT(name, CHARINDEX('\', name) - 1) AS DomainName
+SELECT @DomainNames = STUFF((
+    SELECT DISTINCT ', ' + LEFT(name, CHARINDEX('\', name) - 1)
     FROM sys.server_principals
     WHERE type_desc IN ('WINDOWS_LOGIN', 'WINDOWS_GROUP')
       AND name LIKE '%\%' 
-      AND name NOT LIKE 'NT %' --and name like '%dba%'
-) AS SubQuery;
+      AND name NOT LIKE 'NT %' 
+	  AND name NOT LIKE 'BUILTIN%'
+	  --and name like '%dba%'
+    FOR XML PATH(''), TYPE
+).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
 
 
 SET NOCOUNT ON;
