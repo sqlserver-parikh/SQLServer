@@ -1,3 +1,19 @@
+USE master;
+GO
+
+DECLARE @DomainNames NVARCHAR(MAX) = '';
+
+SELECT @DomainNames = STRING_AGG(DomainName, ', ')
+FROM (
+    SELECT DISTINCT 
+        LEFT(name, CHARINDEX('\', name) - 1) AS DomainName
+    FROM sys.server_principals
+    WHERE type_desc IN ('WINDOWS_LOGIN', 'WINDOWS_GROUP')
+      AND name LIKE '%\%' 
+      AND name NOT LIKE 'NT %' --and name like '%dba%'
+) AS SubQuery;
+
+
 SET NOCOUNT ON;
 BEGIN TRY
     CREATE TABLE #WinNames
@@ -327,6 +343,7 @@ EXEC master.dbo.xp_regread
            SERVERPROPERTY('ComputerNamePhysicalNetBIOS') RunningNode, 
            CONNECTIONPROPERTY('local_net_address') IPAddress, 
            @Domain DomainName,
+		   @domainNames DomainNameList,
            CASE
                WHEN SERVERPROPERTY('IsClustered') = 1
                THEN
