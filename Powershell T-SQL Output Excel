@@ -1,35 +1,49 @@
- 
-$instancepath= "C:\temp\Servername.txt"
-  
-$filePath = ""
-  
-$dt = new-object "System.Data.DataTable"
-foreach ($instance in get-content $instancepath)
-{
-$instance
-$cn = new-object System.Data.SqlClient.SqlConnection "server=$instance;database=msdb;Integrated Security=sspi;Connection Timeout=3"
-$cn.Open()
-$sql = $cn.CreateCommand()
-$sql.CommandText = "
-DECLARE @DBEngineLogin VARCHAR(100);
-DECLARE @AgentLogin VARCHAR(100);
-EXECUTE master.dbo.xp_instance_regread 
-        @rootkey = N'HKEY_LOCAL_MACHINE', 
-        @key = N'SYSTEM\CurrentControlSet\Services\MSSQLServer', 
-        @value_name = N'ObjectName', 
-        @value = @DBEngineLogin OUTPUT;
-EXECUTE master.dbo.xp_instance_regread 
-        @rootkey = N'HKEY_LOCAL_MACHINE', 
-        @key = N'SYSTEM\CurrentControlSet\Services\SQLServerAgent', 
-        @value_name = N'ObjectName', 
-        @value = @AgentLogin OUTPUT;
-SELECT @@SERVERNAME ServerName, 
-       @DBEngineLogin SQLAccount, 
-       @AgentLogin AgentAccount;
-"
-$rdr = $sql.ExecuteReader()
-$dt.Load($rdr)
-$cn.Close()
+$instancepath = "C:\temp\Servername.txt"
+
+# Create an empty DataTable
+$dt = New-Object "System.Data.DataTable"
+$dt.Columns.Add("ServerName")
+$dt.Columns.Add("SQLAccount")
+$dt.Columns.Add("AgentAccount")
+
+foreach ($instance in Get-Content $instancepath) {
+    Write-Host "Processing instance: $instance"
+
+    $cn = New-Object System.Data.SqlClient.SqlConnection "server=$instance;database=msdb;Integrated Security=sspi;Connection Timeout=3"
+    $cn.Open()
+    $sql = $cn.CreateCommand()
+    $sql.CommandText = @"
+        DECLARE @DBEngineLogin VARCHAR(100);
+        DECLARE @AgentLogin VARCHAR(100);
+        EXECUTE master.dbo.xp_instance_regread 
+            @rootkey = N'HKEY_LOCAL_MACHINE', 
+            @key = N'SYSTEM\CurrentControlSet\Services\MSSQLServer', 
+            @value_name = N'ObjectName', 
+            @value = @DBEngineLogin OUTPUT;
+        EXECUTE master.dbo.xp_instance_regread 
+            @rootkey = N'HKEY_LOCAL_MACHINE', 
+            @key = N'SYSTEM\CurrentControlSet\Services\SQLServerAgent', 
+            @value_name = N'ObjectName', 
+            @value = @AgentLogin OUTPUT;
+        SELECT @@SERVERNAME AS ServerName, 
+               @DBEngineLogin AS SQLAccount, 
+               @AgentLogin AS AgentAccount;
+"@
+    $rdr = $sql.ExecuteReader()
+
+    # Create a new row for each instance
+    while ($rdr.Read()) {
+        $row = $dt.NewRow()
+        $row["ServerName"] = $instance
+        $row["SQLAccount"] = $rdr["SQLAccount"]
+        $row["AgentAccount"] = $rdr["AgentAccount"]
+        $dt.Rows.Add($row)
+    }
+
+    $cn.Close()
 }
-  
-$dt | Export-Csv -Path "output.csv" -NoTypeInformation 
+
+# Export the DataTable to a CSV file
+$dt | Export-Csv -Path "output.csv" -NoTypeInformation
+
+Write-Host "Results exported to output.csv"
