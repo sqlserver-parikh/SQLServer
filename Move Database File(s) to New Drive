@@ -1,21 +1,18 @@
-USE master;
+USE tempdb;
 GO
---E:\SQLADMIN_DATA_01\MSSQL2019.SQLADMIN\Data\DBASupport.mdf
+CREATE OR ALTER PROCEDURE spMoveDatabaseFiles
+(@dbname      SYSNAME = 'tempdb', @newdrive VARCHAR(MAX) = 'D:\NewDataMountPoint\',@filename    VARCHAR(128)= '%')
+--only provide new mountpoint name or drive letter, it will create script to move file to different location, folder structure needs to be same on new drive
+as
 DECLARE @name        SYSNAME
-      , @dbname      SYSNAME
-      , @filename    VARCHAR(128)
       , @oldlocation VARCHAR(MAX)
       , @sizemb      BIGINT
       , @command     VARCHAR(MAX)
-      , @newdrive    VARCHAR(1024)
-      , @newlocation VARCHAR(MAX)
+      , @newlocation    VARCHAR(1024)
       , @errorlog    VARCHAR(1024)
 	  , @volumemountpoint varchar(max);
 SET @errorlog = CONVERT(VARCHAR(1024), SERVERPROPERTY('ErrorLogFileName'));
 SET @errorlog = LEFT(@errorlog, LEN(@errorlog) - 8);
-SET @newdrive = 'D:\NewDataMountPoint\';
-SET @dbname = 'AdventureWorks';
-SET @filename = '%';
 
 DECLARE db_cursor CURSOR
 FOR SELECT f.name AS [LogicalName], 
