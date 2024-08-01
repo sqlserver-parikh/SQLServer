@@ -23,7 +23,67 @@ WHERE 1 = 1
 ORDER BY 3 DESC,
          4 DESC;
 /*
---From Glenn Berry: Last Backup
+
+-- Create a temporary table to store the intermediate results
+CREATE TABLE #IntermediateFreeSpace (
+    DatabaseName NVARCHAR(128),
+    DataFreeMB FLOAT,
+    LogFreeMB FLOAT,
+	DBSizeMB FLOAT
+);
+
+DECLARE @db_name NVARCHAR(128);
+DECLARE @sql NVARCHAR(MAX);
+
+SET @sql = '';
+
+DECLARE db_cursor CURSOR FOR
+SELECT name
+FROM sys.databases
+WHERE state_desc = 'ONLINE';
+
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @db_name;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    SET @sql = @sql + '
+    USE [' + @db_name + '];
+    INSERT INTO #IntermediateFreeSpace (DatabaseName, DataFreeMB, LogFreeMB, DBSizeMB)
+    SELECT
+        DB_NAME() AS DatabaseName,
+        SUM(CASE WHEN type = 0 THEN size * 8.0 / 1024 - FILEPROPERTY(name, ''SpaceUsed'') * 8.0 / 1024 ELSE 0 END) AS DataFreeMB,
+        SUM(CASE WHEN type = 1 THEN size * 8.0 / 1024 - FILEPROPERTY(name, ''SpaceUsed'') * 8.0 / 1024 ELSE 0 END) AS LogFreeMB,
+		convert(decimal(20,2),SUM (SIZE/128.0)) DBSize
+    FROM sys.database_files
+    WHERE type IN (0, 1)
+    ';
+
+    FETCH NEXT FROM db_cursor INTO @db_name;
+END;
+
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+
+-- Execute the dynamic SQL
+EXEC sp_executesql @sql;
+
+-- Create the final temporary table to store the formatted results
+CREATE TABLE #FreeSpace (
+    DatabaseName NVARCHAR(128),
+    FreeSpace NVARCHAR(256)
+);
+
+-- Insert formatted results into the final temporary table
+INSERT INTO #FreeSpace (DatabaseName, FreeSpace)
+SELECT
+    DatabaseName,
+    'TotalSize:' + CAST (convert(decimal(20,2),DBSizeMB ) 
+	as nvarchar(50) )+ ' DataFree: ' + CAST( convert(decimal(20,2),DataFreeMB) AS NVARCHAR(50)) + 'MB LogFree: ' + CAST(convert( decimal(20,2),LogFreeMB )AS NVARCHAR(50)) + 'MB'
+FROM #IntermediateFreeSpace;
+
+-- Select the results from the final temporary table
+
 DECLARE @startDate DATETIME;
 SET @startDate = GETDATE();
 SELECT PVT.DatabaseName,
@@ -80,9 +140,15 @@ WHERE d.name <> N'tempdb'
 GROUP BY ISNULL(d.[name], bs.[database_name]), d.recovery_model_desc, d.log_reuse_wait_desc, d.[name] 
 ORDER BY d.recovery_model_desc, d.[name] OPTION (RECOMPILE);
 SELECT D.name, d.user_access_desc , d.state_desc, SUSER_SNAME(owner_sid) DBOwnerName, d.compatibility_level, d.recovery_model_desc, d.log_reuse_wait_desc , [Last Full Backup]
-, [Last Differential Backup], [Last Log Backup], [0],[-1],[-2],[-3],[-4],[-5],[-6],[-7],[-8],[-9],[-10],[-11],[-12]
+, [Last Differential Backup], [Last Log Backup], DS.FreeSpace , [0],[-1],[-2],[-3],[-4],[-5],[-6],[-7],[-8],[-9],[-10],[-11],[-12]
 FROM SYS.DATABASES D LEFT JOIN #BACKUP B on D.name = B.DBName LEFT JOIN #GROWTH G ON D.name = G.DatabaseName
+left join #FreeSpace DS on D.name = DS.DatabaseName
+order by [0] desc
 GO
 DROP TABLE #BACKUP
 DROP TABLE #GROWTH
+-- Drop the temporary tables
+DROP TABLE #IntermediateFreeSpace;
+DROP TABLE #FreeSpace;
+
 */
