@@ -22,17 +22,67 @@ WHERE 1 = 1
      AND T1.name <> 'tempdb'
 ORDER BY 3 DESC,
          4 DESC;
-
+/*
 --From Glenn Berry: Last Backup
-SELECT ISNULL(d.[name], bs.[database_name]) AS [Database], d.recovery_model_desc AS [Recovery Model], 
+DECLARE @startDate DATETIME;
+SET @startDate = GETDATE();
+SELECT PVT.DatabaseName,
+       PVT.[0],
+       PVT.[-1],
+       PVT.[-2],
+       PVT.[-3],
+       PVT.[-4],
+       PVT.[-5],
+       PVT.[-6],
+       PVT.[-7],
+       PVT.[-8],
+       PVT.[-9],
+       PVT.[-10],
+       PVT.[-11],
+       PVT.[-12] INTO #GROWTH
+FROM
+(
+    SELECT BS.database_name AS DatabaseName,
+           DATEDIFF(mm, @startDate, BS.backup_start_date) AS MonthsAgo,
+           CONVERT(NUMERIC(10, 1), AVG(BF.file_size / 1048576.0)) AS AvgSizeMB
+    FROM msdb.dbo.backupset AS BS
+         INNER JOIN msdb.dbo.backupfile AS BF ON BS.backup_set_id = BF.backup_set_id
+    WHERE 1=1
+         AND BF.[file_type] = 'D'
+         AND BS.backup_start_date BETWEEN DATEADD(yy, -1, @startDate) AND @startDate
+    GROUP BY BS.database_name,
+             DATEDIFF(mm, @startDate, BS.backup_start_date)
+) AS BCKSTAT PIVOT(SUM(BCKSTAT.AvgSizeMB) FOR BCKSTAT.MonthsAgo IN([0],
+                                                                   [-1],
+                                                                   [-2],
+                                                                   [-3],
+                                                                   [-4],
+                                                                   [-5],
+                                                                   [-6],
+                                                                   [-7],
+                                                                   [-8],
+                                                                   [-9],
+                                                                   [-10],
+                                                                   [-11],
+                                                                   [-12])) AS PVT
+ORDER BY PVT.DatabaseName;
+SELECT ISNULL(d.[name], bs.[database_name]) AS DBName, d.recovery_model_desc AS [Recovery Model], 
        d.log_reuse_wait_desc AS [Log Reuse Wait Desc],
     MAX(CASE WHEN [type] = 'D' THEN bs.backup_finish_date ELSE NULL END) AS [Last Full Backup],
     MAX(CASE WHEN [type] = 'I' THEN bs.backup_finish_date ELSE NULL END) AS [Last Differential Backup],
     MAX(CASE WHEN [type] = 'L' THEN bs.backup_finish_date ELSE NULL END) AS [Last Log Backup]
+INTO #BACKUP
 FROM sys.databases AS d WITH (NOLOCK)
 LEFT OUTER JOIN msdb.dbo.backupset AS bs WITH (NOLOCK)
 ON bs.[database_name] = d.[name] 
-AND bs.backup_finish_date > GETDATE()- 30
+AND bs.backup_finish_date > GETDATE()- 90
 WHERE d.name <> N'tempdb'
 GROUP BY ISNULL(d.[name], bs.[database_name]), d.recovery_model_desc, d.log_reuse_wait_desc, d.[name] 
 ORDER BY d.recovery_model_desc, d.[name] OPTION (RECOMPILE);
+SELECT D.name, d.user_access_desc , d.state_desc, SUSER_SNAME(owner_sid) DBOwnerName, d.compatibility_level, d.recovery_model_desc, d.log_reuse_wait_desc , [Last Full Backup]
+, [Last Differential Backup], [Last Log Backup], [0],[-1],[-2],[-3],[-4],[-5],[-6],[-7],[-8],[-9],[-10],[-11],[-12]
+FROM SYS.DATABASES D LEFT JOIN #BACKUP B on D.name = B.DBName LEFT JOIN #GROWTH G ON D.name = G.DatabaseName
+GO
+DROP TABLE #BACKUP
+DROP TABLE #GROWTH
+*/
