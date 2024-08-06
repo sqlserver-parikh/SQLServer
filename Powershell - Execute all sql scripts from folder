@@ -5,33 +5,39 @@ $scriptFolder = "C:\Users\UserName\Documents\Scripts"
 $sqlServer = "myserver.domain.com"
 $database = "master"
 
-# Get all SQL script files from the folder
-$sqlFiles = Get-ChildItem -Path $scriptFolder -Filter *.sql
+# Get all SQL script files from the folder and sort them by name
+$sqlFiles = Get-ChildItem -Path $scriptFolder -Filter *.sql | Sort-Object Name
 
 # Loop through each SQL file and execute it
 foreach ($file in $sqlFiles) {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Host "[$timestamp] Executing script: $($file.Name)"
+    Write-Host "[$timestamp] Executing script $($file.Name) on server $sqlServer"
     
     # Read the content of the SQL file
     $scriptContent = Get-Content -Path $file.FullName -Raw
     
-    # Execute the SQL script
-    $connectionString = "Server=$sqlServer;Database=$database;Trusted_Connection=True;Encrypt=False;"
+    # Measure the execution time
+    $startTime = Get-Date
     try {
         $result = Invoke-Sqlcmd -ConnectionString $connectionString -Query $scriptContent
+        $endTime = Get-Date
+        $executionTime = $endTime - $startTime
         
-        # Output the result
+        # Output the result and execution time
         if ($result) {
-            Write-Host "[$timestamp] Script executed successfully: $($file.Name)"
+            Write-Host "[$timestamp] Script $($file.Name) executed successfully on server $sqlServer"
             Write-Host "Result: $result"
         } else {
-            Write-Host "[$timestamp] Script executed successfully: $($file.Name) (No result returned)"
+            Write-Host "[$timestamp] Script $($file.Name) executed successfully on server $sqlServer (No result returned)"
         }
+        Write-Host "Execution Time: $executionTime"
     } catch {
-        Write-Host "[$timestamp] Script execution failed: $($file.Name)"
+        $endTime = Get-Date
+        $executionTime = $endTime - $startTime
+        Write-Host "[$timestamp] Script $($file.Name) execution failed on server $sqlServer"
         Write-Host "Error: $_"
+        Write-Host "Execution Time: $executionTime"
     }
 }
 
-Write-Host "All scripts executed."
+Write-Host "All scripts executed on server $sqlServer."
