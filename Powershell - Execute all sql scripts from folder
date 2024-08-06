@@ -1,0 +1,37 @@
+# Define the folder containing the SQL scripts
+$scriptFolder = "C:\Users\UserName\Documents\Scripts"
+
+# Define the SQL Server instance and database
+$sqlServer = "myserver.domain.com"
+$database = "master"
+
+# Get all SQL script files from the folder
+$sqlFiles = Get-ChildItem -Path $scriptFolder -Filter *.sql
+
+# Loop through each SQL file and execute it
+foreach ($file in $sqlFiles) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[$timestamp] Executing script: $($file.Name)"
+    
+    # Read the content of the SQL file
+    $scriptContent = Get-Content -Path $file.FullName -Raw
+    
+    # Execute the SQL script
+    $connectionString = "Server=$sqlServer;Database=$database;Trusted_Connection=True;Encrypt=False;"
+    try {
+        $result = Invoke-Sqlcmd -ConnectionString $connectionString -Query $scriptContent
+        
+        # Output the result
+        if ($result) {
+            Write-Host "[$timestamp] Script executed successfully: $($file.Name)"
+            Write-Host "Result: $result"
+        } else {
+            Write-Host "[$timestamp] Script executed successfully: $($file.Name) (No result returned)"
+        }
+    } catch {
+        Write-Host "[$timestamp] Script execution failed: $($file.Name)"
+        Write-Host "Error: $_"
+    }
+}
+
+Write-Host "All scripts executed."
