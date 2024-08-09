@@ -5,6 +5,10 @@ $scriptFolder = "C:\Users\UserName\Documents\Scripts"
 $sqlServer = "myserver.domain.com"
 $database = "master"
 
+# Initialize counters for successful and errored scripts
+$successCount = 0
+$errorCount = 0
+
 # Get all SQL script files from the folder and sort them by name
 $sqlFiles = Get-ChildItem -Path $scriptFolder -Filter *.sql | Sort-Object Name
 
@@ -30,8 +34,10 @@ foreach ($file in $sqlFiles) {
         if ($result) {
             Write-Host "[$timestamp] Script $($file.Name) executed successfully on server $sqlServer"
             Write-Host "Result: $result"
+            $successCount++ # Increment success count
         } else {
             Write-Host "[$timestamp] Script $($file.Name) executed successfully on server $sqlServer (No result returned)"
+            $successCount++ # Increment success count
         }
         Write-Host "Execution Time: $executionTime"
     } catch {
@@ -40,6 +46,7 @@ foreach ($file in $sqlFiles) {
         Write-Host "[$timestamp] Script $($file.Name) execution failed on server $sqlServer"
         Write-Host "Error: $_"
         Write-Host "Execution Time: $executionTime"
+        $errorCount++ # Increment error count
         
         # If continueOnError is set to false, stop execution
         if (!$continueOnError) {
@@ -49,4 +56,8 @@ foreach ($file in $sqlFiles) {
     }
 }
 
+# Output the count of successful and errored scripts
+Write-Host "Total scripts executed: $($successCount + $errorCount)"
+Write-Host "Successful scripts: $successCount"
+Write-Host "Errored scripts: $errorCount"
 Write-Host "All scripts executed on server $sqlServer."
