@@ -1,8 +1,7 @@
-# Define the folder containing the SQL scripts
-$scriptFolder = "C:\Users\UserName\Documents\Scripts"
+$scriptFolder = "C:\Users\Downloads\Cool Query\"
 
 # Define the SQL Server instance and database
-$sqlServer = "myserver.domain.com"
+$sqlServer = "myservername"
 $database = "master"
 
 # Initialize counters for successful and errored scripts
@@ -26,14 +25,17 @@ foreach ($file in $sqlFiles) {
     # Measure the execution time
     $startTime = Get-Date
     try {
-        $result = Invoke-Sqlcmd -ConnectionString $connectionString -Query $scriptContent
+        # Execute the SQL script and store the result
+        $result = Invoke-Sqlcmd -ServerInstance $sqlServer -Database $database -Query $scriptContent
         $endTime = Get-Date
         $executionTime = $endTime - $startTime
         
-        # Output the result and execution time
+        # Check if the result contains data
         if ($result) {
-            Write-Host "[$timestamp] Script $($file.Name) executed successfully on server $sqlServer"
-            Write-Host "Result: $result"
+            # Dump the result into a CSV file named after the script
+            $csvPath = Join-Path $scriptFolder ($file.BaseName + ".csv")
+            $result | Export-Csv -Path $csvPath -NoTypeInformation
+            Write-Host "[$timestamp] Script $($file.Name) executed successfully on server $sqlServer. Output saved to $($file.BaseName).csv"
             $successCount++ # Increment success count
         } else {
             Write-Host "[$timestamp] Script $($file.Name) executed successfully on server $sqlServer (No result returned)"
