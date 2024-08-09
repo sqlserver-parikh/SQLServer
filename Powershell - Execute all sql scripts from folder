@@ -8,6 +8,9 @@ $database = "master"
 # Get all SQL script files from the folder and sort them by name
 $sqlFiles = Get-ChildItem -Path $scriptFolder -Filter *.sql | Sort-Object Name
 
+# Flag to determine whether to continue on error
+$continueOnError = $true
+
 # Loop through each SQL file and execute it
 foreach ($file in $sqlFiles) {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -37,6 +40,12 @@ foreach ($file in $sqlFiles) {
         Write-Host "[$timestamp] Script $($file.Name) execution failed on server $sqlServer"
         Write-Host "Error: $_"
         Write-Host "Execution Time: $executionTime"
+        
+        # If continueOnError is set to false, stop execution
+        if (!$continueOnError) {
+            Write-Host "Stopping execution due to error."
+            break
+        }
     }
 }
 
