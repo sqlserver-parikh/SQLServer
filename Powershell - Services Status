@@ -1,0 +1,57 @@
+# Function to get the status of specified services on a server
+function Get-ServiceStatus {
+    param (
+        [string]$server,
+        [string]$domain
+    )
+    $fullServerName = if ($domain) { "$server.$domain" } else { $server }
+    $serviceStatus = @()
+
+    # Define the service name patterns to check
+    $servicePatterns = @("MSSQL*", "Cohesity*", "SCOM*")
+
+    foreach ($pattern in $servicePatterns) {
+        try {
+            $services = Get-Service -ComputerName $fullServerName -Name $pattern -ErrorAction Stop
+            foreach ($service in $services) {
+                $serviceStatus += [PSCustomObject]@{
+                    Server = $fullServerName
+                    Service = $service.Name
+                    Status = $service.Status
+                }
+            }
+        } catch {
+            $serviceStatus += [PSCustomObject]@{
+                Server = $fullServerName
+                Service = $pattern
+                Status = "Not Found or Unable to Connect"
+            }
+        }
+    }
+
+    return $serviceStatus
+}
+
+
+# Read the list of server names from serverlist.txt
+$serverList = Get-Content -Path "C:\Users\name\Documents\ServerList.txt"
+
+# Specify the domain name (if needed)
+$domainName = "domain.local"  # Replace with your actual domain name or leave empty if not needed
+
+# Initialize an array to hold the service statuses
+$allServiceStatuses = @()
+
+# Process each server name
+foreach ($server in $serverList) {
+    if ($server -like "*sql*") {    $statuses = Get-ServiceStatus -server $server -domain $domainName
+    $allServiceStatuses += $statuses
+}
+}
+# Output the service statuses
+$allServiceStatuses | Format-Table -AutoSize
+
+# Optionally, write the service statuses to a file
+$allServiceStatuses | Export-Csv -Path "C:\Users\name\Documents\ServiceStatuses.csv" -NoTypeInformation
+
+Write-Host "Service statuses have been written to ServiceStatuses.csv"
