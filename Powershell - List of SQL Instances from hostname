@@ -1,0 +1,44 @@
+# Function to get SQL instances on a server
+function Get-SQLInstances {
+    param (
+        [string]$server
+    )
+    $instances = @()
+    try {
+        $services = Get-Service -ComputerName $server -Name 'MSSQL*' -ErrorAction Stop
+        foreach ($service in $services) {
+            if ($service.DisplayName -like "*SQL Server*") {
+                if ($service.Name -eq 'MSSQLSERVER') {
+                    $instances += $server
+                } else {
+                    $instanceName = $service.Name -replace 'MSSQL\$', ''
+                    $instances += "$server\$instanceName"
+                }
+            }
+        }
+    } catch {
+        Write-Host "No SQL instances found on $server or unable to connect."
+    }
+    return $instances
+}
+
+# Read the list of server names from serverlist.txt
+$serverList = Get-Content -Path "C:\Users\name\Documents\ServerList.txt"
+$domainName = "domain.local" 
+
+
+# Initialize an array to hold the SQL instances
+$sqlInstances = @()
+
+# Process each server name
+foreach ($server in $serverList) {
+    if ($server -like "*sql*") {
+        $instances = Get-SQLInstances -server $server -domain $domainName
+        $sqlInstances += $instances
+    }
+}
+
+# Write the SQL instances to SQLServer.txt
+$sqlInstances | Out-File -FilePath "C:\Users\name\Documents\SQLServer.txt"
+
+Write-Host "SQL instances have been written to SQLServer.txt"
