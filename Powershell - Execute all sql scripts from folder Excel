@@ -4,11 +4,11 @@ $scriptFolder = "C:\Queries\"
 # Define the SQL Server instance and database
 $sqlServer = "myserver.domain.com"
 $database = "master"
-
+$logServerName = $sqlServer -replace "\.", "_"
 
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$logFile = Join-Path $scriptFolder ("consolidated_log_" + $timestamp + ".txt")
-$excelFile = Join-Path $scriptFolder ("QueryResults_" + $timestamp + ".xlsx")
+$logFile = Join-Path $scriptFolder ("consolidated_log_" + $logServerName + "_"  + $timestamp + ".txt")
+$excelFile = Join-Path $scriptFolder ("QueryResults_" + $logServerName + "_"  + $timestamp + ".xlsx")
 
 # Initialize counters for successful and errored scripts
 $successCount = 0
