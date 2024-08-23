@@ -418,6 +418,8 @@ EXEC master.dbo.xp_regread
         FROM sys.configurations
         WHERE name LIKE 'max degree of parallelism'
     ) MAXDOP,
+	(select value from sys.sysconfigures
+where comment like 'Cost%') CostThreshold,
            --       @AutoUpdate AutoUpdate,
            @memory TotalMemory, 
     (
