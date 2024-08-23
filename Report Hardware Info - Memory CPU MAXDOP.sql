@@ -1,6 +1,61 @@
 USE master;
 GO
+/*
 
+IF NOT  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tbl_SQLInformation]') AND type in (N'U'))
+CREATE TABLE [dbo].[tbl_SQLInformation](
+	[ServerName] [sql_variant] NULL,
+	[PortNumber] [sql_variant] NULL,
+	[SQLVersionDesc] [varchar](18) NULL,
+	[SQLVersion] [sql_variant] NULL,
+	[ServicePack] [sql_variant] NULL,
+	[AGName] [sysname] NULL,
+	[AGListenerName] [varchar](128) NULL,
+	[AGPrimaryServer] [varchar](128) NULL,
+	[AGServerList] [varchar](max) NULL,
+	[AGDBList] [varchar](max) NULL,
+	[TotalNoOfInstances] [int] NULL,
+	[AllInstancesName] [nvarchar](max) NULL,
+	[RunningNode] [sql_variant] NULL,
+	[IPAddress] [sql_variant] NULL,
+	[DomainNameList] [nvarchar](max) NULL,
+	[AllNodes] [nvarchar](max) NULL,
+	[Edition] [sql_variant] NULL,
+	[ErrorLogLocation] [sql_variant] NULL,
+	[Data Files] [nvarchar](512) NULL,
+	[Log Files] [nvarchar](512) NULL,
+	[SQLDataRoot] [nvarchar](512) NULL,
+	[DefaultBackup] [nvarchar](4000) NULL,
+	[DBCount] [int] NULL,
+	[TotalDataSizeMB] [decimal](25, 0) NULL,
+	[TotalLogSizeMB] [decimal](25, 0) NULL,
+	[ServerCollation] [sql_variant] NULL,
+	[TempDBDataFileCount] [int] NULL,
+	[ProcessorCount] [nvarchar](30) NULL,
+	[MAXDOP] [sql_variant] NULL,
+	[CostThreshold] [int] NULL,
+	[TotalMemory] [nvarchar](30) NULL,
+	[MinMemory] [sql_variant] NULL,
+	[MaxMemory] [sql_variant] NULL,
+	[WindowsName] [varchar](128) NULL,
+	[WindowsRDPPort] [int] NULL,
+	[InstantFileInitialization] [varchar](40) NOT NULL,
+	[SystemManufacturer] [varchar](500) NOT NULL,
+	[Physica/Virtual] [varchar](8) NULL,
+	[SystemProductName] [varchar](100) NOT NULL,
+	[CPU Description] [varchar](500) NULL,
+	[IsClustered] [varchar](3) NULL,
+	[WindowsCluster] [varchar](128) NOT NULL,
+	[DBEngineLogin] [varchar](100) NULL,
+	[AgentLogin] [varchar](100) NULL,
+	[SQLStartTime] [datetime] NULL,
+	[OSRebootTime] [datetime] NULL,
+	[SQLInstallDate] [datetime] NULL,
+	[RunTime] [datetime] NOT NULL
+) ON [PRIMARY]
+GO
+
+*/
 DECLARE @DomainNames NVARCHAR(MAX) = '';
 
 SELECT @DomainNames = STUFF((
