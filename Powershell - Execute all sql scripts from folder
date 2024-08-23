@@ -8,8 +8,6 @@ $database = "master"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $logFile = Join-Path $scriptFolder ("consolidated_log_" + $timestamp + ".txt")
 
-# Define the SQL Server instance and database
-
 # Initialize counters for successful and errored scripts
 $successCount = 0
 $errorCount = 0
@@ -60,13 +58,13 @@ foreach ($file in $sqlFiles) {
             Log-Message "Script $($file.Name) executed successfully on server $sqlServer (No result returned)"
             $successCount++ # Increment success count
         }
-        Log-Message "Execution Time for  script $($file.Name): $executionTime"
+        Log-Message "Execution Time for script $($file.Name): $executionTime"
     } catch {
         $endTime = Get-Date
         $executionTime = $endTime - $startTime
         Log-Message "Script $($file.Name) execution failed on server $sqlServer"
         Log-Message "Error: $_"
-        Log-Message "Execution Time for  script $($file.Name): $executionTime"
+        Log-Message "Execution Time for script $($file.Name): $executionTime"
         $errorCount++ # Increment error count
         
         # If continueOnError is set to false, stop execution
