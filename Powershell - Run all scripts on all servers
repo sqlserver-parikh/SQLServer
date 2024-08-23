@@ -1,0 +1,116 @@
+$scriptFolder = "C:\Users\name\Documents\"
+
+# Read the list of SQL Server instances from sqlserver.txt
+$sqlServers = Get-Content -Path "C:\Users\name\Documents\sqlserver.txt"
+
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$logFile = Join-Path $scriptFolder ("consolidated_log_" + $timestamp + ".txt")
+
+# Initialize counters for successful and errored scripts
+$successCount = 0
+$errorCount = 0
+
+# Get all SQL script files from the folder and sort them by name
+$sqlFiles = Get-ChildItem -Path $scriptFolder -Filter *.sql | Sort-Object Name
+
+# Flag to determine whether to continue on error
+$continueOnError = $true
+
+# Function to log messages
+function Log-Message {
+    param (
+        [string]$message
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] $message"
+    Write-Host $logEntry
+    Add-Content -Path $logFile -Value $logEntry
+}
+
+# Function to convert DataTable to HTML
+function ConvertTo-HTMLTable {
+    param (
+        [System.Data.DataTable]$dataTable
+    )
+    $html = "<table border='1'><tr>"
+    foreach ($column in $dataTable.Columns) {
+        $html += "<th>$($column.ColumnName)</th>"
+    }
+    $html += "</tr>"
+    foreach ($row in $dataTable.Rows) {
+        $html += "<tr>"
+        foreach ($column in $dataTable.Columns) {
+            $html += "<td>$($row[$column.ColumnName])</td>"
+        }
+        $html += "</tr>"
+    }
+    $html += "</table>"
+    return $html
+}
+
+# Loop through each SQL Server instance
+foreach ($sqlServer in $sqlServers) {
+    Log-Message "Starting execution on server $sqlServer"
+
+    # Loop through each SQL file and execute it
+    foreach ($file in $sqlFiles) {
+        Log-Message "Executing script $($file.Name) on server $sqlServer"
+        
+        # Read the content of the SQL file
+        $scriptContent = Get-Content -Path $file.FullName -Raw
+        
+        # Measure the execution time
+        $startTime = Get-Date
+        try {
+            # Execute the SQL script and store the result
+            $results = Invoke-Sqlcmd -ServerInstance $sqlServer -Database "master" -Query $scriptContent -As DataSet
+            $endTime = Get-Date
+            $executionTime = $endTime - $startTime
+            
+            # Check if the result contains data
+            if ($results.Tables.Count -gt 0) {
+                # Loop through each result set and append to a CSV and HTML file
+                for ($i = 0; $i -lt $results.Tables.Count; $i++) {
+                    $result = $results.Tables[$i]
+                    $csvPath = Join-Path $scriptFolder ($file.BaseName + "_ResultSet" + ($i + 1) + ".csv")
+                    $htmlPath = Join-Path $scriptFolder ($file.BaseName + "_ResultSet" + ($i + 1) + ".html")
+                    
+                    # Append to CSV
+                    $result | Export-Csv -Path $csvPath -NoTypeInformation -Append
+                    
+                    # Append to HTML
+                    $htmlContent = ConvertTo-HTMLTable -dataTable $result
+                    Add-Content -Path $htmlPath -Value $htmlContent
+                    
+                    Log-Message "Script $($file.Name) executed successfully on server $sqlServer. Output appended to $($file.BaseName)_ResultSet$($i + 1).csv and $($file.BaseName)_ResultSet$($i + 1).html"
+                }
+                $successCount++ # Increment success count
+            } else {
+                Log-Message "Script $($file.Name) executed successfully on server $sqlServer (No result returned)"
+                $successCount++ # Increment success count
+            }
+            Log-Message "Execution Time for script $($file.Name): $executionTime"
+        } catch {
+            $endTime = Get-Date
+            $executionTime = $endTime - $startTime
+            Log-Message "Script $($file.Name) execution failed on server $sqlServer"
+            Log-Message "Error: $_"
+            Log-Message "Execution Time for script $($file.Name): $executionTime"
+            $errorCount++ # Increment error count
+            
+            # If continueOnError is set to false, stop execution
+            if (!$continueOnError) {
+                Log-Message "Stopping execution due to error."
+                break
+            }
+        }
+    }
+
+    Log-Message "Completed execution on server $sqlServer"
+}
+
+# Output the count of successful and errored scripts
+Log-Message "Total scripts executed: $($successCount + $errorCount)"
+Log-Message "Successful scripts: $successCount"
+Log-Message "Errored scripts: $errorCount"
+Log-Message "All scripts executed on all servers."
