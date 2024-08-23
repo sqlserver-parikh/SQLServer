@@ -1,8 +1,14 @@
-$scriptFolder = "C:\Users\Downloads\Cool Query\"
+
+$scriptFolder = "C:\myfolder\"
 
 # Define the SQL Server instance and database
-$sqlServer = "myservername"
+$sqlServer = "myserver.domain.com"
 $database = "master"
+
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$logFile = Join-Path $scriptFolder ("consolidated_log_" + $timestamp + ".txt")
+
+# Define the SQL Server instance and database
 
 # Initialize counters for successful and errored scripts
 $successCount = 0
@@ -14,10 +20,20 @@ $sqlFiles = Get-ChildItem -Path $scriptFolder -Filter *.sql | Sort-Object Name
 # Flag to determine whether to continue on error
 $continueOnError = $true
 
+# Function to log messages
+function Log-Message {
+    param (
+        [string]$message
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] $message"
+    Write-Host $logEntry
+    Add-Content -Path $logFile -Value $logEntry
+}
+
 # Loop through each SQL file and execute it
 foreach ($file in $sqlFiles) {
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Host "[$timestamp] Executing script $($file.Name) on server $sqlServer"
+    Log-Message "Executing script $($file.Name) on server $sqlServer"
     
     # Read the content of the SQL file
     $scriptContent = Get-Content -Path $file.FullName -Raw
@@ -26,40 +42,43 @@ foreach ($file in $sqlFiles) {
     $startTime = Get-Date
     try {
         # Execute the SQL script and store the result
-        $result = Invoke-Sqlcmd -ServerInstance $sqlServer -Database $database -Query $scriptContent
+        $results = Invoke-Sqlcmd -ServerInstance $sqlServer -Database $database -Query $scriptContent -As DataSet
         $endTime = Get-Date
         $executionTime = $endTime - $startTime
         
         # Check if the result contains data
-        if ($result) {
-            # Dump the result into a CSV file named after the script
-            $csvPath = Join-Path $scriptFolder ($file.BaseName + ".csv")
-            $result | Export-Csv -Path $csvPath -NoTypeInformation
-            Write-Host "[$timestamp] Script $($file.Name) executed successfully on server $sqlServer. Output saved to $($file.BaseName).csv"
+        if ($results.Tables.Count -gt 0) {
+            # Loop through each result set and save to a separate CSV file
+            for ($i = 0; $i -lt $results.Tables.Count; $i++) {
+                $result = $results.Tables[$i]
+                $csvPath = Join-Path $scriptFolder ($file.BaseName + "_ResultSet" + ($i + 1) + "_" + $timestamp + ".csv")
+                $result | Export-Csv -Path $csvPath -NoTypeInformation
+                Log-Message "Script $($file.Name) executed successfully on server $sqlServer. Output saved to $($file.BaseName)_ResultSet$($i + 1)_$timestamp.csv"
+            }
             $successCount++ # Increment success count
         } else {
-            Write-Host "[$timestamp] Script $($file.Name) executed successfully on server $sqlServer (No result returned)"
+            Log-Message "Script $($file.Name) executed successfully on server $sqlServer (No result returned)"
             $successCount++ # Increment success count
         }
-        Write-Host "Execution Time: $executionTime"
+        Log-Message "Execution Time for  script $($file.Name): $executionTime"
     } catch {
         $endTime = Get-Date
         $executionTime = $endTime - $startTime
-        Write-Host "[$timestamp] Script $($file.Name) execution failed on server $sqlServer"
-        Write-Host "Error: $_"
-        Write-Host "Execution Time: $executionTime"
+        Log-Message "Script $($file.Name) execution failed on server $sqlServer"
+        Log-Message "Error: $_"
+        Log-Message "Execution Time for  script $($file.Name): $executionTime"
         $errorCount++ # Increment error count
         
         # If continueOnError is set to false, stop execution
         if (!$continueOnError) {
-            Write-Host "Stopping execution due to error."
+            Log-Message "Stopping execution due to error."
             break
         }
     }
 }
 
 # Output the count of successful and errored scripts
-Write-Host "Total scripts executed: $($successCount + $errorCount)"
-Write-Host "Successful scripts: $successCount"
-Write-Host "Errored scripts: $errorCount"
-Write-Host "All scripts executed on server $sqlServer."
+Log-Message "Total scripts executed: $($successCount + $errorCount)"
+Log-Message "Successful scripts: $successCount"
+Log-Message "Errored scripts: $errorCount"
+Log-Message "All scripts executed on server $sqlServer."
