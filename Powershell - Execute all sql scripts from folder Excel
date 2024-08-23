@@ -1,0 +1,84 @@
+
+$scriptFolder = "C:\Queries\"
+
+# Define the SQL Server instance and database
+$sqlServer = "myserver.domain.com"
+$database = "master"
+
+
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$logFile = Join-Path $scriptFolder ("consolidated_log_" + $timestamp + ".txt")
+$excelFile = Join-Path $scriptFolder ("QueryResults_" + $timestamp + ".xlsx")
+
+# Initialize counters for successful and errored scripts
+$successCount = 0
+$errorCount = 0
+
+# Get all SQL script files from the folder and sort them by name
+$sqlFiles = Get-ChildItem -Path $scriptFolder -Filter *.sql | Sort-Object Name
+
+# Flag to determine whether to continue on error
+$continueOnError = $true
+
+# Function to log messages
+function Log-Message {
+    param (
+        [string]$message
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] $message"
+    Write-Host $logEntry
+    Add-Content -Path $logFile -Value $logEntry
+}
+
+# Loop through each SQL file and execute it
+foreach ($file in $sqlFiles) {
+    Log-Message "Executing script $($file.Name) on server $sqlServer"
+    
+    # Read the content of the SQL file
+    $scriptContent = Get-Content -Path $file.FullName -Raw
+    
+    # Measure the execution time
+    $startTime = Get-Date
+    try {
+        # Execute the SQL script and store the result
+        $results = Invoke-Sqlcmd -ServerInstance $sqlServer -Database $database -Query $scriptContent -As DataSet
+        $endTime = Get-Date
+        $executionTime = $endTime - $startTime
+        
+        # Check if the result contains data
+        if ($results.Tables.Count -gt 0) {
+            # Loop through each result set and save to a separate sheet in the Excel file
+            for ($i = 0; $i -lt $results.Tables.Count; $i++) {
+                $result = $results.Tables[$i]
+                $sheetName = $file.BaseName + "_ResultSet" + ($i + 1)
+                $result | Export-Excel -Path $excelFile -WorksheetName $sheetName -AutoSize
+                Log-Message "Script $($file.Name) executed successfully on server $sqlServer. Output saved to sheet $sheetName in $excelFile"
+            }
+            $successCount++ # Increment success count
+        } else {
+            Log-Message "Script $($file.Name) executed successfully on server $sqlServer (No result returned)"
+            $successCount++ # Increment success count
+        }
+        Log-Message "Execution Time for script $($file.Name): $executionTime"
+    } catch {
+        $endTime = Get-Date
+        $executionTime = $endTime - $startTime
+        Log-Message "Script $($file.Name) execution failed on server $sqlServer"
+        Log-Message "Error: $_"
+        Log-Message "Execution Time for script $($file.Name): $executionTime"
+        $errorCount++ # Increment error count
+        
+        # If continueOnError is set to false, stop execution
+        if (!$continueOnError) {
+            Log-Message "Stopping execution due to error."
+            break
+        }
+    }
+}
+
+# Output the count of successful and errored scripts
+Log-Message "Total scripts executed: $($successCount + $errorCount)"
+Log-Message "Successful scripts: $successCount"
+Log-Message "Errored scripts: $errorCount"
+Log-Message "All scripts executed on server $sqlServer."
