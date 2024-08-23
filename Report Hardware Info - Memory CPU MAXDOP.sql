@@ -17,46 +17,68 @@ SELECT @DomainNames = STUFF((
 
 SET NOCOUNT ON;
 BEGIN TRY
-    CREATE TABLE #WinNames
+ CREATE TABLE #WinNames
     (WinID   VARCHAR(128), 
      WinName VARCHAR(MAX)
     );
-    INSERT INTO #WinNames
-    VALUES
-    ('5.2 (3790)', 
-     'Windows Server 2003 R2'
-    );
-    INSERT INTO #WinNames
-    VALUES
-    ('5.2 ()', 
-     'Windows Server 2003 R2'
-    );
-    INSERT INTO #WinNames
-    VALUES
-    ('6.0 (6002)', 
-     'Windows Server 2008'
-    );
-    INSERT INTO #WinNames
-    VALUES
-    ('6.1 (7601)', 
-     'Windows Server 2008 R2'
-    );
-    INSERT INTO #WinNames
-    VALUES
-    ('6.2 (9200)', 
-     'Windows Server 2012'
-    );
-    INSERT INTO #WinNames
-    VALUES
-    ('6.3 (9600)', 
-     'Windows Server 2012 R2'
-    );
-    INSERT INTO #WinNames
-    VALUES
-    ('6.3 (14393)', 
-     'Windows Server 2016'
-    );
-    DECLARE @Plat TABLE
+
+INSERT INTO #WinNames
+VALUES
+('5.2 (3790)', 
+ 'Windows Server 2003 R2'
+),
+('5.2 ()', 
+ 'Windows Server 2003 R2'
+),
+('6.0 (6002)', 
+ 'Windows Server 2008'
+),
+('6.1 (7601)', 
+ 'Windows Server 2008 R2'
+),
+('6.2 (9200)', 
+ 'Windows Server 2012'
+),
+('6.3 (9600)', 
+ 'Windows Server 2012 R2'
+),
+('6.3 (14393)', 
+ 'Windows Server 2016'
+),
+('10.0 (14393)', 
+ 'Windows Server 2016'
+),
+('10.0 (17763)', 
+ 'Windows Server 2019'
+),
+('10.0 (20348)', 
+ 'Windows Server 2022'
+),
+('10.0 (10240)', 
+ 'Windows 10'
+),
+('10.0 (19041)', 
+ 'Windows 10'
+),
+('10.0 (19042)', 
+ 'Windows 10'
+),
+('10.0 (19043)', 
+ 'Windows 10'
+),
+('10.0 (19044)', 
+ 'Windows 10'
+),
+('10.0 (19045)', 
+ 'Windows 10'
+),
+('10.0 (22000)', 
+ 'Windows 11'
+),
+('10.0 (22621)', 
+ 'Windows 11'
+);
+   DECLARE @Plat TABLE
     (Id             INT, 
      Name           VARCHAR(180), 
      InternalValue  VARCHAR(50), 
