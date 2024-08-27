@@ -1,0 +1,32 @@
+# Read and filter the servers list
+$filteredServers = Get-Content "C:\Users\Documents\ServerList.txt" | Select-String -Pattern "sql" | ForEach-Object { $_.Line }
+$filteredServers
+# Use the filtered list with Find-DbaInstance
+$instances = Find-DbaInstance -SqlCredential $cred -ScanType Browser, SqlConnect -ComputerName $filteredServers
+
+# Export the instances to a CSV file
+$instances | Export-Csv -Path .\FilteredSqlServers.csv -NoTypeInformation
+
+# Output the path of the CSV file
+Write-Output "Filtered SQL servers have been exported to .\FilteredSqlServers.csv"
+
+# Import the CSV file
+$healthResults = Import-Csv -Path .\FilteredSqlServers.csv
+
+# Define the CMS server and group name
+$cmsServer = "CMSServer"
+$groupName = "ValidationToday"
+
+# Create a new Central Management Server group
+
+# Register each SQL Server instance in the CMS group with optional encryption
+foreach ($instance in $healthResults) {
+    $sqlInstance = $instance.SqlInstance
+    $port = $instance.Port
+    $serverName = "$sqlInstance,$port"
+    $connectionString = "Server=$serverName;Encrypt=True;TrustServerCertificate=True"
+    Add-DbaRegServer -SqlInstance $cmsServer -Group $groupName -ServerName $serverName -ConnectionString $connectionString
+}
+
+Write-Output "SQL Server instances have been registered in the CMS group '$groupName' on server '$cmsServer' with optional encryption."
+
