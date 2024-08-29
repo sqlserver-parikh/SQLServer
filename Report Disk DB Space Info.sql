@@ -16,6 +16,27 @@ IF OBJECT_ID('tempdb..#filegroupname') IS NOT NULL
 IF OBJECT_ID('tempdb..#HelpDB') IS NOT NULL
     DROP TABLE #HelpDB;
 -- Create a temp table to hold transaction log file information
+SELECT 
+    ISNULL(d.[name], bs.[database_name]) COLLATE SQL_Latin1_General_CP1_CI_AS AS DBName, 
+    CASE 
+        WHEN d.recovery_model_desc = 'SIMPLE' THEN 'Simple Recovery' 
+        ELSE CONVERT(VARCHAR(19),MAX(CASE WHEN [type] = 'L' THEN bs.backup_finish_date ELSE NULL END),121 )
+    END COLLATE SQL_Latin1_General_CP1_CI_AS AS LogBackupDate
+INTO #BACKUP
+FROM 
+    sys.databases AS d WITH (NOLOCK)
+LEFT OUTER JOIN 
+    msdb.dbo.backupset AS bs WITH (NOLOCK)
+    ON bs.[database_name] = d.[name] 
+    AND bs.backup_finish_date > GETDATE() - 30
+GROUP BY 
+    ISNULL(d.[name], bs.[database_name]), 
+    d.recovery_model_desc, 
+    d.log_reuse_wait_desc 
+ORDER BY 
+    d.recovery_model_desc 
+OPTION (RECOMPILE);
+
 CREATE TABLE #log_file_info
 (server_name   VARCHAR(50) DEFAULT @@SERVERNAME, 
  database_name VARCHAR(100) NOT NULL, 
@@ -147,14 +168,15 @@ IF(@version >= 10.502200)
 			   ISNULL (FG.FGName, 'LogFile') FGName,
                CASE
                    WHEN f.type_desc = 'ROWS'
-                   THEN '-'
+                   THEN 'Data File'
                    ELSE
         (
-            SELECT CONVERT(VARCHAR(5), fi.vlf_count) + ' - ' + log_reuse_wait_desc
-            FROM sys.databases x
+            SELECT CONVERT(VARCHAR(5), fi.vlf_count) + ' - ' + log_reuse_wait_desc +'(' + CONVERT(VARCHAR(128),LogBackupDate) +')'
+            FROM sys.databases x 
+			left join #BACKUP bkup on x.name = bkup.DBName
             WHERE x.database_id = f.database_id  
         )
-               END VLFInfo, 
+               END COLLATE SQL_Latin1_General_CP1_CI_AS  VLFInfo, 
 			   HD.DBSizeMB ,
                convert(decimal(20,0),f.size / 128.0) AS FileSizeMB, 
 			   CONVERT(DECIMAL(20,2),((f.size/128.0)/HD.DBSizeMB) *100) Pct2DBSize,
@@ -169,8 +191,8 @@ IF(@version >= 10.502200)
                CASE
                    WHEN(b.growth > 100
                         AND b.growth / 128 > 128)
-                   THEN '--'
-                   ELSE 'ALTER DATABASE ' + QUOTENAME(DB_NAME(f.database_id)) + ' MODIFY FILE ( NAME = N''' + f.name + ''', FILEGROWTH = 256MB)' + CHAR(10) + ' GO'
+                   THEN '--' + 'ALTER DATABASE ' + QUOTENAME(DB_NAME(f.database_id)) + ' MODIFY FILE ( NAME = N''' + f.name + ''', FILEGROWTH = 256MB)' + CHAR(10) + ''
+                   ELSE 'ALTER DATABASE ' + QUOTENAME(DB_NAME(f.database_id)) + ' MODIFY FILE ( NAME = N''' + f.name + ''', FILEGROWTH = 256MB)' + CHAR(10) + ''
                END AS GrowthMBScript, 
 			   'USE ' + SD.NAME + '; DBCC SHRINKFILE(' + f.name + ',' +  convert(varchar(50),CONVERT(DECIMAL(20,0),(f.size / 128.0 ) - 100)) + ')' ShrinkFile100MB,
                f.physical_name AS DBFilePath, 
@@ -252,7 +274,8 @@ IF OBJECT_ID('tempdb..#filegroupname') IS NOT NULL
     DROP TABLE #filegroupname;
 IF OBJECT_ID('tempdb..#HelpDB') IS NOT NULL
     DROP TABLE #HelpDB;
-
+	DROP TABLE #BACKUP
+/*
 
 /*
 --This code block will do similar with all version of sql including sql 2008 and higher till SQL 22, not updating below going forward.
@@ -644,7 +667,7 @@ get-wmiobject win32_volume
                     order by 10 DESC;
             END;
     END;
-GO
+GO*/
 IF OBJECT_ID('tempdb..#dbcc_log_info_2008') IS NOT NULL
     DROP TABLE #dbcc_log_info_2008;
 IF OBJECT_ID('tempdb..#dbcc_log_info_2012') IS NOT NULL
