@@ -5,6 +5,18 @@ CREATE OR ALTER PROCEDURE spMoveDatabaseFiles
 --only provide new mountpoint name or drive letter, it will create script to move file to different location, folder structure needs to be same on new drive
 as
 SET NOCOUNT ON;
+DECLARE @InstanceName NVARCHAR(128);
+DECLARE @ServiceName NVARCHAR(128);
+
+-- Get the instance name
+SET @InstanceName = @@SERVICENAME;
+
+-- Determine the service name based on the instance name
+IF @InstanceName = 'MSSQLSERVER'
+    SET @ServiceName = 'MSSQLSERVER';
+ELSE
+    SET @ServiceName = 'MSSQL$' + @InstanceName;
+
 DECLARE @name        SYSNAME
       , @oldlocation VARCHAR(MAX)
       , @sizemb      BIGINT
@@ -51,6 +63,15 @@ WHILE @@fetch_status = 0
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
 IF @dbname = 'tempdb'
-    PRINT '--Restart SQL this will recreate file on new drive';
+	BEGIN    
+		PRINT '/*' + char(10) + '--Restart SQL this will recreate file on new drive'
+		-- Print the service name
+		+ CHAR(10) + 'Restart from remote server'
+		+ Char(10) + 'sc \\' + @@servername + ' stop "' + @ServiceName + '"'
+		+ Char(10) + 'sc \\' + @@servername + ' start "' + @ServiceName + '"'
+		+ char(10) + 'Restart from local server'
+		+ Char(10) + 'net stop "' + @ServiceName + '"'
+		+ Char(10) + 'net start "' + @ServiceName + '"' + CHAR(10) + '*/'
+	END
     ELSE
     PRINT '/*' + CHAR(10) + ' ALTER DATABASE ' + @dbname + ' SET SINGLE_USER WITH ROLLBACK IMMEDIATE' + CHAR(10) + ' ALTER DATABASE ' + @dbname + ' SET MULTI_USER' + CHAR(10) + ' ALTER DATABASE ' + @dbname + ' SET OFFLINE' + CHAR(10) + '*/';
