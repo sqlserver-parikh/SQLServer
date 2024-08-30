@@ -45,5 +45,6 @@ OR LogText IN ('All rights reserved.'
 ,'(c) Microsoft Corporation.','Authentication mode is MIXED.'
 ,'The error log has been reinitialized. See the previous log for older entries.')
 SELECT * FROM #ErrorLog
+ORDER BY LogDate DESC
 DROP TABLE #ErrorLog
 DROP TABLE #ErrorLogFiles
