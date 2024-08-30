@@ -4,16 +4,17 @@ CREATE OR ALTER PROCEDURE spMoveDatabaseFiles
 (@dbname      SYSNAME = 'tempdb', @newdrive VARCHAR(MAX) = 'D:\NewDataMountPoint\',@filename    VARCHAR(128)= '%')
 --only provide new mountpoint name or drive letter, it will create script to move file to different location, folder structure needs to be same on new drive
 as
+SET NOCOUNT ON;
 DECLARE @name        SYSNAME
       , @oldlocation VARCHAR(MAX)
       , @sizemb      BIGINT
       , @command     VARCHAR(MAX)
       , @newlocation    VARCHAR(1024)
       , @errorlog    VARCHAR(1024)
+	  , @dirExists   INT
 	  , @volumemountpoint varchar(max);
 SET @errorlog = CONVERT(VARCHAR(1024), SERVERPROPERTY('ErrorLogFileName'));
 SET @errorlog = LEFT(@errorlog, LEN(@errorlog) - 8);
-
 DECLARE db_cursor CURSOR
 FOR SELECT f.name AS [LogicalName], 
            f.physical_name AS [Location], 
@@ -33,9 +34,16 @@ WHILE @@fetch_status = 0
         PRINT @command;
 		
         SET @newlocation = REPLACE(@oldlocation,@volumemountpoint, @newdrive);
-        SET @command = '-- INSTALL ' + CHAR(10) + 'ALTER DATABASE ' + QUOTENAME(@dbname) + ' MODIFY FILE (NAME = ' + @name + ', FILENAME = ''' + @newlocation + ''');';
+
+		PRINT 'IF (SELECT parent_directory_exists FROM sys.dm_os_file_exists(''' + LEFT(@newlocation, LEN(@newlocation) - CHARINDEX('\', REVERSE(@newlocation), 1) + 1) + 'dummyfile.txt'')) = 0
+		BEGIN 
+        EXEC xp_create_subdir ''' + LEFT(@newlocation, LEN(@newlocation) - CHARINDEX('\', REVERSE(@newlocation), 1) + 1) + ''';
+		END'
+		-- If the directory does not exist, create it
+	    SET @command = '-- INSTALL ' + CHAR(10) + 'ALTER DATABASE ' + QUOTENAME(@dbname) + ' MODIFY FILE (NAME = ' + @name + ', FILENAME = ''' + @newlocation + ''');';
         PRINT @command;
-        PRINT '/* ROBOCOPY ' + CHAR(10) + 'robocopy ' + LEFT(@oldlocation, LEN(@oldlocation) - CHARINDEX('\', REVERSE(@oldlocation), 1) + 1) + ' ' + LEFT(@newlocation, LEN(@newlocation) - CHARINDEX('\', REVERSE(@newlocation), 1) + 1) + ' ' + RIGHT(@oldlocation, CHARINDEX('\', REVERSE(@oldlocation)) - 1) + ' /S /r:3 /w:10 /log:' + @errorlog + @name + '_robocopy_' + CONVERT(VARCHAR(8), GETDATE(), 112) + '.txt /XF' + CHAR(10) + '*/';
+        PRINT '/* ROBOCOPY ' + CHAR(10) + 'robocopy ' + LEFT(@oldlocation, LEN(@oldlocation) - CHARINDEX('\', REVERSE(@oldlocation), 1) + 1) + ' ' + LEFT(@newlocation, LEN(@newlocation) - CHARINDEX('\', REVERSE(@newlocation), 1) + 1) + ' ' + RIGHT(@oldlocation, CHARINDEX('\', REVERSE(@oldlocation)) - 1) + ' /S /r:3 /w:10 /log:' + @errorlog + @name + '_robocopy_' + CONVERT(VARCHAR(8), GETDATE(), 112) + '.txt /XF' + CHAR(10) + 'DEL  ' + @oldlocation + CHAR(10) + '*/';
+		
         FETCH NEXT FROM db_cursor INTO @name
                                      , @oldlocation
                                      , @sizemb,@volumemountpoint;
