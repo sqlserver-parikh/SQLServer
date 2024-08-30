@@ -42,7 +42,7 @@ WHILE @@fetch_status = 0
 		-- If the directory does not exist, create it
 	    SET @command = '-- INSTALL ' + CHAR(10) + 'ALTER DATABASE ' + QUOTENAME(@dbname) + ' MODIFY FILE (NAME = ' + @name + ', FILENAME = ''' + @newlocation + ''');';
         PRINT @command;
-        PRINT '/* ROBOCOPY ' + CHAR(10) + 'robocopy ' + LEFT(@oldlocation, LEN(@oldlocation) - CHARINDEX('\', REVERSE(@oldlocation), 1) + 1) + ' ' + LEFT(@newlocation, LEN(@newlocation) - CHARINDEX('\', REVERSE(@newlocation), 1) + 1) + ' ' + RIGHT(@oldlocation, CHARINDEX('\', REVERSE(@oldlocation)) - 1) + ' /S /r:3 /w:10 /log:' + @errorlog + @name + '_robocopy_' + CONVERT(VARCHAR(8), GETDATE(), 112) + '.txt /XF' + CHAR(10) + 'DEL  ' + @oldlocation + CHAR(10) + '*/';
+        PRINT '/* ROBOCOPY ' + CHAR(10) + 'robocopy "' + LEFT(@oldlocation, LEN(@oldlocation) - CHARINDEX('\', REVERSE(@oldlocation), 1) + 1) + '" "' + LEFT(@newlocation, LEN(@newlocation) - CHARINDEX('\', REVERSE(@newlocation), 1) + 1) + '" ' + RIGHT(@oldlocation, CHARINDEX('\', REVERSE(@oldlocation)) - 1) + ' /S /r:3 /w:10 /log:"' + @errorlog + @name + '_robocopy_' + CONVERT(VARCHAR(8), GETDATE(), 112) + '.txt" /XF' + CHAR(10) + 'DEL  "' + @oldlocation + '"' + CHAR(10) + '*/';
 		
         FETCH NEXT FROM db_cursor INTO @name
                                      , @oldlocation
