@@ -2,7 +2,8 @@ DECLARE @LookBackHours int = 24
 IF OBJECT_ID('tempdb..#ErrorLogFiles') IS NOT NULL
     DROP TABLE #ErrorLogFiles;
 
-CREATE TABLE #ErrorLogFiles (
+CREATE TABLE #ErrorLogFiles
+(
     ArchiveNumber INT,
     LogDate DATETIME,
     LogFileSizeMB INT
@@ -10,7 +11,8 @@ CREATE TABLE #ErrorLogFiles (
 IF OBJECT_ID('tempdb..#ErrorLog') IS NOT NULL
     DROP TABLE #ErrorLog;
 
-CREATE TABLE #ErrorLog (
+CREATE TABLE #ErrorLog
+(
     LogDate DATETIME,
     ProcessInfo NVARCHAR(50),
     LogText NVARCHAR(MAX)
@@ -22,14 +24,24 @@ EXEC xp_enumerrorlogs
 
 
 DECLARE @LogNumber INT = 0;
-DECLARE @MaxLogNumber INT = (SELECT MAX(ArchiveNumber) FROM #ErrorLogFiles WHERE LogDate > DATEADD (HOUR,-@LookBackHours,GETDATE())
-); -- Adjust this based on the number of log files you have
+DECLARE @MaxLogNumber INT = (
+                                SELECT MAX(ArchiveNumber)
+                                FROM #ErrorLogFiles
+                                WHERE LogDate > DATEADD(HOUR, -@LookBackHours, GETDATE())
+                            ); -- Adjust this based on the number of log files you have
 
-IF @MaxLogNumber IS NULL 
-SET @MaxLogNumber = 0
+IF @MaxLogNumber IS NULL
+    SET @MaxLogNumber = 0
+ELSE
+    SET @MaxLogNumber = @MaxLogNumber + 1
 WHILE @LogNumber <= @MaxLogNumber
 BEGIN
-    INSERT INTO #ErrorLog (LogDate, ProcessInfo, LogText)
+    INSERT INTO #ErrorLog
+    (
+        LogDate,
+        ProcessInfo,
+        LogText
+    )
     EXEC xp_readerrorlog @LogNumber, 1;
 
     SET @LogNumber = @LogNumber + 1;
@@ -37,18 +49,19 @@ END;
 
 DELETE FROM #ErrorLog
 WHERE LogText LIKE '%found 0 errors and repaired 0 errors.%'
-OR LogText LIKE '%No user action is required.%'
-OR LogText LIKE '%command ''BACKUP DATABASE'', operation %'
-OR LogText LIKE 'Buffer Pool scan took %'
-OR LogText LIKE 'Parallel redo is shutdown for database %'
-OR LogText LIKE 'Starting up database %'
-OR LogText LIKE 'Parallel redo is started for database %.'
-OR LogText IN ('All rights reserved.'
-,'(c) Microsoft Corporation.','Authentication mode is MIXED.'
-,'The error log has been reinitialized. See the previous log for older entries.'
-,'Default collation: SQL_Latin1_General_CP1_CI_AS (us_english 1033)')
-SELECT * FROM #ErrorLog
-WHERE LogDate > DATEADD(HOUR,-@LookBackHours,GETDATE())
+      OR LogText LIKE '%No user action is required.%'
+      OR LogText LIKE '%command ''BACKUP DATABASE'', operation %'
+      OR LogText LIKE 'Buffer Pool scan took %'
+      OR LogText LIKE 'Parallel redo is shutdown for database %'
+      OR LogText LIKE 'Starting up database %'
+      OR LogText LIKE 'Parallel redo is started for database %.'
+      OR LogText IN ( 'All rights reserved.', '(c) Microsoft Corporation.', 'Authentication mode is MIXED.',
+                      'The error log has been reinitialized. See the previous log for older entries.',
+                      'Default collation: SQL_Latin1_General_CP1_CI_AS (us_english 1033)'
+                    )
+SELECT *
+FROM #ErrorLog
+WHERE LogDate > DATEADD(HOUR, -@LookBackHours, GETDATE())
 ORDER BY LogDate DESC
 DROP TABLE #ErrorLog
 DROP TABLE #ErrorLogFiles
