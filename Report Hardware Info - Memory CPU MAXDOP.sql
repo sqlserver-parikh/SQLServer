@@ -51,6 +51,7 @@ CREATE TABLE [dbo].[tbl_SQLInformation](
 	[SQLStartTime] [datetime] NULL,
 	[OSRebootTime] [datetime] NULL,
 	[SQLInstallDate] [datetime] NULL,
+	[ServerTimeZone] varchar(100) NULL,
 	[RunTime] [datetime] NOT NULL
 ) ON [PRIMARY]
 GO
@@ -69,6 +70,29 @@ SELECT @DomainNames = STUFF((
     FOR XML PATH(''), TYPE
 ).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
 
+DECLARE @TimeZone VARCHAR(50);
+DECLARE @IsDST BIT;
+DECLARE @UTCOffset VARCHAR(10);
+
+-- Read the time zone key name from the registry
+EXEC MASTER.dbo.xp_regread 'HKEY_LOCAL_MACHINE',
+    'SYSTEM\CurrentControlSet\Control\TimeZoneInformation',
+    'TimeZoneKeyName',
+    @TimeZone OUTPUT;
+
+-- Check if DST is currently in effect
+EXEC MASTER.dbo.xp_regread 'HKEY_LOCAL_MACHINE',
+    'SYSTEM\CurrentControlSet\Control\TimeZoneInformation',
+    'ActiveTimeBias',
+    @IsDST OUTPUT;
+
+-- Get the UTC offset
+SET @UTCOffset = (SELECT convert(varchar(30), current_utc_offset) FROM sys.time_zone_info WHERE name = @TimeZone);
+
+-- Format the time zone information
+SET @TimeZone = (SELECT name + ' (UTC' + @UTCOffset + '), ' + ' DST: ' + CASE WHEN @IsDST = 0 THEN 'OFF' ELSE 'ON' END FROM sys.time_zone_info WHERE name = @TimeZone);
+
+-- Return the formatted time zone information
 
 SET NOCOUNT ON;
 BEGIN TRY
@@ -539,6 +563,7 @@ else
            --                        WHERE dbid > 4 FOR XML PATH('')
            --                    ), 3, 8000)
            --) DBNames,
+	   @TimeZone ServerTimeZone,
            GETDATE() RunTime;
 END TRY
 BEGIN CATCH
@@ -554,4 +579,4 @@ IF OBJECT_ID('tempdb..#SQLInstances') IS NOT NULL
 IF OBJECT_ID('tempdb..#WinNames') IS NOT NULL
     DROP TABLE #WinNames;
 IF OBJECT_ID('tempdb..#aginfo') IS NOT NULL
-    DROP TABLE #aginfo;
+    DROP TABLE #aginfo
