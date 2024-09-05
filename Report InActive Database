@@ -5,7 +5,7 @@ BEGIN
         DBName NVARCHAR(300),
         TableCount INT,
         LastUsed DATETIME,
-        FirstUsed DATETIME,
+        FirstChecked DATETIME,
         LastUpdated DATETIME
     );
 END
@@ -108,9 +108,9 @@ WHEN MATCHED THEN
         LastUsed = source.MaxDate,
         TableCount = source.TableCount,
         LastUpdated = source.RunDate,
-        FirstUsed = ISNULL(target.FirstUsed, source.RunDate)
+        FirstChecked = ISNULL(target.FirstChecked, source.RunDate)
 WHEN NOT MATCHED THEN
-    INSERT (DBName, TableCount, LastUsed, FirstUsed, LastUpdated)
+    INSERT (DBName, TableCount, LastUsed, FirstChecked, LastUpdated)
     VALUES (source.DatabaseName, source.TableCount, source.MaxDate, source.RunDate, source.RunDate);
 
 -- Clean up temporary tables
