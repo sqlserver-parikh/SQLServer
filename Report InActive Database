@@ -17,6 +17,17 @@ CREATE TABLE #TableDetails (
     TableType NVARCHAR(50)
 );
 
+-- Create a temporary table to store databases with active index operations
+CREATE TABLE #ActiveIndexOps (
+    DatabaseName NVARCHAR(128)
+);
+
+-- Insert databases with active index operations into the temporary table
+INSERT INTO #ActiveIndexOps (DatabaseName)
+SELECT DISTINCT DB_NAME(database_id)
+FROM sys.dm_exec_requests
+WHERE command IN ('ALTER INDEX', 'CREATE INDEX', 'DROP INDEX');
+
 DECLARE @sql NVARCHAR(MAX) = N'';
 
 -- Generate the dynamic SQL for each database
@@ -32,9 +43,9 @@ BEGIN TRY
             ELSE ''User Table''
         END AS TableType
     FROM 
-        sys.objects AS o
+        sys.objects AS o WITH (READPAST)
     JOIN 
-        sys.tables AS t
+        sys.tables AS t WITH (READPAST)
     ON 
         o.object_id = t.object_id
     WHERE 
@@ -46,9 +57,11 @@ BEGIN CATCH
 END CATCH;
 '
 FROM sys.databases
-WHERE database_id > 4
+WHERE database_id > 4 
+      AND NAME NOT IN ('ASR_Archive')
       AND state_desc = 'ONLINE'
-      AND USER_ACCESS = 0; -- Exclude system databases
+      AND USER_ACCESS = 0 -- Exclude system databases
+      AND NAME NOT IN (SELECT DatabaseName FROM #ActiveIndexOps); -- Exclude databases with active index operations
 
 -- Execute the dynamic SQL
 EXEC sp_executesql @sql;
@@ -59,28 +72,32 @@ SELECT
     OBJECT_ID,
     MAX(
         CASE
-            WHEN LAST_USER_SEEK IS NOT NULL AND LAST_USER_SEEK >= LAST_USER_SCAN AND LAST_USER_SEEK >= LAST_USER_LOOKUP AND LAST_USER_SEEK >= LAST_USER_UPDATE THEN LAST_USER_SEEK
-            WHEN LAST_USER_SCAN IS NOT NULL AND LAST_USER_SCAN >= LAST_USER_SEEK AND LAST_USER_SCAN >= LAST_USER_LOOKUP AND LAST_USER_SCAN >= LAST_USER_UPDATE THEN LAST_USER_SCAN
-            WHEN LAST_USER_LOOKUP IS NOT NULL AND LAST_USER_LOOKUP >= LAST_USER_SEEK AND LAST_USER_LOOKUP >= LAST_USER_SCAN AND LAST_USER_LOOKUP >= LAST_USER_UPDATE THEN LAST_USER_LOOKUP
+            WHEN LAST_USER_SEEK IS NOT NULL AND LAST_USER_SEEK >= ISNULL(LAST_USER_SCAN, '1900-01-01') AND LAST_USER_SEEK >= ISNULL(LAST_USER_LOOKUP, '1900-01-01')
+            AND LAST_USER_SEEK >= ISNULL(LAST_USER_UPDATE, '1900-01-01') THEN LAST_USER_SEEK
+            WHEN LAST_USER_SCAN IS NOT NULL AND LAST_USER_SCAN >= ISNULL(LAST_USER_SEEK, '1900-01-01') AND LAST_USER_SCAN >= ISNULL(LAST_USER_LOOKUP, '1900-01-01')
+            AND LAST_USER_SCAN >= ISNULL(LAST_USER_UPDATE, '1900-01-01') THEN LAST_USER_SCAN
+            WHEN LAST_USER_LOOKUP IS NOT NULL AND LAST_USER_LOOKUP >= ISNULL(LAST_USER_SEEK, '1900-01-01') AND LAST_USER_LOOKUP >= ISNULL(LAST_USER_SCAN, '1900-01-01')
+            AND LAST_USER_LOOKUP >= ISNULL(LAST_USER_UPDATE, '1900-01-01') THEN LAST_USER_LOOKUP
             ELSE LAST_USER_UPDATE
         END
     ) AS MAX_DATE
 INTO #UsageStats
-FROM sys.dm_db_index_usage_stats ius
+FROM sys.dm_db_index_usage_stats ius WITH (READPAST)
+WHERE database_id not in (select db_id(databasename) from #ActiveIndexOps)
 GROUP BY DATABASE_ID, OBJECT_ID;
 
 -- Combine the results and get the required details
 SELECT DISTINCT 
     td.DatabaseName, 
     us.database_id,
-    MAX(MAX_DATE) AS MaxDate, 
-    (SELECT COUNT(TableName) FROM #TableDetails t WHERE t.DatabaseName = td.DatabaseName) AS TableCount
+    MAX(us.MAX_DATE) AS MaxDate, 
+    (SELECT COUNT(TableName) FROM #TableDetails t WITH (READPAST) WHERE t.DatabaseName = td.DatabaseName) AS TableCount
 INTO #RESULT
-FROM #UsageStats us
-RIGHT JOIN #TableDetails td
+FROM #UsageStats us WITH (NOLOCK)
+RIGHT JOIN #TableDetails td WITH (NOLOCK)
     ON us.database_id = DB_ID(td.DatabaseName)
     AND td.TableName = OBJECT_NAME(us.object_id, us.database_id)
-WHERE td.TableType = 'User Table'
+WHERE td.TableType = 'User Table' AND td.DatabaseName NOT IN (SELECT DatabaseName FROM #ActiveIndexOps)
 GROUP BY us.database_id, td.DatabaseName
 ORDER BY td.DatabaseName;
 
@@ -90,7 +107,7 @@ SELECT name, database_id, NULL, 0
 FROM sys.databases
 WHERE database_id > 4
       AND state_desc = 'ONLINE'
-      AND USER_ACCESS = 0
+      AND USER_ACCESS = 0 AND NAME NOT IN (SELECT DatabaseName FROM #ActiveIndexOps)
       AND name NOT IN (SELECT DatabaseName FROM #RESULT);
 
 -- Use CTE to filter the results
@@ -121,11 +138,12 @@ WHEN MATCHED THEN
 WHEN NOT MATCHED THEN
     INSERT (DBName, TableCount, LastUsed, FirstChecked, LastUpdated)
     VALUES (source.DatabaseName, source.TableCount, source.MaxDate, source.RunDate, source.RunDate);
-
+GO
 -- Clean up temporary tables
 DROP TABLE #TableDetails;
 DROP TABLE #UsageStats;
 DROP TABLE #RESULT;
 DROP TABLE #FinalResult;
+DROP TABLE #ActiveIndexOps;
 
 SELECT * FROM TempDB..tblInactiveDBs;
