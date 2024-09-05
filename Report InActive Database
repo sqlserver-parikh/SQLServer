@@ -6,7 +6,8 @@ BEGIN
         TableCount INT,
         LastUsed DATETIME,
         FirstChecked DATETIME,
-        LastUpdated DATETIME
+        LastUpdated DATETIME,
+        DBSizeMB FLOAT -- Rename the DBSize column to DBSizeMB
     );
 END
 
@@ -91,7 +92,8 @@ SELECT DISTINCT
     td.DatabaseName, 
     us.database_id,
     MAX(us.MAX_DATE) AS MaxDate, 
-    (SELECT COUNT(TableName) FROM #TableDetails t WITH (READPAST) WHERE t.DatabaseName = td.DatabaseName) AS TableCount
+    (SELECT COUNT(TableName) FROM #TableDetails t WITH (READPAST) WHERE t.DatabaseName = td.DatabaseName) AS TableCount,
+    (SELECT SUM(size * 8.0 / 1024) FROM sys.master_files WHERE type = 0 AND database_id = DB_ID(td.DatabaseName)) AS DBSizeMB -- Calculate DB size in MB
 INTO #RESULT
 FROM #UsageStats us WITH (NOLOCK)
 RIGHT JOIN #TableDetails td WITH (NOLOCK)
@@ -102,9 +104,10 @@ GROUP BY us.database_id, td.DatabaseName
 ORDER BY td.DatabaseName;
 
 -- Include databases with zero tables
-INSERT INTO #RESULT (DatabaseName, database_id, MaxDate, TableCount)
-SELECT name, database_id, NULL, 0
-FROM sys.databases
+INSERT INTO #RESULT (DatabaseName, database_id, MaxDate, TableCount, DBSizeMB)
+SELECT name, database_id, NULL, 0, 
+       (SELECT SUM(size * 8.0 / 1024) FROM sys.master_files m WHERE type = 0 AND m.database_id = d.database_id) AS DBSizeMB -- Calculate DB size in MB
+FROM sys.databases d
 WHERE database_id > 4
       AND state_desc = 'ONLINE'
       AND USER_ACCESS = 0 AND NAME NOT IN (SELECT DatabaseName FROM #ActiveIndexOps)
@@ -120,6 +123,7 @@ SELECT
     ISNULL(database_id, DB_ID(DatabaseName)) AS DBID, 
     MaxDate, 
     TableCount, 
+    DBSizeMB, -- Include DBSizeMB in the final result
     GETDATE() AS RunDate 
 INTO #FinalResult
 FROM cte 
@@ -134,10 +138,11 @@ WHEN MATCHED THEN
         LastUsed = source.MaxDate,
         TableCount = source.TableCount,
         LastUpdated = source.RunDate,
-        FirstChecked = ISNULL(target.FirstChecked, source.RunDate)
+        FirstChecked = ISNULL(target.FirstChecked, source.RunDate),
+        DBSizeMB = source.DBSizeMB -- Update DBSizeMB
 WHEN NOT MATCHED THEN
-    INSERT (DBName, TableCount, LastUsed, FirstChecked, LastUpdated)
-    VALUES (source.DatabaseName, source.TableCount, source.MaxDate, source.RunDate, source.RunDate);
+    INSERT (DBName, TableCount, LastUsed, FirstChecked, LastUpdated, DBSizeMB)
+    VALUES (source.DatabaseName, source.TableCount, source.MaxDate, source.RunDate, source.RunDate, source.DBSizeMB);
 GO
 -- Clean up temporary tables
 DROP TABLE #TableDetails;
