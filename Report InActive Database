@@ -1,0 +1,122 @@
+-- Create the tblInactiveDBs table if it doesn't exist
+IF OBJECT_ID('TempDB..tblInactiveDBs', 'U') IS NULL
+BEGIN
+    CREATE TABLE TempDB..tblInactiveDBs (
+        DBName NVARCHAR(300),
+        TableCount INT,
+        LastUsed DATETIME,
+        FirstUsed DATETIME,
+        LastUpdated DATETIME
+    );
+END
+
+-- Create a temporary table to store table details
+CREATE TABLE #TableDetails (
+    DatabaseName NVARCHAR(128),
+    TableName NVARCHAR(128),
+    TableType NVARCHAR(50)
+);
+
+DECLARE @sql NVARCHAR(MAX) = N'';
+
+-- Generate the dynamic SQL for each database
+SELECT @sql += '
+BEGIN TRY
+    USE ' + QUOTENAME(name) + ';
+    INSERT INTO #TableDetails (DatabaseName, TableName, TableType)
+    SELECT 
+        ''' + name + ''' AS DatabaseName,
+        OBJECT_NAME(o.object_id) AS TableName,
+        CASE 
+            WHEN t.is_ms_shipped = 1 THEN ''System Table''
+            ELSE ''User Table''
+        END AS TableType
+    FROM 
+        sys.objects AS o
+    JOIN 
+        sys.tables AS t
+    ON 
+        o.object_id = t.object_id
+    WHERE 
+        t.is_ms_shipped IN (0, 1); -- Include both user and system tables
+END TRY
+BEGIN CATCH
+    -- Handle the error by skipping the database
+    PRINT ''Skipping database ' + QUOTENAME(name) + ' due to error: '' + ERROR_MESSAGE();
+END CATCH;
+'
+FROM sys.databases
+WHERE database_id > 4
+      AND state_desc = 'ONLINE'
+      AND USER_ACCESS = 0; -- Exclude system databases
+
+-- Execute the dynamic SQL
+EXEC sp_executesql @sql;
+
+-- Create a temporary table to store usage statistics
+SELECT 
+    DATABASE_ID,
+    OBJECT_ID,
+    MAX(
+        CASE
+            WHEN LAST_USER_SEEK IS NOT NULL AND LAST_USER_SEEK >= LAST_USER_SCAN AND LAST_USER_SEEK >= LAST_USER_LOOKUP AND LAST_USER_SEEK >= LAST_USER_UPDATE THEN LAST_USER_SEEK
+            WHEN LAST_USER_SCAN IS NOT NULL AND LAST_USER_SCAN >= LAST_USER_SEEK AND LAST_USER_SCAN >= LAST_USER_LOOKUP AND LAST_USER_SCAN >= LAST_USER_UPDATE THEN LAST_USER_SCAN
+            WHEN LAST_USER_LOOKUP IS NOT NULL AND LAST_USER_LOOKUP >= LAST_USER_SEEK AND LAST_USER_LOOKUP >= LAST_USER_SCAN AND LAST_USER_LOOKUP >= LAST_USER_UPDATE THEN LAST_USER_LOOKUP
+            ELSE LAST_USER_UPDATE
+        END
+    ) AS MAX_DATE
+INTO #UsageStats
+FROM sys.dm_db_index_usage_stats ius
+GROUP BY DATABASE_ID, OBJECT_ID;
+
+-- Combine the results and get the required details
+SELECT DISTINCT 
+    td.DatabaseName, 
+    us.database_id,
+    MAX(MAX_DATE) AS MaxDate, 
+    (SELECT COUNT(TableName) FROM #TableDetails t WHERE t.DatabaseName = td.DatabaseName) AS TableCount
+INTO #RESULT
+FROM #UsageStats us
+RIGHT JOIN #TableDetails td
+    ON us.database_id = DB_ID(td.DatabaseName)
+    AND td.TableName = OBJECT_NAME(us.object_id, us.database_id)
+WHERE td.TableType = 'User Table'
+GROUP BY us.database_id, td.DatabaseName
+ORDER BY td.DatabaseName;
+
+-- Use CTE to filter the results
+WITH cte AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY DatabaseName ORDER BY MaxDate DESC, DATABASE_ID DESC) AS RowNum 
+    FROM #RESULT
+)
+SELECT 
+    DatabaseName, 
+    ISNULL(database_id, DB_ID(DatabaseName)) AS DBID, 
+    MaxDate, 
+    TableCount, 
+    GETDATE() AS RunDate 
+INTO #FinalResult
+FROM cte 
+WHERE RowNum = 1;
+
+-- Merge the results into the tblInactiveDBs table
+MERGE TempDB..tblInactiveDBs AS target
+USING #FinalResult AS source
+ON target.DBName = source.DatabaseName
+WHEN MATCHED THEN
+    UPDATE SET 
+        LastUsed = source.MaxDate,
+        TableCount = source.TableCount,
+        LastUpdated = source.RunDate,
+        FirstUsed = ISNULL(target.FirstUsed, source.RunDate)
+WHEN NOT MATCHED THEN
+    INSERT (DBName, TableCount, LastUsed, FirstUsed, LastUpdated)
+    VALUES (source.DatabaseName, source.TableCount, source.MaxDate, source.RunDate, source.RunDate);
+
+-- Clean up temporary tables
+DROP TABLE #TableDetails;
+DROP TABLE #UsageStats;
+DROP TABLE #RESULT;
+DROP TABLE #FinalResult;
+
+SELECT * FROM TempDB..tblInactiveDBs;
