@@ -59,7 +59,6 @@ END CATCH;
 '
 FROM sys.databases
 WHERE database_id > 4 
-      AND NAME NOT IN ('ASR_Archive')
       AND state_desc = 'ONLINE'
       AND USER_ACCESS = 0 -- Exclude system databases
       AND NAME NOT IN (SELECT DatabaseName FROM #ActiveIndexOps); -- Exclude databases with active index operations
