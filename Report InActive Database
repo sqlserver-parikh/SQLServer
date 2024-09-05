@@ -84,6 +84,15 @@ WHERE td.TableType = 'User Table'
 GROUP BY us.database_id, td.DatabaseName
 ORDER BY td.DatabaseName;
 
+-- Include databases with zero tables
+INSERT INTO #RESULT (DatabaseName, database_id, MaxDate, TableCount)
+SELECT name, database_id, NULL, 0
+FROM sys.databases
+WHERE database_id > 4
+      AND state_desc = 'ONLINE'
+      AND USER_ACCESS = 0
+      AND name NOT IN (SELECT DatabaseName FROM #RESULT);
+
 -- Use CTE to filter the results
 WITH cte AS (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY DatabaseName ORDER BY MaxDate DESC, DATABASE_ID DESC) AS RowNum 
