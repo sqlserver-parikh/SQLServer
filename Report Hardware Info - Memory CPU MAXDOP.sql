@@ -20,7 +20,8 @@ CREATE TABLE [dbo].[tbl_SQLInformation](
 	[IPAddress] [sql_variant] NULL,
 	[DomainNameList] [nvarchar](max) NULL,
 	[AllNodes] [nvarchar](max) NULL,
-	[Edition] [sql_variant] NULL,
+	[Edition] [sql_variant] NULL,	
+	TraceFlagResult varchar(max) NULL,
 	[ErrorLogLocation] [sql_variant] NULL,
 	[Data Files] [nvarchar](512) NULL,
 	[Log Files] [nvarchar](512) NULL,
@@ -73,7 +74,18 @@ SELECT @DomainNames = STUFF((
 DECLARE @TimeZone VARCHAR(50);
 DECLARE @IsDST BIT;
 DECLARE @UTCOffset VARCHAR(10);
+DECLARE @TraceResult NVARCHAR(MAX);
 
+-- Temporary table to store trace flags
+CREATE TABLE #TraceFlags (TraceFlag INT, Status int, Global int, Session int);
+
+-- Insert enabled trace flags into the temporary table
+INSERT INTO #TraceFlags
+EXEC ('DBCC TRACESTATUS(-1)');
+
+-- Concatenate trace flags into a comma-separated string
+SELECT @TraceResult = STRING_AGG(CAST(TraceFlag AS NVARCHAR(MAX)), ', ') 
+FROM #TraceFlags;
 -- Read the time zone key name from the registry
 EXEC MASTER.dbo.xp_regread 'HKEY_LOCAL_MACHINE',
     'SYSTEM\CurrentControlSet\Control\TimeZoneInformation',
@@ -459,6 +471,7 @@ EXEC master.dbo.xp_regread
                THEN 'Not Clustered'
            END AllNodes, 
            SERVERPROPERTY(N'Edition') Edition, 
+		   @TraceResult TraceFlagResult,
            SERVERPROPERTY('ErrorLogFileName') ErrorLogLocation, 
            @DefaultData AS 'Data Files', 
            @DefaultLog AS 'Log Files',
@@ -580,3 +593,7 @@ IF OBJECT_ID('tempdb..#WinNames') IS NOT NULL
     DROP TABLE #WinNames;
 IF OBJECT_ID('tempdb..#aginfo') IS NOT NULL
     DROP TABLE #aginfo
+IF OBJECT_ID('tempdb..#InstanceName') IS NOT NULL
+    DROP TABLE #InstanceName
+IF OBJECT_ID('tempdb..#TraceFlags') IS NOT NULL
+    DROP TABLE #TraceFlags
