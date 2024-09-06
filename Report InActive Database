@@ -37,7 +37,7 @@ BEGIN TRY
     USE ' + QUOTENAME(name) + ';
     INSERT INTO #TableDetails (DatabaseName, TableName, TableType)
     SELECT 
-        ''' + name + ''' AS DatabaseName,
+        ''' + REPLACE(name, '''', '''''') + ''' AS DatabaseName,
         OBJECT_NAME(o.object_id) AS TableName,
         CASE 
             WHEN t.is_ms_shipped = 1 THEN ''System Table''
@@ -54,7 +54,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
     -- Handle the error by skipping the database
-    PRINT ''Skipping database ' + QUOTENAME(name) + ' due to error: '' + ERROR_MESSAGE();
+    PRINT ''Skipping database [' + REPLACE(name, '''', '''''') + '] due to error: '' + ERROR_MESSAGE();
 END CATCH;
 '
 FROM sys.databases
