@@ -1,67 +1,130 @@
-DECLARE @LookBackHours int = 24
-IF OBJECT_ID('tempdb..#ErrorLogFiles') IS NOT NULL
-    DROP TABLE #ErrorLogFiles;
-
-CREATE TABLE #ErrorLogFiles
+CREATE OR ALTER PROCEDURE usp_readerrorlog
 (
-    ArchiveNumber INT,
-    LogDate DATETIME,
-    LogFileSizeMB INT
-);
-IF OBJECT_ID('tempdb..#ErrorLog') IS NOT NULL
-    DROP TABLE #ErrorLog;
+    @LookBackHours INT = 24, 
+    @filtererror VARCHAR(1024) = NULL,
+    @StartTime DATETIME = NULL,
+    @EndTime DATETIME = NULL
+)
+AS
+BEGIN
+    IF OBJECT_ID('tempdb..#ErrorLogFiles') IS NOT NULL
+        DROP TABLE #ErrorLogFiles;
 
-CREATE TABLE #ErrorLog
-(
-    LogDate DATETIME,
-    ProcessInfo NVARCHAR(50),
-    LogText NVARCHAR(MAX)
-);
+    CREATE TABLE #ErrorLogFiles
+    (
+        ArchiveNumber INT,
+        LogDate DATETIME,
+        LogFileSizeMB INT
+    );
 
-INSERT INTO #ErrorLogFiles
-EXEC xp_enumerrorlogs
+    IF OBJECT_ID('tempdb..#ErrorLog') IS NOT NULL
+        DROP TABLE #ErrorLog;
 
+    CREATE TABLE #ErrorLog
+    (
+        LogDate DATETIME,
+        ProcessInfo NVARCHAR(50),
+        LogText NVARCHAR(MAX)
+    );
 
+    INSERT INTO #ErrorLogFiles
+    EXEC xp_enumerrorlogs;
 
-DECLARE @LogNumber INT = 0;
-DECLARE @MaxLogNumber INT = (
+    DECLARE @LogNumber INT;
+    DECLARE @MaxLogNumber INT;
+
+    -- Determine the range of log files to parse based on the provided time range
+    IF @EndTime IS NOT NULL AND @StartTime IS NULL
+    BEGIN
+        SET @StartTime = DATEADD(HOUR, -@LookBackHours, @EndTime);
+    END
+
+    IF @StartTime IS NOT NULL AND @EndTime IS NOT NULL
+    BEGIN
+        SET @LogNumber = (
+                            SELECT MIN(ArchiveNumber)
+                            FROM #ErrorLogFiles
+                            WHERE LogDate >= @StartTime
+                         );
+
+        SET @MaxLogNumber = (
+                                SELECT MAX(ArchiveNumber)
+                                FROM #ErrorLogFiles
+                                WHERE LogDate <= @EndTime
+                            );
+    END
+    ELSE
+    BEGIN
+        SET @LogNumber = 0;
+        SET @MaxLogNumber = (
                                 SELECT MAX(ArchiveNumber)
                                 FROM #ErrorLogFiles
                                 WHERE LogDate > DATEADD(HOUR, -@LookBackHours, GETDATE())
-                            ); -- Adjust this based on the number of log files you have
+                            );
 
-IF @MaxLogNumber IS NULL
-    SET @MaxLogNumber = 0
-ELSE
-    SET @MaxLogNumber = @MaxLogNumber + 1
-WHILE @LogNumber <= @MaxLogNumber
-BEGIN
-    INSERT INTO #ErrorLog
-    (
-        LogDate,
-        ProcessInfo,
-        LogText
-    )
-    EXEC xp_readerrorlog @LogNumber, 1;
+        IF @MaxLogNumber IS NULL
+            SET @MaxLogNumber = 0
+        ELSE
+            SET @MaxLogNumber = @MaxLogNumber + 1;
+    END
 
-    SET @LogNumber = @LogNumber + 1;
+    WHILE @LogNumber <= @MaxLogNumber
+    BEGIN
+        INSERT INTO #ErrorLog
+        (
+            LogDate,
+            ProcessInfo,
+            LogText
+        )
+        EXEC xp_readerrorlog @LogNumber, 1;
+
+        SET @LogNumber = @LogNumber + 1;
+    END;
+
+    DELETE FROM #ErrorLog
+    WHERE LogText LIKE '%found 0 errors and repaired 0 errors.%'
+          OR LogText LIKE '%No user action is required.%'
+          OR LogText LIKE '%command ''BACKUP DATABASE'', operation %'
+          OR LogText LIKE 'Buffer Pool scan took %'
+          OR LogText LIKE 'Parallel redo is shutdown for database %'
+          OR LogText LIKE 'Starting up database %'
+          OR LogText LIKE 'Parallel redo is started for database %.'
+          OR LogText IN ( 'All rights reserved.', '(c) Microsoft Corporation.', 'Authentication mode is MIXED.',
+                          'The error log has been reinitialized. See the previous log for older entries.',
+                          'Default collation: SQL_Latin1_General_CP1_CI_AS (us_english 1033)'
+                        );
+
+    IF @StartTime IS NULL AND @EndTime IS NULL
+    BEGIN
+        SELECT *
+        FROM #ErrorLog
+        WHERE 
+            LogDate > DATEADD(HOUR, -@LookBackHours, GETDATE())
+            AND (@filtererror IS NULL OR LogText LIKE '%' + @filtererror + '%')
+        ORDER BY LogDate DESC;
+    END
+    ELSE IF @StartTime IS NULL AND @EndTime IS NOT NULL
+    BEGIN
+        SELECT *
+        FROM #ErrorLog
+        WHERE 
+            LogDate > DATEADD(HOUR, -@LookBackHours, @EndTime)
+            AND LogDate <= @EndTime
+            AND (@filtererror IS NULL OR LogText LIKE '%' + @filtererror + '%')
+        ORDER BY LogDate DESC;
+    END
+    ELSE IF @StartTime IS NOT NULL AND @EndTime IS NOT NULL
+    BEGIN
+        SELECT *
+        FROM #ErrorLog
+        WHERE 
+            LogDate >= @StartTime
+            AND LogDate <= @EndTime
+            AND (@filtererror IS NULL OR LogText LIKE '%' + @filtererror + '%')
+        ORDER BY LogDate DESC;
+    END
+
+    DROP TABLE #ErrorLog;
+    DROP TABLE #ErrorLogFiles;
 END;
-
-DELETE FROM #ErrorLog
-WHERE LogText LIKE '%found 0 errors and repaired 0 errors.%'
-      OR LogText LIKE '%No user action is required.%'
-      OR LogText LIKE '%command ''BACKUP DATABASE'', operation %'
-      OR LogText LIKE 'Buffer Pool scan took %'
-      OR LogText LIKE 'Parallel redo is shutdown for database %'
-      OR LogText LIKE 'Starting up database %'
-      OR LogText LIKE 'Parallel redo is started for database %.'
-      OR LogText IN ( 'All rights reserved.', '(c) Microsoft Corporation.', 'Authentication mode is MIXED.',
-                      'The error log has been reinitialized. See the previous log for older entries.',
-                      'Default collation: SQL_Latin1_General_CP1_CI_AS (us_english 1033)'
-                    )
-SELECT *
-FROM #ErrorLog
-WHERE LogDate > DATEADD(HOUR, -@LookBackHours, GETDATE())
-ORDER BY LogDate DESC
-DROP TABLE #ErrorLog
-DROP TABLE #ErrorLogFiles
+GO
