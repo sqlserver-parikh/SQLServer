@@ -53,7 +53,6 @@ IF EXISTS
                     JOIN sys.trace_subclass_values v ON v.trace_event_id = TE.trace_event_id
                                                         AND v.subclass_value = t.EventSubClass
                WHERE te.name IN('Audit Addlogin Event', 'Audit Add DB User Event', 'Audit Add Member to DB Role Event', 'Audit Add Login to Server Role Event')
-               AND StartTime > DATEADD(HH, -4, GETDATE())
                AND StartTime >
                (
                    SELECT MAX(StartTime)
