@@ -1,4 +1,4 @@
-CREATE OR ALTER PROCEDURE usp_readerrorlog
+CREATE OR ALTER PROCEDURE #usp_readerrorlog
 (
     @LookBackHours INT = 24, 
     @filtererror VARCHAR(1024) = NULL,
@@ -128,3 +128,4 @@ BEGIN
     DROP TABLE #ErrorLogFiles;
 END;
 GO
+exec #usp_readerrorlog
