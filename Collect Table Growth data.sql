@@ -1,10 +1,10 @@
-CREATE OR ALTER PROCEDURE spTableGrowthData
+CREATE OR ALTER PROCEDURE usp_TableGrowthData
 (
     @LowRowsRetentionDays INT = 4,
     @AllRowsRetentionDays int = 15,
     @LowRowCount int = 10000,
-    @ResultOnly bit = 0,
-    @StoreTableName sysname = 'tblTableGrowthData' --Table will be created in msdb if not exists.
+    @ResultOnly bit = 1,
+    @StoreTableName sysname = 'tblTableGrowthData' --Table will be created if not exists.
 )
 
 --All tables with record > LowRowCount will be retained for AllRowsRetentionDays
@@ -206,9 +206,9 @@ if @ResultOnly = 1
 else
 begin
 	DECLARE @SQL NVARCHAR(MAX);
-	if exists (SELECT 1 FROM msdb.sys.tables WHERE name = @StoreTableName)
+	if exists (SELECT 1 FROM sys.tables WHERE name = @StoreTableName)
 	begin
-    SET @SQL = 'INSERT INTO msdb.[dbo].' + QUOTENAME(@StoreTableName) + ' 
+    SET @SQL = 'INSERT INTO [dbo].' + QUOTENAME(@StoreTableName) + ' 
     select *
     from ##Report
     DELETE msdb.dbo.' + QUOTENAME(@StoreTableName) + ' 
@@ -217,7 +217,7 @@ begin
     WHERE RowsCount < ' + CONVERT(VARCHAR(10),  @LowRowCount) + ' 
           AND ReportRun < DATEADD(DD, -' +CONVERT(VARCHAR(10),  @LowRowsRetentionDays) +' , GETDATE());'
 	end else 
-	SET @SQL = 'SELECT * INTO msdb.dbo.' + QUOTENAME(@StoreTableName) + ' FROM ##REPORT'
+	SET @SQL = 'SELECT * INTO dbo.' + QUOTENAME(@StoreTableName) + ' FROM ##REPORT'
 	EXEC sp_executesql @SQL
 end
 DROP TABLE #tableReport;
