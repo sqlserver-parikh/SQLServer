@@ -1,4 +1,16 @@
-USE msdb;
+USE tempdb
+GO
+CREATE OR ALTER PROCEDURE usp_AgentJobReport
+(@jStatus varchar(128) = 'enabled' --Enabled, Disabled, ALL
+, @jIsScheduled varchar(128) = 'ALL' --Yes, No, ALL
+,@ShowOnlyFailedJobsInPast24Hours bit = 0)
+AS
+
+if @jStatus not in ('Enabled', 'Disabled')
+set @jStatus = '%'
+if @jIsScheduled not in ('Yes','No')
+set @jIsScheduled = '%'
+
 -- Define the time intervals
 DECLARE @Past7Days DATETIME = DATEADD(DAY, -7, GETDATE());
 DECLARE @Past24Hours DATETIME = DATEADD(HOUR, -24, GETDATE());
@@ -217,12 +229,12 @@ SELECT j.job_id
      , sched1.active_start_time
      , sched1.active_end_time
      , j.date_created
-FROM sysjobs                       j
-    INNER JOIN sysjobschedules     s
+FROM msdb..sysjobs                       j
+    INNER JOIN msdb..sysjobschedules     s
         ON j.job_id = s.job_id
-    INNER JOIN dbo.sysjobschedules sched
+    INNER JOIN msdb.dbo.sysjobschedules sched
         ON s.schedule_id = sched.schedule_id
-    INNER JOIN dbo.sysschedules    sched1
+    INNER JOIN msdb.dbo.sysschedules    sched1
         ON s.schedule_id = sched1.schedule_id;
 --inner join dbo.sysjobschedules sched1
 --ON s.schedule_id = sched.schedule_id
@@ -504,10 +516,10 @@ FROM #schedules
                 WHEN LEN(a.run_duration) = 5 THEN
                     LEFT(CONVERT(VARCHAR, a.run_duration), 3) + ':' + RIGHT(CONVERT(VARCHAR, a.run_duration), 2)
             END        AS duration
-        FROM dbo.sysjobhistory           a
-            INNER JOIN dbo.sysjobhistory b
+        FROM msdb.dbo.sysjobhistory           a
+            INNER JOIN msdb.dbo.sysjobhistory b
                 ON a.job_id = b.job_id
-            INNER JOIN sysjobs
+            INNER JOIN msdb.dbo.sysjobs
                 ON sysjobs.job_id = a.job_id
         WHERE a.step_name NOT LIKE '%outcome%'
               AND b.step_name LIKE '%outcome%'
@@ -522,6 +534,8 @@ SELECT DISTINCT
   , scheduled IsScheduled
 INTO #finalschedule
 FROM #temp1 a
+if @ShowOnlyFailedJobsInPast24Hours = 1
+begin
 select a.*
      , b.RunsInPast24Hours
      , b.RunsInPast7Days
@@ -530,9 +544,28 @@ select a.*
 FROM #finalschedule     a
     LEFT JOIN #JobStats b
         ON a.jobname = b.JobName
+WHERE A.Status LIKE @jStatus
+AND A.IsScheduled LIKE @jIsScheduled
+AND B.FailurePercentageInPast24Hours >= @ShowOnlyFailedJobsInPast24Hours
 ORDER BY FailurePercentageInPast24Hours DESC
-GO
+end
+else 
+begin 
+select a.*
+     , b.RunsInPast24Hours
+     , b.RunsInPast7Days
+     , b.RunsInPast30Days
+     , b.FailurePercentageInPast24Hours
+FROM #finalschedule     a
+    LEFT JOIN #JobStats b
+        ON a.jobname = b.JobName
+WHERE A.Status LIKE @jStatus
+AND A.IsScheduled LIKE @jIsScheduled
+ORDER BY FailurePercentageInPast24Hours DESC
+end
+
 DROP TABLE #schedules;
 DROP TABLE #temp1;
 DROP TABLE #finalschedule
 DROP TABLE #JobStats
+GO
