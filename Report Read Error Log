@@ -1,12 +1,27 @@
-CREATE OR ALTER PROCEDURE #usp_readerrorlog
+CREATE PROCEDURE #usp_readerrorlog
 (
     @LookBackHours INT = 24, 
-    @filtererror VARCHAR(1024) = NULL,
+    @FilterError VARCHAR(1024) = NULL,
     @StartTime DATETIME = NULL,
-    @EndTime DATETIME = NULL
+    @EndTime DATETIME = NULL,
+    @FilterLoginFailed BIT = 1
 )
 AS
 BEGIN
+    -- Validate input parameters
+    IF @LookBackHours <= 0
+    BEGIN
+        RAISERROR('LookBackHours must be greater than 0', 16, 1);
+        RETURN;
+    END
+
+    IF @StartTime IS NOT NULL AND @EndTime IS NOT NULL AND @StartTime > @EndTime
+    BEGIN
+        RAISERROR('StartTime cannot be greater than EndTime', 16, 1);
+        RETURN;
+    END
+
+    -- Drop temporary tables if they exist
     IF OBJECT_ID('tempdb..#ErrorLogFiles') IS NOT NULL
         DROP TABLE #ErrorLogFiles;
 
@@ -27,6 +42,7 @@ BEGIN
         LogText NVARCHAR(MAX)
     );
 
+    -- Insert error log files
     INSERT INTO #ErrorLogFiles
     EXEC xp_enumerrorlogs;
 
@@ -68,6 +84,7 @@ BEGIN
             SET @MaxLogNumber = @MaxLogNumber + 1;
     END
 
+    -- Read error logs
     WHILE @LogNumber <= @MaxLogNumber
     BEGIN
         INSERT INTO #ErrorLog
@@ -81,6 +98,7 @@ BEGIN
         SET @LogNumber = @LogNumber + 1;
     END;
 
+    -- Delete irrelevant log entries
     DELETE FROM #ErrorLog
     WHERE LogText LIKE '%found 0 errors and repaired 0 errors.%'
           OR LogText LIKE '%No user action is required.%'
@@ -89,18 +107,34 @@ BEGIN
           OR LogText LIKE 'Parallel redo is shutdown for database %'
           OR LogText LIKE 'Starting up database %'
           OR LogText LIKE 'Parallel redo is started for database %.'
+          OR LogText LIKE 'UTC adjustment:%'
+          OR LogText LIKE 'System Manufacturer:%'
+          OR LogText LIKE 'Server process ID is%'
+          OR LogText LIKE 'Audit: Server Audit:%'
+          OR LogText LIKE 'Setting database option%'
+          OR LogText LIKE 'Microsoft SQL Server %Microsoft Corporation%Edition%'
+          OR LogText LIKE 'Logging SQL Server messages in file%'          
           OR LogText IN ( 'All rights reserved.', '(c) Microsoft Corporation.', 'Authentication mode is MIXED.',
                           'The error log has been reinitialized. See the previous log for older entries.',
                           'Default collation: SQL_Latin1_General_CP1_CI_AS (us_english 1033)'
                         );
 
+    -- Optionally filter login failed errors
+    IF @FilterLoginFailed = 1
+    BEGIN
+        DELETE FROM #ErrorLog
+        WHERE LogText LIKE 'Error: 18456, %'
+        OR LogText LIKE 'Login failed for user%';
+    END
+
+    -- Select relevant log entries based on the provided time range
     IF @StartTime IS NULL AND @EndTime IS NULL
     BEGIN
         SELECT *
         FROM #ErrorLog
         WHERE 
             LogDate > DATEADD(HOUR, -@LookBackHours, GETDATE())
-            AND (@filtererror IS NULL OR LogText LIKE '%' + @filtererror + '%')
+            AND (@FilterError IS NULL OR LogText LIKE '%' + @FilterError + '%')
         ORDER BY LogDate DESC;
     END
     ELSE IF @StartTime IS NULL AND @EndTime IS NOT NULL
@@ -110,7 +144,7 @@ BEGIN
         WHERE 
             LogDate > DATEADD(HOUR, -@LookBackHours, @EndTime)
             AND LogDate <= @EndTime
-            AND (@filtererror IS NULL OR LogText LIKE '%' + @filtererror + '%')
+            AND (@FilterError IS NULL OR LogText LIKE '%' + @FilterError + '%')
         ORDER BY LogDate DESC;
     END
     ELSE IF @StartTime IS NOT NULL AND @EndTime IS NOT NULL
@@ -120,12 +154,15 @@ BEGIN
         WHERE 
             LogDate >= @StartTime
             AND LogDate <= @EndTime
-            AND (@filtererror IS NULL OR LogText LIKE '%' + @filtererror + '%')
+            AND (@FilterError IS NULL OR LogText LIKE '%' + @FilterError + '%')
         ORDER BY LogDate DESC;
     END
 
+    -- Drop temporary tables
     DROP TABLE #ErrorLog;
     DROP TABLE #ErrorLogFiles;
 END;
 GO
-exec #usp_readerrorlog
+EXEC #usp_readerrorlog
+GO
+DROP PROCEDURE #usp_readerrorlog
