@@ -130,32 +130,35 @@ BEGIN
     -- Select relevant log entries based on the provided time range
     IF @StartTime IS NULL AND @EndTime IS NULL
     BEGIN
-        SELECT *
+        SELECT MAX(LogDate) LastTime, MIN(LogDate) FirstTime, LogText, COUNT(LogText) Total
         FROM #ErrorLog
         WHERE 
             LogDate > DATEADD(HOUR, -@LookBackHours, GETDATE())
             AND (@FilterError IS NULL OR LogText LIKE '%' + @FilterError + '%')
-        ORDER BY LogDate DESC;
+		GROUP BY LogText
+        ORDER BY 1 DESC;
     END
     ELSE IF @StartTime IS NULL AND @EndTime IS NOT NULL
     BEGIN
-        SELECT *
+        SELECT MAX(LogDate) LastTime, MIN(LogDate) FirstTime, LogText, COUNT(LogText) Total
         FROM #ErrorLog
         WHERE 
             LogDate > DATEADD(HOUR, -@LookBackHours, @EndTime)
             AND LogDate <= @EndTime
             AND (@FilterError IS NULL OR LogText LIKE '%' + @FilterError + '%')
-        ORDER BY LogDate DESC;
+		GROUP BY LogText
+        ORDER BY 1 DESC;
     END
     ELSE IF @StartTime IS NOT NULL AND @EndTime IS NOT NULL
     BEGIN
-        SELECT *
+        SELECT MAX(LogDate) LastTime, MIN(LogDate) FirstTime, LogText, COUNT(LogText) Total
         FROM #ErrorLog
         WHERE 
             LogDate >= @StartTime
             AND LogDate <= @EndTime
             AND (@FilterError IS NULL OR LogText LIKE '%' + @FilterError + '%')
-        ORDER BY LogDate DESC;
+		GROUP BY LogText
+        ORDER BY 1 DESC;
     END
 
     -- Drop temporary tables
