@@ -124,6 +124,9 @@ VALUES
 ('6.3 (14393)', 
  'Windows Server 2016'
 ),
+('6.3 (20348)', 
+ 'Windows Server 2022'
+),
 ('10.0 (14393)', 
  'Windows Server 2016'
 ),
@@ -157,6 +160,7 @@ VALUES
 ('10.0 (22621)', 
  'Windows 11'
 );
+
    DECLARE @Plat TABLE
     (Id             INT, 
      Name           VARCHAR(180), 
