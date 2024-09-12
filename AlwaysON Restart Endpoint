@@ -1,0 +1,76 @@
+DECLARE @EndpointName NVARCHAR(128);
+DECLARE @Role NVARCHAR(20);
+DECLARE @ReplicaServerName NVARCHAR(128);
+DECLARE @Command NVARCHAR(MAX);
+
+-- Find the endpoint name
+SELECT @EndpointName = name
+FROM sys.endpoints
+WHERE type_desc = 'DATABASE_MIRRORING';
+
+-- Check if the endpoint exists
+IF @EndpointName IS NULL
+BEGIN
+    PRINT 'No database mirroring endpoint found. This server might not be part of a Database Mirroring setup or Availability Group.';
+END
+ELSE
+BEGIN
+    -- Determine the role of the server (primary or secondary)
+    IF EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'PRIMARY')
+        SET @Role = 'Primary Replica';
+    ELSE IF EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'SECONDARY')
+        SET @Role = 'Secondary Replica';
+    ELSE
+        SET @Role = 'Unknown Role';
+
+    -- Print the dynamic SQL statements for the current server
+    PRINT '-- Connecting to: ' + @@SERVERNAME;
+    PRINT ':CONNECT ' + @@SERVERNAME;
+    PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
+    PRINT 'GO';
+    PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STOPPED';
+    PRINT 'GO';
+    PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
+    PRINT 'GO';
+    PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STARTED';
+    PRINT 'GO';
+    PRINT '';
+
+    -- Check if the server is part of an Availability Group
+    IF EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states)
+    BEGIN
+        -- Find all replicas in the Availability Group
+        DECLARE ReplicaCursor CURSOR FOR
+        SELECT replica_server_name AS ReplicaServerName
+        FROM sys.availability_replicas
+        WHERE replica_server_name <> @@SERVERNAME;
+
+        OPEN ReplicaCursor;
+        FETCH NEXT FROM ReplicaCursor INTO @ReplicaServerName;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            -- Print the dynamic SQL statements for each replica
+            PRINT '-- Connecting to: ' + @ReplicaServerName;
+            PRINT ':CONNECT ' + @ReplicaServerName;
+            PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
+            PRINT 'GO';
+            PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STOPPED';
+            PRINT 'GO';
+            PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
+            PRINT 'GO';
+            PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STARTED';
+            PRINT 'GO';
+            PRINT '';
+
+            FETCH NEXT FROM ReplicaCursor INTO @ReplicaServerName;
+        END;
+
+        CLOSE ReplicaCursor;
+        DEALLOCATE ReplicaCursor;
+    END
+    ELSE
+    BEGIN
+        PRINT 'No Availability Group replicas found. This server might not be part of an Availability Group.';
+    END
+END;
