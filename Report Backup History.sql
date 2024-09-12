@@ -3,7 +3,7 @@ CREATE OR ALTER PROCEDURE #usp_BackupReport
     @DbNames NVARCHAR(MAX) = '' -- NULL: All DBs
   , @BackupType CHAR(1) = 'D'   -- D: Full, L: Log, I: Incremental, NULL: All backup types
   , @LookBackDays INT = 7       -- Must be > 0
-  , @BackupGrowthReport BIT = 0 --If this is 1 then only @dbname parameter is used others are not used
+  , @BackupGrowthReport BIT = 1 --If this is 1 then only @dbname parameter is used others are not used
 )
 AS
 BEGIN
@@ -80,6 +80,20 @@ BEGIN
 
     ELSE
     BEGIN
+		SELECT 
+    ag.name AS AvailabilityGroupName,
+    dbcs.database_name AS DatabaseName,
+    ag.automated_backup_preference_desc AS BackupPreference
+INTO #BackupPreference
+FROM 
+    sys.availability_groups ag
+JOIN 
+    sys.dm_hadr_availability_replica_states ars ON ag.group_id = ars.group_id
+JOIN 
+    sys.dm_hadr_database_replica_cluster_states dbcs ON ars.replica_id = dbcs.replica_id
+ORDER BY 
+    ag.name, dbcs.database_name;
+
         -- Create a temporary table to store the intermediate results
         CREATE TABLE #IntermediateFreeSpace
         (
@@ -228,6 +242,8 @@ BEGIN
         SELECT D.name
              , d.user_access_desc
              , d.state_desc
+			 , ISNULL(AvailabilityGroupName,'Not part of AG') AGName
+			 , ISNULL(BP.BackupPreference,'Not part of AG')
              , SUSER_SNAME(owner_sid)    DBOwnerName
              , d.compatibility_level
              , d.recovery_model_desc
@@ -256,7 +272,8 @@ BEGIN
                 ON D.name = G.DatabaseName
             left join #FreeSpace DS
                 on D.name = DS.DatabaseName
-        WHERE (
+			LEFT JOIN #BackupPreference bp ON BP.DATABASENAME = D.NAME
+        WHERE D.name <> 'tempdb' and (
                   D.name LIKE @DbNames
                   OR EXISTS
         (
