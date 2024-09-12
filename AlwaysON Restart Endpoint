@@ -1,5 +1,7 @@
+--if alwayson sync is very slow its worth to try to restart endpoint.
+SET NOCOUNT ON;
 DECLARE @EndpointName NVARCHAR(128);
-DECLARE @Role NVARCHAR(20);
+DECLARE @PrimaryReplicaServerName NVARCHAR(128);
 DECLARE @ReplicaServerName NVARCHAR(128);
 DECLARE @Command NVARCHAR(MAX);
 
@@ -15,62 +17,89 @@ BEGIN
 END
 ELSE
 BEGIN
-    -- Determine the role of the server (primary or secondary)
-    IF EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'PRIMARY')
-        SET @Role = 'Primary Replica';
-    ELSE IF EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'SECONDARY')
-        SET @Role = 'Secondary Replica';
-    ELSE
-        SET @Role = 'Unknown Role';
+    -- Get primary and secondary server names
+    DECLARE @AGInfo TABLE (
+        AGname NVARCHAR(128),
+        dns_name NVARCHAR(128),
+        replica_server_name NVARCHAR(128),
+        database_name NVARCHAR(128),
+        IsPrimaryServer BIT,
+        ReadableSecondary NVARCHAR(128),
+        Synchronous NVARCHAR(128),
+        failover_mode_desc NVARCHAR(128),
+        read_only_routing_url NVARCHAR(128),
+        availability_mode_desc NVARCHAR(128)
+    );
 
-    -- Print the dynamic SQL statements for the current server
-    PRINT '-- Connecting to: ' + @@SERVERNAME;
-    PRINT ':CONNECT ' + @@SERVERNAME;
-    PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
-    PRINT 'GO';
-    PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STOPPED';
-    PRINT 'GO';
-    PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
-    PRINT 'GO';
-    PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STARTED';
-    PRINT 'GO';
-    PRINT '';
+    INSERT INTO @AGInfo
+    SELECT name AS AGname, 
+           agl.dns_name, 
+           replica_server_name, 
+           ADC.database_name,
+           CASE
+               WHEN(primary_replica = replica_server_name)
+               THEN 1
+               ELSE 0
+           END AS IsPrimaryServer, 
+           secondary_role_allow_connections_desc AS ReadableSecondary, 
+           [availability_mode] AS [Synchronous], 
+           failover_mode_desc, 
+           read_only_routing_url, 
+           availability_mode_desc
+    FROM master.sys.availability_groups Groups
+         LEFT JOIN master.sys.availability_replicas Replicas ON Groups.group_id = Replicas.group_id
+         LEFT JOIN master.sys.dm_hadr_availability_group_states States ON Groups.group_id = States.group_id
+         LEFT JOIN sys.availability_databases_cluster ADC ON ADC.group_id = Groups.group_id
+         LEFT JOIN sys.availability_group_listeners agl ON agl.group_id = groups.group_id;
 
-    -- Check if the server is part of an Availability Group
-    IF EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states)
+    -- Print the dynamic SQL statements for the primary replica
+    SELECT @PrimaryReplicaServerName = replica_server_name
+    FROM @AGInfo
+    WHERE IsPrimaryServer = 1;
+
+    IF @PrimaryReplicaServerName IS NOT NULL
     BEGIN
-        -- Find all replicas in the Availability Group
-        DECLARE ReplicaCursor CURSOR FOR
-        SELECT replica_server_name AS ReplicaServerName
-        FROM sys.availability_replicas
-        WHERE replica_server_name <> @@SERVERNAME;
+        PRINT '-- Connecting to Primary Replica: ' + @PrimaryReplicaServerName;
+        PRINT ':CONNECT ' + @PrimaryReplicaServerName;
+        PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
+        PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STOPPED';
+        PRINT 'GO';
+        PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
+        PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STARTED';
+        PRINT 'GO';
+        PRINT '-- Run this script on the Primary Replica';
+        PRINT '';
+    END
+    ELSE
+    BEGIN
+        PRINT 'Primary replica not found.';
+    END
 
-        OPEN ReplicaCursor;
+    -- Print the dynamic SQL statements for each secondary replica
+    DECLARE ReplicaCursor CURSOR FOR
+    SELECT DISTINCT replica_server_name
+    FROM @AGInfo
+    WHERE IsPrimaryServer = 0;
+
+    OPEN ReplicaCursor;
+    FETCH NEXT FROM ReplicaCursor INTO @ReplicaServerName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        PRINT '-- Connecting to Secondary Replica: ' + @ReplicaServerName;
+        PRINT ':CONNECT ' + @ReplicaServerName;
+        PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
+        PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STOPPED';
+        PRINT 'GO';
+        PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
+        PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STARTED';
+        PRINT 'GO';
+        PRINT '-- Run this script on the Secondary Replica';
+        PRINT '';
+
         FETCH NEXT FROM ReplicaCursor INTO @ReplicaServerName;
+    END;
 
-        WHILE @@FETCH_STATUS = 0
-        BEGIN
-            -- Print the dynamic SQL statements for each replica
-            PRINT '-- Connecting to: ' + @ReplicaServerName;
-            PRINT ':CONNECT ' + @ReplicaServerName;
-            PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
-            PRINT 'GO';
-            PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STOPPED';
-            PRINT 'GO';
-            PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
-            PRINT 'GO';
-            PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STARTED';
-            PRINT 'GO';
-            PRINT '';
-
-            FETCH NEXT FROM ReplicaCursor INTO @ReplicaServerName;
-        END;
-
-        CLOSE ReplicaCursor;
-        DEALLOCATE ReplicaCursor;
-    END
-    ELSE
-    BEGIN
-        PRINT 'No Availability Group replicas found. This server might not be part of an Availability Group.';
-    END
+    CLOSE ReplicaCursor;
+    DEALLOCATE ReplicaCursor;
 END;
