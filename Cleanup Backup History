@@ -1,0 +1,49 @@
+USE tempdb;
+GO
+CREATE OR ALTER PROCEDURE #usp_DeleteBackupHistory
+(
+    @LogDeleteDays int = 30,
+    @AllDeleteDays int = 365
+)
+AS
+DECLARE @LogDeleteDate DATETIME;
+SET @LogDeleteDate = DATEADD(DAY, -@LogDeleteDays, GETDATE());
+
+-- Delete related records from backupfilegroup
+DELETE FROM msdb..backupfilegroup
+WHERE backup_set_id IN (
+                           SELECT backup_set_id
+                           FROM msdb..backupset
+                           WHERE type = 'L'
+                                 AND backup_finish_date < @LogDeleteDate
+                       );
+
+-- Delete related records from backupfile
+DELETE FROM msdb..backupfile
+WHERE backup_set_id IN (
+                           SELECT backup_set_id
+                           FROM msdb..backupset
+                           WHERE type = 'L'
+                                 AND backup_finish_date < @LogDeleteDate
+                       );
+
+-- Delete records from backupmediafamily
+DELETE FROM msdb..backupmediafamily
+WHERE media_set_id IN (
+                          SELECT media_set_id
+                          FROM msdb..backupset
+                          WHERE type = 'L'
+                                AND backup_finish_date < @LogDeleteDate
+                      );
+
+-- Delete records from backupset
+DELETE FROM msdb..backupset
+WHERE type = 'L'
+      AND backup_finish_date < @LogDeleteDate;
+
+DECLARE @AllDeleteDate DATETIME;
+SET @AllDeleteDate = DATEADD(DAY, -@AllDeleteDays, GETDATE());
+
+EXEC msdb..sp_delete_backuphistory @oldest_date = @AllDeleteDate;
+GO
+EXEC #usp_DeleteBackupHistory
