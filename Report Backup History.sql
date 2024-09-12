@@ -243,7 +243,7 @@ ORDER BY
              , d.user_access_desc
              , d.state_desc
 			 , ISNULL(AvailabilityGroupName,'Not part of AG') AGName
-			 , ISNULL(BP.BackupPreference,'Not part of AG')
+			 , ISNULL(BP.BackupPreference,'Not part of AG') BackupPreference
              , SUSER_SNAME(owner_sid)    DBOwnerName
              , d.compatibility_level
              , d.recovery_model_desc
