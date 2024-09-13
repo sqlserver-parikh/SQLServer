@@ -1,27 +1,5 @@
-USE [DBATasks]
+use tempdb
 GO
-
-SET ANSI_NULLS ON
-GO
-
-SET QUOTED_IDENTIFIER ON
-GO
-
-IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblConfigChanges]') AND type in (N'U'))
-BEGIN
-CREATE TABLE [dbo].[tblConfigChanges](
-	[ConfigOption] [nvarchar](max) NULL,
-	[ChangeTime] [datetime] NULL,
-	[LoginName] [sysname] NOT NULL,
-	[OldValue] [nvarchar](max) NULL,
-	[NewValue] [nvarchar](max) NULL
-) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
-END
-GO
-
-USE [DBATasks]
-GO
-
 IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[spConfigChanges]') AND type in (N'P', N'PC'))
 DROP PROCEDURE [dbo].[spConfigChanges]
 GO
@@ -41,8 +19,19 @@ GO
 ALTER PROCEDURE [dbo].[spConfigChanges] (@retaindays INT = 365)
 AS
 SET NOCOUNT ON;
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblConfigChanges]') AND type in (N'U'))
+BEGIN
+CREATE TABLE [dbo].[tblConfigChanges](
+	[ConfigOption] [nvarchar](max) NULL,
+	[ChangeTime] [datetime] NULL,
+	[LoginName] [sysname] NOT NULL,
+	[OldValue] [nvarchar](max) NULL,
+	[NewValue] [nvarchar](max) NULL
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+END
+
 BEGIN TRY
-     DELETE DBATasks.dbo.[tblConfigChanges]
+     DELETE dbo.[tblConfigChanges]
      WHERE ChangeTime < DATEADD(DD, -@retaindays, GETDATE());
     DECLARE @enable INT;
     SELECT @enable = CONVERT(INT, value_in_use)
@@ -82,7 +71,7 @@ BEGIN TRY
             FROM @temp_trace;
             SET @diff = DATEDIFF(hh, @d1, GETDATE());
             SET @diff = @diff / 24;
-            INSERT INTO DBATasks..tblConfigChanges
+            INSERT INTO tblConfigChanges
                    SELECT CASE event_class
                               WHEN 116
                               THEN 'Trace Flag '+SUBSTRING(textdata, PATINDEX('%(%', textdata), LEN(textdata)-PATINDEX('%(%', textdata)+1)
@@ -104,11 +93,11 @@ BEGIN TRY
                               THEN SUBSTRING(SUBSTRING(textdata, PATINDEX('%changed from%', textdata), LEN(textdata)-PATINDEX('%changed from%', textdata)), PATINDEX('%to%', SUBSTRING(textdata, PATINDEX('%changed from%', textdata), LEN(textdata)-PATINDEX('%changed from%', textdata)))+3, PATINDEX('%. Run%', SUBSTRING(textdata, PATINDEX('%changed from%', textdata), LEN(textdata)-PATINDEX('%changed from%', textdata)))-PATINDEX('%to%', SUBSTRING(textdata, PATINDEX('%changed from%', textdata), LEN(textdata)-PATINDEX('%changed from%', textdata)))-3)
                           END AS NewValue
                    FROM @temp_trace
-			    WHERE start_time > ISNULL( (SELECT MAX(CHANGETIME) FROM DBATasks..tblConfigChanges),DATEADD(DD,-15,GETDATE()))
+			    WHERE start_time > ISNULL( (SELECT MAX(CHANGETIME) FROM tblConfigChanges),DATEADD(DD,-15,GETDATE()))
     END;
         ELSE
         BEGIN
-            INSERT INTO DBATasks..tblConfigChanges
+            INSERT INTO tblConfigChanges
             SELECT TOP 0 1 AS config_option,
                          1 AS start_time,
                          1 AS login_name,
@@ -117,7 +106,7 @@ BEGIN TRY
     END;
 END TRY
 BEGIN CATCH
-    INSERT INTO DBATasks..tblConfigChanges
+    INSERT INTO tblConfigChanges
            SELECT ERROR_STATE() AS config_option,
                   1 AS start_time,
                   ERROR_MESSAGE() AS login_name,
@@ -125,76 +114,4 @@ BEGIN CATCH
                   1 AS new_value;
 END CATCH;
 GO
-
-USE [msdb]
-GO
-
-IF  EXISTS (SELECT job_id FROM msdb.dbo.sysjobs_view WHERE name = N'DBA - Collect Config Change Data')
-EXEC msdb.dbo.sp_delete_job @job_name = N'DBA - Collect Config Change Data', @delete_unused_schedule=1
-GO
-
-BEGIN TRANSACTION
-DECLARE @ReturnCode INT
-SELECT @ReturnCode = 0
-IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'Data Collector' AND category_class=1)
-BEGIN
-EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'Data Collector'
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-
-END
-
-DECLARE @jobId BINARY(16)
-select @jobId = job_id from msdb.dbo.sysjobs where (name = N'DBA - Collect Config Change Data')
-if (@jobId is NULL)
-BEGIN
-EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA - Collect Config Change Data', 
-		@enabled=1, 
-		@notify_level_eventlog=0, 
-		@notify_level_email=0, 
-		@notify_level_netsend=0, 
-		@notify_level_page=0, 
-		@delete_level=0, 
-		@description=N'No description available.', 
-		@category_name=N'Data Collector', 
-		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-
-END
-IF NOT EXISTS (SELECT * FROM msdb.dbo.sysjobsteps WHERE job_id = @jobId and step_id = 1)
-EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Configuration Changes', 
-		@step_id=1, 
-		@cmdexec_success_code=0, 
-		@on_success_action=1, 
-		@on_success_step_id=0, 
-		@on_fail_action=2, 
-		@on_fail_step_id=0, 
-		@retry_attempts=0, 
-		@retry_interval=0, 
-		@os_run_priority=0, @subsystem=N'TSQL', 
-		@command=N'EXEC DBATasks..[spConfigChanges]', 
-		@database_name=N'master', 
-		@flags=0
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Hourly', 
-		@enabled=1, 
-		@freq_type=4, 
-		@freq_interval=1, 
-		@freq_subday_type=8, 
-		@freq_subday_interval=1, 
-		@freq_relative_interval=0, 
-		@freq_recurrence_factor=0, 
-		@active_start_date=20171114, 
-		@active_end_date=99991231, 
-		@active_start_time=0, 
-		@active_end_time=235959
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
-IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-COMMIT TRANSACTION
-GOTO EndSave
-QuitWithRollback:
-    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
-EndSave:
-GO
+--SELECT * FROM [tblConfigChanges]
