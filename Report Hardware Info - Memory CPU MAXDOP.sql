@@ -1,9 +1,10 @@
-USE master;
+USE tempdb;
 GO
-/*
+CREATE OR ALTER PROCEDURE #usp_SQLInformation
+AS
+BEGIN
 
-IF NOT  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tbl_SQLInformation]') AND type in (N'U'))
-CREATE TABLE [dbo].[tbl_SQLInformation](
+CREATE TABLE [#tbl_SQLInformation](
 	[ServerName] [sql_variant] NULL,
 	[PortNumber] [sql_variant] NULL,
 	[SQLVersionDesc] [varchar](18) NULL,
@@ -57,9 +58,6 @@ NonStandardConfigurations varchar(max) NULL,
 	[ServerTimeZone] varchar(100) NULL,
 	[RunTime] [datetime] NOT NULL
 ) ON [PRIMARY]
-GO
-
-*/
 DECLARE @DomainNames NVARCHAR(MAX) = '';
 
 SELECT @DomainNames = STUFF((
@@ -521,6 +519,7 @@ EXEC master.dbo.xp_regread
     @key = 'SYSTEM\CurrentControlSet\Services\SqlServer',
     @value_name = 'InstantFileInitializationEnabled',
     @value = @IFIValue OUTPUT;
+	INSERT INTO #tbl_SQLInformation
     SELECT SERVERPROPERTY('ServerName') ServerName, 
            CONNECTIONPROPERTY('local_tcp_port') PortNumber,
            CASE
@@ -697,7 +696,6 @@ END TRY
 BEGIN CATCH
     PRINT 'Didn''t work for ' + @@SERVERNAME;
 END CATCH;
-GO
 IF OBJECT_ID('tempdb..#cpudetails') IS NOT NULL
     DROP TABLE #cpudetails;
 IF OBJECT_ID('tempdb..#memorydetails') IS NOT NULL
@@ -708,3 +706,8 @@ IF OBJECT_ID('tempdb..#WinNames') IS NOT NULL
     DROP TABLE #WinNames;
 IF OBJECT_ID('tempdb..#aginfo') IS NOT NULL
     DROP TABLE #aginfo
+
+SELECT * FROM #tbl_SQLInformation
+END
+GO
+#usp_SQLInformation
