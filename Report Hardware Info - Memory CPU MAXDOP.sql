@@ -37,6 +37,7 @@ CREATE TABLE [dbo].[tbl_SQLInformation](
 	[TotalMemory] [nvarchar](30) NULL,
 	[MinMemory] [sql_variant] NULL,
 	[MaxMemory] [sql_variant] NULL,
+	[LockPagesInMemory] varchar(128) NULL,
 	[WindowsName] [varchar](128) NULL,
 	[WindowsRDPPort] [int] NULL,
 	[InstantFileInitialization] [varchar](40) NOT NULL,
@@ -515,6 +516,12 @@ where comment like 'Cost%') CostThreshold,
         FROM sys.configurations
         WHERE name LIKE 'max server memory (MB)'
     ) MaxMemory,
+	(SELECT 
+    CASE 
+        WHEN sql_memory_model_desc = 'LOCK_PAGES' THEN 'LPIM - Enabled'
+        ELSE 'LPIM - Disabled'
+    END AS LPIM_Status
+FROM sys.dm_os_sys_info) LockPagesInMemory,
            --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
            @WinName WindowsName, 
            @WindowsRDP WindowsRDPPort,
