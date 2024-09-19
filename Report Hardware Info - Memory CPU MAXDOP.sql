@@ -162,6 +162,24 @@ VALUES
  'Windows 11'
 );
 
+DECLARE @TraceFlags VARCHAR(MAX) = '';
+
+-- Drop the temporary table if it already exists
+IF OBJECT_ID('tempdb..#TraceFlags') IS NOT NULL
+    DROP TABLE #TraceFlags;
+
+-- Temporary table to store trace flag status
+CREATE TABLE #TraceFlags (TraceFlag INT, Status INT, Global INT, Session INT);
+
+-- Insert trace flag status into the temporary table
+INSERT INTO #TraceFlags (TraceFlag, Status, Global, Session)
+EXEC ('DBCC TRACESTATUS(-1) WITH NO_INFOMSGS');
+
+-- Concatenate trace flags into a single comma-separated string
+SELECT @TraceFlags = STRING_AGG(CAST(TraceFlag AS VARCHAR), ', ')
+FROM #TraceFlags
+WHERE Status = 1;
+
    DECLARE @Plat TABLE
     (Id             INT, 
      Name           VARCHAR(180), 
@@ -522,6 +540,7 @@ where comment like 'Cost%') CostThreshold,
         ELSE 'LPIM - Disabled'
     END AS LPIM_Status
 FROM sys.dm_os_sys_info) LockPagesInMemory,
+ @TraceFlags AS Enabled_Trace_Flags,
            --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
            @WinName WindowsName, 
            @WindowsRDP WindowsRDPPort,
