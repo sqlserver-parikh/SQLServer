@@ -1,0 +1,7 @@
+$patches = Get-HotFix  | Select-Object -Property Description, HotFixID, InstalledOn
+
+# Get the last patch date
+$lastPatchDate = $patches | Sort-Object InstalledOn -Descending 
+
+# Output the last patch date and list of patches
+$lastPatchDate | Format-Table -Property  Description, HotFixID, InstalledOn
