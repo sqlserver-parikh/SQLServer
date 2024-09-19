@@ -38,6 +38,8 @@ CREATE TABLE [dbo].[tbl_SQLInformation](
 	[MinMemory] [sql_variant] NULL,
 	[MaxMemory] [sql_variant] NULL,
 	[LockPagesInMemory] varchar(128) NULL,
+	 Enabled_Trace_Flags varchar(max) NULL,
+NonStandardConfigurations varchar(max) NULL,
 	[WindowsName] [varchar](128) NULL,
 	[WindowsRDPPort] [int] NULL,
 	[InstantFileInitialization] [varchar](40) NOT NULL,
@@ -162,7 +164,101 @@ VALUES
  'Windows 11'
 );
 
+DECLARE @config TABLE (
+    name NVARCHAR(35),
+    default_value SQL_VARIANT
+);
+
+-- Insert default configuration values into the table variable
+INSERT INTO @config (name, default_value) VALUES
+('access check cache bucket count', 0),
+('access check cache quota', 0),
+('Ad Hoc Distributed Queries', 0),
+('affinity I/O mask', 0),
+('affinity64 I/O mask', 0),
+('affinity mask', 0),
+('affinity64 mask', 0),
+('Agent XPs', 1), -- Changes to 1 if SQL Agent is started, so I check for that
+('allow updates', 0),
+('awe enabled', 0),
+('backup compression default', 0),
+('blocked process threshold (s)', 0),
+('c2 audit mode', 0),
+('clr enabled', 0),
+('common criteria compliance enabled', 0),
+('contained database authentication', 0), 
+('cost threshold for parallelism', 5),
+('cross db ownership chaining', 0),
+('cursor threshold', -1),
+('Database Mail XPs', 0),
+('default full-text language', 1033),
+('default language', 0),
+('default trace enabled', 1),
+('disallow results from triggers', 0),
+('EKM provider enabled', 0),
+('filestream access level', 0),
+('fill factor (%)', 0),
+('ft crawl bandwidth (max)', 100),
+('ft crawl bandwidth (min)', 0),
+('ft notify bandwidth (max)', 100),
+('ft notify bandwidth (min)', 0),
+('index create memory (KB)', 0),
+('in-doubt xact resolution', 0),
+('lightweight pooling', 0),
+('locks', 0),
+('max degree of parallelism', 0),
+('max full-text crawl range', 4),
+('max server memory (MB)', 2147483647),
+('max text repl size (B)', 65536),
+('max worker threads', 0),
+('media retention', 0),
+('min memory per query (KB)', 1024),
+('min server memory (MB)', 0),
+('nested triggers', 1),
+('network packet size (B)', 4096),
+('Ole Automation Procedures', 0),
+('open objects', 0),
+('optimize for ad hoc workloads', 0),
+('PH timeout (s)', 60),
+('precompute rank', 0),
+('priority boost', 0),
+('query governor cost limit', 0),
+('query wait (s)', -1),
+('recovery interval (min)', 0),
+('remote access', 1),
+('remote admin connections', 0),
+('remote login timeout (s)', 10),
+('remote proc trans', 0),
+('remote query timeout (s)', 600),
+('Replication XPs', 0),
+('scan for startup procs', 0),
+('server trigger recursion', 1),
+('set working set size', 0),
+('show advanced options', 0),
+('SMO and DMO XPs', 1),
+('SQL Mail XPs', 0),
+('transform noise words', 0),
+('two digit year cutoff', 2049),
+('user connections', 0),
+('user options', 0),
+('Web Assistant Procedures', 0),
+('xp_cmdshell', 0);
+
+-- Variable to store the result
+DECLARE @NonStandardConfigs NVARCHAR(MAX);
+DECLARE @Count INT;
+
+-- Concatenate non-standard configuration values into a single comma-separated string
+SELECT @NonStandardConfigs = STRING_AGG(
+    CONCAT(sc.name, ' (Default: ', CONVERT(NVARCHAR(MAX), c.default_value), ', Current: ', CONVERT(NVARCHAR(MAX), sc.value_in_use), ')'), ', '),
+    @Count = COUNT(*)
+FROM sys.configurations sc
+INNER JOIN @config c ON sc.name = c.name
+WHERE sc.value_in_use <> c.default_value;
+
+
 DECLARE @TraceFlags VARCHAR(MAX) = '';
+DECLARE @TraceFlagCount INT = 0;
 
 -- Drop the temporary table if it already exists
 IF OBJECT_ID('tempdb..#TraceFlags') IS NOT NULL
@@ -175,8 +271,9 @@ CREATE TABLE #TraceFlags (TraceFlag INT, Status INT, Global INT, Session INT);
 INSERT INTO #TraceFlags (TraceFlag, Status, Global, Session)
 EXEC ('DBCC TRACESTATUS(-1) WITH NO_INFOMSGS');
 
--- Concatenate trace flags into a single comma-separated string
-SELECT @TraceFlags = STRING_AGG(CAST(TraceFlag AS VARCHAR), ', ')
+-- Concatenate trace flags into a single comma-separated string and count them
+SELECT @TraceFlags = STRING_AGG(CAST(TraceFlag AS VARCHAR), ', '),
+       @TraceFlagCount = COUNT(*)
 FROM #TraceFlags
 WHERE Status = 1;
 
@@ -540,7 +637,8 @@ where comment like 'Cost%') CostThreshold,
         ELSE 'LPIM - Disabled'
     END AS LPIM_Status
 FROM sys.dm_os_sys_info) LockPagesInMemory,
- @TraceFlags AS Enabled_Trace_Flags,
+(SELECT CONCAT('Total:', @TraceFlagCount, ' (', @TraceFlags, ')') )AS Enabled_Trace_Flags,
+(SELECT CONCAT('Total:', @Count, ' (', @NonStandardConfigs, ')') )AS NonStandardConfigurations,
            --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
            @WinName WindowsName, 
            @WindowsRDP WindowsRDPPort,
