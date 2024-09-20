@@ -62,8 +62,13 @@ Remove-Item -Path $csvPath -Force
 
 
 <#
+-- Get the maximum PatchDate
+DECLARE @MaxPatchDate DATETIME;
+SELECT @MaxPatchDate = MAX(installedon) FROM tblHotfixDetails;
+
+-- Get all patches done on the maximum PatchDate
 SELECT 
-    convert(varchar(19), @MaxPatchDate,121) + '(Total: ' + convert(varchar(5), COUNT(*) ) + ' [' +   STRING_AGG(HotFixID + '('+ Description, '), ') + '])'  LastPatchDate
+    convert(varchar(16), @MaxPatchDate,121) + '(Total: ' + convert(varchar(5), COUNT(*) ) + ' [' +   STRING_AGG(HotFixID + '('+ Description, '), ') + '])'  LastPatchDate
 FROM 
     tblHotfixDetails
 WHERE 
