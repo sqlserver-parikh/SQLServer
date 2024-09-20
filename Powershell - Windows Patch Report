@@ -1,7 +1,61 @@
-$patches = Get-HotFix  | Select-Object -Property Description, HotFixID, InstalledOn
+# Pass server name and database name where tblHotfixDetails will be created
 
-# Get the last patch date
-$lastPatchDate = $patches | Sort-Object InstalledOn -Descending 
+$databaseName = "tempdb"
+$serverName =  "servername.domain.com"
 
-# Output the last patch date and list of patches
-$lastPatchDate | Format-Table -Property  Description, HotFixID, InstalledOn
+# Retrieve the default backup directory
+
+$backupDirectory = Invoke-Sqlcmd -Query "
+DECLARE @BackupDirectory NVARCHAR(4000);
+EXEC master.dbo.xp_instance_regread 
+    N'HKEY_LOCAL_MACHINE', 
+    N'Software\Microsoft\MSSQLServer\MSSQLServer', 
+    N'BackupDirectory', 
+    @BackupDirectory OUTPUT;
+SELECT @BackupDirectory AS DefaultBackupDirectory;
+"  -ServerInstance $serverName  -Database "master" | Select-Object -ExpandProperty DefaultBackupDirectory
+
+# Define the path for the CSV file
+$csvPath = "$backupDirectory\HotFix.csv"
+
+# Export hotfix details to CSV
+Get-Hotfix | Where-Object { $_.InstalledOn -gt (Get-Date).AddMonths(-3) } | 
+    Select-Object PSComputerName, InstalledOn, Description, HotFixID, InstalledBy | 
+    Export-Csv -Path $csvPath -NoTypeInformation -Delimiter ','
+
+# Import CSV data into SQL Server table
+Invoke-Sqlcmd -Query "
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblHotfixDetails]') AND type in (N'U'))
+BEGIN
+CREATE TABLE [dbo].[tblHotfixDetails](
+	[PSComputerName] [nvarchar](255) NULL,
+	[InstalledOn] [nvarchar](50) NULL,
+	[Description] [nvarchar](255) NULL,
+	[HotFixID] [nvarchar](50) NULL,
+	[InstalledBy] [nvarchar](255) NULL
+) ON [PRIMARY]
+END
+GO
+BULK INSERT [tblHotfixDetails]
+FROM '$csvPath'
+WITH (
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '\n',
+    FIRSTROW = 2,
+    FORMAT = 'CSV'
+);
+
+;WITH CTE AS (
+    SELECT 
+        *,
+        ROW_NUMBER() OVER (PARTITION BY PSComputerName, InstalledOn, Description, HotFixID, InstalledBy ORDER BY (SELECT NULL)) AS RowNum
+    FROM 
+        tblHotfixDetails
+)
+DELETE FROM CTE
+WHERE RowNum > 1;
+
+" -ServerInstance $serverName  -Database $databaseName 
+
+# Delete the CSV file from disk
+Remove-Item -Path $csvPath -Force
