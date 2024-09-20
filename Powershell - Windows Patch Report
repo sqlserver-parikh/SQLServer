@@ -59,3 +59,14 @@ WHERE RowNum > 1;
 
 # Delete the CSV file from disk
 Remove-Item -Path $csvPath -Force
+
+
+<#
+SELECT 
+    convert(varchar(19), @MaxPatchDate,121) + '(Total: ' + convert(varchar(5), COUNT(*) ) + ' [' +   STRING_AGG(HotFixID + '('+ Description, '), ') + '])'  LastPatchDate
+FROM 
+    tblHotfixDetails
+WHERE 
+    installedon = @MaxPatchDate;
+#>
+
