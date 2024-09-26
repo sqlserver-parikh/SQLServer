@@ -1,9 +1,10 @@
 CREATE OR ALTER PROCEDURE #usp_BackupReport
 (
     @DbNames NVARCHAR(MAX) = '' -- NULL: All DBs
-  , @BackupType CHAR(1) = 'D'   -- D: Full, L: Log, I: Incremental, NULL: All backup types
-  , @LookBackDays INT = 7       -- Must be > 0
-  , @BackupGrowthReport BIT = 1 --If this is 1 then only @dbname parameter is used others are not used
+  , @BackupType CHAR(1) = 'L'   -- D: Full, L: Log, I: Incremental, NULL: All backup types
+  , @LookBackDays INT = 7  -- Must be > 0
+  , @MinBackupSizeMB INT = 0 -- 0 will show all backups 1024 will show all backups > than 1GB in size
+  , @BackupGrowthReport BIT = 0 --If this is 1 then only @dbname parameter is used others are not used
 )
 AS
 BEGIN
@@ -27,7 +28,11 @@ BEGIN
             RAISERROR('LookBackDays must be greater than 0', 16, 1);
             RETURN;
         END
-
+		IF @MinBackupSizeMB < 0
+        BEGIN
+            RAISERROR('Minimum backup size must be greater than 0', 16, 1);
+            RETURN;
+        END
         -- Validate @BackupType
         IF @BackupType IS NOT NULL
            AND @BackupType NOT IN ( '', 'D', 'L', 'I' )
@@ -74,6 +79,7 @@ BEGIN
               AND T3.backup_finish_date > DATEADD(DD, -@LookBackDays, GETDATE())
               AND DATABASEPROPERTYEX(T1.name, 'STATUS') = 'ONLINE'
               AND T1.name <> 'tempdb'
+			  AND (T3.backup_size / 1048576.0)  > @MinBackupSizeMB
         ORDER BY T3.backup_finish_date DESC
                , T3.backup_start_date DESC;
     END;
