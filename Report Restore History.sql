@@ -1,7 +1,8 @@
 USE msdb;
 GO
+
 CREATE OR ALTER PROCEDURE #GetRestoreHistory
-    @RestoreDateFrom DATETIME = NULL,
+    @RestoreInLastXDays INT = 30,
     @DestinationDBName NVARCHAR(128) = NULL,
     @UserName NVARCHAR(128) = NULL,
     @BackupType CHAR(1) = 'D',
@@ -26,7 +27,7 @@ BEGIN
          INNER JOIN msdb..backupset b ON h.backup_set_id = b.backup_set_id
          INNER JOIN msdb..backupfile f ON f.backup_set_id = b.backup_set_id
          INNER JOIN msdb..backupmediafamily bmf ON bmf.media_set_id = b.media_set_id
-    WHERE (@RestoreDateFrom IS NULL OR restore_date > @RestoreDateFrom)
+    WHERE (@RestoreInLastXDays IS NULL OR restore_date > DATEADD(DD,-@RestoreInLastXDays, GETDATE()))
           AND (@DestinationDBName IS NULL OR destination_database_name LIKE '%' + @DestinationDBName + '%')
           AND (@UserName IS NULL OR h.user_name LIKE @UserName)
           AND (@BackupType IS NULL OR b.type = @BackupType)
