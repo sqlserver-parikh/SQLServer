@@ -5,8 +5,9 @@ CREATE OR ALTER PROCEDURE #GetRestoreHistory
     @RestoreInLastXDays INT = 30,
     @DestinationDBName NVARCHAR(128) = NULL,
     @UserName NVARCHAR(128) = NULL,
-    @BackupType CHAR(1) = 'D',
-    @BackupSize DECIMAL(18, 2) = 0
+    @BackupType CHAR(1) = 'D', -- type L for log restores, I for incremental restores
+    @BackupSize DECIMAL(18, 2) = 0 -- it will show all backups > than mentioned size
+	
 AS
 BEGIN
     SELECT DISTINCT 
