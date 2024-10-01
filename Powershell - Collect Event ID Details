@@ -1,0 +1,71 @@
+# Pass server name and database name where tblEventIdDetails will be created
+
+$databaseName = "tempdb"
+$serverName =  "serverName.domain.com"
+$port = 1433
+$SQLserverName = $serverName + "," + $port
+# Retrieve the default backup directory
+
+$backupDirectory = Invoke-Sqlcmd -Query "
+DECLARE @BackupDirectory NVARCHAR(4000);
+EXEC master.dbo.xp_instance_regread 
+    N'HKEY_LOCAL_MACHINE', 
+    N'Software\Microsoft\MSSQLServer\MSSQLServer', 
+    N'BackupDirectory', 
+    @BackupDirectory OUTPUT;
+SELECT @BackupDirectory AS DefaultBackupDirectory;
+"  -ServerInstance $serverName  -Database "master" | Select-Object -ExpandProperty DefaultBackupDirectory
+
+# Define the path for the CSV file
+$csvPath = "$backupDirectory\EventID.csv"
+
+# Export hotfix details to CSV
+# Get the event log entries for the specified event IDs
+$eventIDs = @(1074, 6008, 41, 7034, 2013)
+# Get the current date and time
+$currentDate = Get-Date
+
+# Calculate the date and time for 1 days ago
+$startDate = $currentDate.AddDays(-1)
+
+$events = Get-WinEvent -FilterHashtable @{LogName='System'; Id=$eventIDs; StartTime=$startDate}
+
+# Select the properties you want to export
+$events | Select-Object TimeCreated, Id, LevelDisplayName, Message, @{Name="ComputerName";Expression={$_.MachineName}} | Export-Csv -Path $csvPath -NoTypeInformation -Delimiter ','
+
+# Import CSV data into SQL Server table
+Invoke-Sqlcmd -Query "
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblEventIdDetails]') AND type in (N'U'))
+BEGIN
+CREATE TABLE [dbo].[tblEventIdDetails](
+	[TimeCreated] [nvarchar](255) NULL,
+	[EventID] [nvarchar](50) NULL,
+	[MessageType] [nvarchar](255) NULL,
+	[Message] [nvarchar](max) NULL,
+	[MachineName] [nvarchar](255) NULL
+) ON [PRIMARY]
+END
+GO
+BULK INSERT [tblEventIdDetails]
+FROM '$csvPath'
+WITH (
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '\n',
+    FIRSTROW = 2,
+    FORMAT = 'CSV'
+);
+
+;WITH CTE AS (
+    SELECT 
+        *,
+        ROW_NUMBER() OVER (PARTITION BY TimeCreated, EventID ORDER BY (SELECT NULL)) AS RowNum
+    FROM 
+        tblEventIdDetails
+)
+DELETE FROM CTE
+WHERE RowNum > 1;
+
+" -ServerInstance $SQLserverName  -Database $databaseName 
+
+# Delete the CSV file from disk
+Remove-Item -Path $csvPath -Force
