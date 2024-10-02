@@ -1,57 +1,70 @@
-# Function to get the status of specified services on a server
-function Get-ServiceStatus {
-    param (
-        [string]$server,
-        [string]$domain
-    )
-    $fullServerName = if ($domain) { "$server.$domain" } else { $server }
-    $serviceStatus = @()
+# Pass server name and database name where tblEventIdDetails will be created
+$databaseName = "tempdb"
+$serverName =  "$(ESCAPE_SQUOTE(SRVR))"
 
-    # Define the service name patterns to check
-    $servicePatterns = @("MSSQL*", "Cohesity*", "SCOM*")
+# Retrieve the default backup directory
+$backupDirectory = Invoke-Sqlcmd -Query "
+DECLARE @BackupDirectory NVARCHAR(4000);
+EXEC master.dbo.xp_instance_regread 
+    N'HKEY_LOCAL_MACHINE', 
+    N'Software\Microsoft\MSSQLServer\MSSQLServer', 
+    N'BackupDirectory', 
+    @BackupDirectory OUTPUT;
+SELECT @BackupDirectory AS DefaultBackupDirectory;
+"  -ServerInstance $serverName  -Database "master" | Select-Object -ExpandProperty DefaultBackupDirectory
 
-    foreach ($pattern in $servicePatterns) {
-        try {
-            $services = Get-Service -ComputerName $fullServerName -Name $pattern -ErrorAction Stop
-            foreach ($service in $services) {
-                $serviceStatus += [PSCustomObject]@{
-                    Server = $fullServerName
-                    Service = $service.Name
-                    Status = $service.Status
-                }
-            }
-        } catch {
-            $serviceStatus += [PSCustomObject]@{
-                Server = $fullServerName
-                Service = $pattern
-                Status = "Not Found or Unable to Connect"
-            }
-        }
+# Define the path for the CSV file
+$csvPath = "$backupDirectory\ServicesStatus.csv"
+
+# Define the service name patterns
+$servicePatterns = @("SQL*", "Backup*", "Monitor*")
+
+# Initialize an empty array to hold the services
+$allServices = @()
+
+# Get the local computer name
+$computerName = $env:COMPUTERNAME
+
+# Loop through each pattern and get the service status
+foreach ($pattern in $servicePatterns) {
+    $services = Get-Service -Name $pattern | Select-Object DisplayName, Name, Status
+    foreach ($service in $services) {
+        $service | Add-Member -MemberType NoteProperty -Name ComputerName -Value $computerName
+        $allServices += $service
     }
-
-    return $serviceStatus
 }
 
+$currentDateTime = Get-Date
 
-# Read the list of server names from serverlist.txt
-$serverList = Get-Content -Path "C:\Users\name\Documents\ServerList.txt"
+# Select the properties you want to export
+$allServices | Select-Object DisplayName, Name, Status, ComputerName, @{Name="RunDate"; Expression={$currentDateTime}} |
+Export-Csv -Path $csvPath -NoTypeInformation -Delimiter ','
 
-# Specify the domain name (if needed)
-$domainName = "domain.local"  # Replace with your actual domain name or leave empty if not needed
+# Import CSV data into SQL Server table
+Invoke-Sqlcmd -Query "
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblServicesStatus]') AND type in (N'U'))
+BEGIN
+CREATE TABLE [dbo].[tblServicesStatus] (
+    [DisplayName] nvarchar(1024) NULL,
+    [ServiceName] nvarchar(255) NULL,
+    [Status] nvarchar(255) NULL,
+    [MachineName] nvarchar(255) NULL,
+    [RunTime] nvarchar(255) NULL
+) ON [PRIMARY]
+END
+GO
+BULK INSERT [tblServicesStatus]
+FROM '$csvPath'
+WITH (
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '\n',
+    FIRSTROW = 2,
+    FORMAT = 'CSV'
+);
 
-# Initialize an array to hold the service statuses
-$allServiceStatuses = @()
+DELETE FROM [dbo].[tblServicesStatus]
+WHERE RunTime < DATEADD(MONTH, -3, GETDATE());
+" -ServerInstance $serverName -Database $databaseName
 
-# Process each server name
-foreach ($server in $serverList) {
-    if ($server -like "*sql*") {    $statuses = Get-ServiceStatus -server $server -domain $domainName
-    $allServiceStatuses += $statuses
-}
-}
-# Output the service statuses
-$allServiceStatuses | Format-Table -AutoSize
-
-# Optionally, write the service statuses to a file
-$allServiceStatuses | Export-Csv -Path "C:\Users\name\Documents\ServiceStatuses.csv" -NoTypeInformation
-
-Write-Host "Service statuses have been written to ServiceStatuses.csv"
+# Delete the CSV file from disk
+Remove-Item -Path $csvPath -Force
