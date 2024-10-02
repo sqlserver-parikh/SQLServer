@@ -68,3 +68,51 @@ WHERE RunTime < DATEADD(MONTH, -3, GETDATE());
 
 # Delete the CSV file from disk
 Remove-Item -Path $csvPath -Force
+
+<#
+
+WITH LastTwoEntries AS (
+    SELECT 
+        DisplayName,
+        ServiceName,
+        Status,
+        MachineName,
+        RunTime,
+        ROW_NUMBER() OVER (PARTITION BY ServiceName ORDER BY RunTime DESC) AS rn
+    FROM 
+        [DBASupport].[dbo].[tblServicesStatus]
+)
+, ServiceStatusChange AS (
+    SELECT 
+        a.ServiceName,
+        a.DisplayName,
+        a.MachineName,
+        a.Status AS CurrentStatus,
+        b.Status AS PreviousStatus,
+        a.RunTime AS CurrentRunTime,
+        b.RunTime AS PreviousRunTime, a.rn
+    FROM 
+        LastTwoEntries a
+    LEFT JOIN 
+        LastTwoEntries b
+    ON 
+        a.ServiceName = b.ServiceName AND a.rn = 1 AND b.rn = 2
+)
+SELECT 
+    ServiceName,
+    DisplayName,
+    MachineName,
+    CurrentStatus,
+    PreviousStatus,
+    CurrentRunTime,
+    PreviousRunTime,
+    CASE 
+        WHEN CurrentStatus <> PreviousStatus THEN 'Status Changed'
+        ELSE 'No Change'
+    END AS StatusChange
+FROM 
+    ServiceStatusChange
+where rn = 1
+ORDER BY 
+    ServiceName, CurrentRunTime DESC;
+#>
