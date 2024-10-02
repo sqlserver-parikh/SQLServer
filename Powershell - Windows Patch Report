@@ -54,6 +54,8 @@ WITH (
 )
 DELETE FROM CTE
 WHERE RowNum > 1;
+DELETE FROM [dbo].[tblHotfixDetails]
+WHERE InstalledOn < DATEADD(MONTH, -6, GETDATE());
 
 " -ServerInstance $serverName  -Database $databaseName 
 
