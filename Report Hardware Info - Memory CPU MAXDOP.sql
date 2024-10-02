@@ -185,10 +185,10 @@ INSERT INTO @config (name, default_value) VALUES
 ('clr enabled', 0),
 ('common criteria compliance enabled', 0),
 ('contained database authentication', 0), 
-('cost threshold for parallelism', 5),
+('cost threshold for parallelism', 80),
 ('cross db ownership chaining', 0),
 ('cursor threshold', -1),
-('Database Mail XPs', 0),
+('Database Mail XPs', 1),
 ('default full-text language', 1033),
 ('default language', 0),
 ('default trace enabled', 1),
@@ -541,6 +541,8 @@ EXEC master.dbo.xp_regread
                THEN 'SQL Server 2017'
                WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '15%'
                THEN 'SQL Server 2019'
+			   WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '16%'
+               THEN 'SQL Server 2022'
            END SQLVersionDesc, 
            SERVERPROPERTY(N'ProductVersion') SQLVersion, 
            SERVERPROPERTY('ProductLevel') ServicePack, 
