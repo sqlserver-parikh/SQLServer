@@ -1,7 +1,7 @@
 # Pass server name and database name where tblHotfixDetails will be created
 
 $databaseName = "tempdb"
-$serverName =  "servername.domain.com"
+$serverName =  "$(ESCAPE_SQUOTE(SRVR))"
 
 # Retrieve the default backup directory
 
@@ -74,4 +74,3 @@ FROM
 WHERE 
     installedon = @MaxPatchDate;
 #>
-
