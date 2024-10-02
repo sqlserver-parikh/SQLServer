@@ -1,11 +1,8 @@
 # Pass server name and database name where tblEventIdDetails will be created
-
 $databaseName = "tempdb"
-$serverName =  "serverName.domain.com"
-$port = 1433
-$SQLserverName = $serverName + "," + $port
-# Retrieve the default backup directory
+$serverName =  "$(ESCAPE_SQUOTE(SRVR))"
 
+# Retrieve the default backup directory
 $backupDirectory = Invoke-Sqlcmd -Query "
 DECLARE @BackupDirectory NVARCHAR(4000);
 EXEC master.dbo.xp_instance_regread 
@@ -28,7 +25,14 @@ $currentDate = Get-Date
 # Calculate the date and time for 1 days ago
 $startDate = $currentDate.AddDays(-1)
 
+# Get events from the event log
 $events = Get-WinEvent -FilterHashtable @{LogName='System'; Id=$eventIDs; StartTime=$startDate}
+
+# Check if there are any events to process
+if ($events.Count -eq 0) {
+    Write-Host "No events found in the specified time range."
+    exit
+}
 
 # Select the properties you want to export
 $events | Select-Object TimeCreated, Id, LevelDisplayName, Message, @{Name="ComputerName";Expression={$_.MachineName}} | Export-Csv -Path $csvPath -NoTypeInformation -Delimiter ','
@@ -38,11 +42,11 @@ Invoke-Sqlcmd -Query "
 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblEventIdDetails]') AND type in (N'U'))
 BEGIN
 CREATE TABLE [dbo].[tblEventIdDetails](
-	[TimeCreated] [nvarchar](255) NULL,
-	[EventID] [nvarchar](50) NULL,
-	[MessageType] [nvarchar](255) NULL,
-	[Message] [nvarchar](max) NULL,
-	[MachineName] [nvarchar](255) NULL
+    [TimeCreated] [nvarchar](255) NULL,
+    [EventID] [nvarchar](50) NULL,
+    [MessageType] [nvarchar](255) NULL,
+    [Message] [nvarchar](max) NULL,
+    [MachineName] [nvarchar](255) NULL
 ) ON [PRIMARY]
 END
 GO
@@ -64,8 +68,7 @@ WITH (
 )
 DELETE FROM CTE
 WHERE RowNum > 1;
-
-" -ServerInstance $SQLserverName  -Database $databaseName 
+" -ServerInstance $serverName -Database $databaseName 
 
 # Delete the CSV file from disk
 Remove-Item -Path $csvPath -Force
