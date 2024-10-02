@@ -68,6 +68,9 @@ WITH (
 )
 DELETE FROM CTE
 WHERE RowNum > 1;
+DELETE FROM [dbo].[tblEventIdDetails]
+WHERE TimeCreated < DATEADD(MONTH, -6, GETDATE());
+
 " -ServerInstance $serverName -Database $databaseName 
 
 # Delete the CSV file from disk
