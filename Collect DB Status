@@ -1,0 +1,52 @@
+CREATE OR ALTER PROCEDURE usp_DBStatus
+AS
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblDBStatus]') AND type in (N'U'))
+BEGIN
+CREATE TABLE [dbo].[tblDBStatus](
+	[name] [sysname] NOT NULL,
+	[state_desc] [nvarchar](60) NULL,
+	[RunTime] [datetime] NOT NULL
+) ON [PRIMARY]
+END
+INSERT INTO tblDBStatus
+SELECT name, state_desc, GETDATE() from sys.databases 
+GO
+CREATE OR ALTER VIEW vwDBStatus
+as 
+WITH LastTwoEntries AS (
+    SELECT 
+       name,
+	   state_desc,
+	   RunTime,
+        ROW_NUMBER() OVER (PARTITION BY name ORDER BY RunTime DESC) AS rn
+    FROM 
+        [DBASupport].[dbo].[tblDBStatus]
+)
+, DBStatusChange AS (
+    SELECT 
+        a.name,
+        a.state_desc AS CurrentStatus,
+        b.state_desc AS PreviousStatus,
+        a.RunTime AS CurrentRunTime,
+        b.RunTime AS PreviousRunTime, a.rn
+    FROM 
+        LastTwoEntries a
+    LEFT JOIN 
+        LastTwoEntries b
+    ON 
+        a.name = b.name AND a.rn = 1 AND b.rn = 2
+)
+SELECT 
+   name,
+    CurrentStatus,
+    PreviousStatus,
+    CurrentRunTime,
+    PreviousRunTime,
+    CASE 
+        WHEN CurrentStatus <> PreviousStatus THEN 'Status Changed'
+        ELSE 'No Change'
+    END AS StatusChange
+FROM 
+    DBStatusChange
+where rn = 1 
+GO
