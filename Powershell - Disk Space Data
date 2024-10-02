@@ -1,0 +1,65 @@
+$databaseName = "tempdb"
+$serverName =  "$(ESCAPE_SQUOTE(SRVR))"
+
+# Retrieve the default backup directory
+$backupDirectory = Invoke-Sqlcmd -Query "
+DECLARE @BackupDirectory NVARCHAR(4000);
+EXEC master.dbo.xp_instance_regread 
+    N'HKEY_LOCAL_MACHINE', 
+    N'Software\Microsoft\MSSQLServer\MSSQLServer', 
+    N'BackupDirectory', 
+    @BackupDirectory OUTPUT;
+SELECT @BackupDirectory AS DefaultBackupDirectory;
+"  -ServerInstance $serverName  -Database "master" | Select-Object -ExpandProperty DefaultBackupDirectory
+
+# Define the path for the CSV file
+$csvPath = "$backupDirectory\DiskSpace.csv"
+$currentDateTime = Get-Date
+
+# Export disk space details to CSV
+Get-WmiObject win32_volume | Where-Object { $_.DriveType -eq 3 } | 
+    Select-Object Name, BlockSize, 
+    @{Name="Capacity(GB)"; Expression={[math]::round($_.Capacity / 1GB, 2)}}, 
+    @{Name="FreeSpace(GB)"; Expression={[math]::round($_.FreeSpace / 1GB, 2)}}, 
+    @{Name="Free(%)"; Expression={[math]::round(($_.FreeSpace / $_.Capacity) * 100, 0)}}, 
+    @{Name="RunDate"; Expression={$currentDateTime}} | 
+    Export-Csv -Path $csvPath -NoTypeInformation -Delimiter ','
+
+# Import CSV data into SQL Server table
+Invoke-Sqlcmd -Query "
+IF NOT EXISTS (
+    SELECT *
+    FROM sys.objects
+    WHERE object_id = OBJECT_ID(N'[dbo].[tblDiskData]')
+          AND type IN (N'U')
+)
+BEGIN
+    CREATE TABLE [dbo].[tblDiskData] (
+        [DriveLetter] [VARCHAR](512) NULL,
+        [BlockSize] [VARCHAR](100) NOT NULL,
+        [CapacityGB] [VARCHAR](100) NULL,
+        [FreeSpaceGB] [VARCHAR](100) NULL,
+        [FreePct] [VARCHAR](100) NULL,
+        [RunDate] [DATETIME2](7) NULL DEFAULT(GETDATE())
+    )
+END
+
+BULK INSERT [tblDiskData]
+FROM '$csvPath'
+WITH (
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '\n',
+    FIRSTROW = 2,
+    FORMAT = 'CSV'
+);
+
+DELETE FROM tblDiskData
+WHERE RunDate < DATEADD(MONTH, -15, GETDATE());
+
+DELETE FROM tblDiskData
+WHERE DriveLetter LIKE '\\%'
+
+" -ServerInstance $serverName -Database $databaseName 
+
+# Delete the CSV file from disk
+Remove-Item -Path $csvPath -Force
