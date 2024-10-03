@@ -1,3 +1,7 @@
+--Schdule this to run as SQL Agent job daily and at start of SQL Server Agent
+--Below view can provide easy validation if any database count status changed from previous day. 
+USE tempdb
+GO
 CREATE OR ALTER PROCEDURE usp_DBStatus
 AS
 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblDBStatus]') AND type in (N'U'))
@@ -24,7 +28,6 @@ WITH RankedRuns AS (
 DELETE FROM tblDBStatus
 WHERE RunTime < (SELECT max(RunTime) FROM RankedRuns WHERE RowNum = 4);
 GO
-
 CREATE OR ALTER VIEW vwDBStatus
 AS
 WITH LastTwoEntries AS (
@@ -43,7 +46,7 @@ WITH LastTwoEntries AS (
         RunTime AS CurrentRunTime
     FROM 
         LastTwoEntries
-    WHERE rn = 1 AND RunTime = (SELECT RunTime FROM LastTwoEntries WHERE name = 'tempdb' AND rn = 1)
+    WHERE RunTime = (SELECT RunTime FROM LastTwoEntries WHERE name = 'tempdb' AND rn = 1)
 )
 , PreviousRun AS (
     SELECT 
@@ -72,8 +75,8 @@ SELECT
     name,
     ISNULL(CurrentStatus, 'Dropped') AS CurrentStatus,
     ISNULL(PreviousStatus, 'New') AS PreviousStatus,
-    ISNULL(CurrentRunTime, PreviousRunTime) AS CurrentRunTime,
-    PreviousRunTime,
+    ISNULL(CONVERT(VARCHAR(19),CurrentRunTime, 121), 'Dropped') AS CurrentRunTime,
+    ISNULL(CONVERT(VARCHAR(19), PreviousRunTime,121), 'New') AS PreviousRunTime,
     CASE 
         WHEN CurrentStatus IS NULL THEN 'Dropped'
         WHEN PreviousStatus IS NULL THEN 'New'
