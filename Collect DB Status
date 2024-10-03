@@ -37,7 +37,7 @@ WITH LastTwoEntries AS (
         RunTime,
         ROW_NUMBER() OVER (PARTITION BY name ORDER BY RunTime DESC) AS rn
     FROM 
-        [DBASupport].[dbo].[tblDBStatus]
+        [dbo].[tblDBStatus]
 )
 , CurrentRun AS (
     SELECT 
