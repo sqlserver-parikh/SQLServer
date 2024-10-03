@@ -1,10 +1,19 @@
-USE tempdb;
+USE tempdb 
 GO
-CREATE OR ALTER PROCEDURE #usp_SQLInformation
+CREATE OR ALTER PROCEDURE usp_SQLInformation
+(@LogToTable bit = 0, @Retention int = 26) 
 AS
 BEGIN
 
-CREATE TABLE [#tbl_SQLInformation](
+IF @LogToTable = 1
+BEGIN
+IF NOT EXISTS (
+    SELECT *
+    FROM sys.objects
+    WHERE object_id = OBJECT_ID(N'[dbo].[tblSQLInformation]')
+          AND type IN (N'U')
+)
+CREATE TABLE [tblSQLInformation](
 	[ServerName] [sql_variant] NULL,
 	[PortNumber] [sql_variant] NULL,
 	[SQLVersionDesc] [varchar](18) NULL,
@@ -58,6 +67,7 @@ NonStandardConfigurations varchar(max) NULL,
 	[ServerTimeZone] varchar(100) NULL,
 	[RunTime] [datetime] NOT NULL
 ) ON [PRIMARY]
+END 
 DECLARE @DomainNames NVARCHAR(MAX) = '';
 
 SELECT @DomainNames = STUFF((
@@ -519,7 +529,9 @@ EXEC master.dbo.xp_regread
     @key = 'SYSTEM\CurrentControlSet\Services\SqlServer',
     @value_name = 'InstantFileInitializationEnabled',
     @value = @IFIValue OUTPUT;
-	INSERT INTO #tbl_SQLInformation
+	IF @LogToTable  = 1
+	BEGIN
+	INSERT INTO tblSQLInformation
     SELECT SERVERPROPERTY('ServerName') ServerName, 
            CONNECTIONPROPERTY('local_tcp_port') PortNumber,
            CASE
@@ -694,6 +706,193 @@ else
            --) DBNames,
 	   @TimeZone ServerTimeZone,
            GETDATE() RunTime;
+
+		   WITH RankedRuns AS (
+    SELECT *,
+           ROW_NUMBER() OVER (ORDER BY RunTime DESC) AS RowNum
+    FROM tblSQLInformation
+)
+DELETE FROM tblSQLInformation
+WHERE RunTime < (SELECT max(RunTime) FROM RankedRuns WHERE RowNum = @Retention);
+
+		   END
+		   ELSE 
+		   BEGIN
+		       SELECT SERVERPROPERTY('ServerName') ServerName, 
+           CONNECTIONPROPERTY('local_tcp_port') PortNumber,
+           CASE
+               WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '8%'
+               THEN 'SQL Server 2000'
+               WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '9%'
+               THEN 'SQL Server 2005'
+               WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '10.0%'
+               THEN 'SQL Server 2008'
+               WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '10.5%'
+               THEN 'SQL Server 2008 R2'
+               WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '11%'
+               THEN 'SQL Server 2012'
+               WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '12%'
+               THEN 'SQL Server 2014'
+               WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '13%'
+               THEN 'SQL Server 2016'
+               WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '14%'
+               THEN 'SQL Server 2017'
+               WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '15%'
+               THEN 'SQL Server 2019'
+			   WHEN CONVERT(VARCHAR(128), SERVERPROPERTY('productversion')) LIKE '16%'
+               THEN 'SQL Server 2022'
+           END SQLVersionDesc, 
+           SERVERPROPERTY(N'ProductVersion') SQLVersion, 
+           SERVERPROPERTY('ProductLevel') ServicePack, 
+           @agname AGName, 
+           @listnername AGListenerName, 
+           @primaryserver AGPrimaryServer, 
+           @agserverlist AGServerList, 
+           @agdblist AGDBList, 
+    (
+        SELECT COUNT(*)
+        FROM #InstanceName
+    ) TotalNoOfInstances, 
+    (
+        SELECT SUBSTRING(
+        (
+            SELECT ', ' + CONVERT(VARCHAR(10), InstanceName)
+            FROM #InstanceName FOR xml PATH('')
+        ), 3, 8000)
+    ) AllInstancesName,
+           --, SERVERPROPERTY('machinename') VirtualServerName 
+           SERVERPROPERTY('ComputerNamePhysicalNetBIOS') RunningNode, 
+           CONNECTIONPROPERTY('local_net_address') IPAddress, 
+           @Domain  + '(' + @domainNames +')' DomainNameList,
+           CASE
+               WHEN SERVERPROPERTY('IsClustered') = 1
+               THEN
+    (
+        SELECT SUBSTRING(
+        (
+            SELECT ' ,' + NodeName
+            FROM sys.dm_os_cluster_nodes FOR xml PATH('')
+        ), 3, 8000)
+    )
+               WHEN SERVERPROPERTY('IsClustered') = 0
+               THEN 'Not Clustered'
+           END AllNodes, 
+           SERVERPROPERTY(N'Edition') Edition, 
+           SERVERPROPERTY('ErrorLogFileName') ErrorLogLocation, 
+           @DefaultData AS 'Data Files', 
+           @DefaultLog AS 'Log Files',
+		   @SQLDataRoot SQLDataRoot,
+           @BackupPath DefaultBackup, 
+    (
+        SELECT COUNT(*)
+        FROM sys.sysdatabases
+        WHERE dbid > 4
+              AND STATUS <> 1073808392
+    ) DBCount, 
+    (
+        SELECT CONVERT(DECIMAL(25, 0), SUM(size / 128.0))
+        FROM sys.master_files
+        WHERE is_sparse = 0
+              AND database_id <> 2
+              AND type_desc = 'ROWS'
+    ) TotalDataSizeMB, 
+    (
+        SELECT CONVERT(DECIMAL(25, 0), SUM(size / 128.0))
+        FROM sys.master_files
+        WHERE is_sparse = 0
+              AND database_id <> 2
+              AND type_desc = 'LOG'
+    ) TotalLogSizeMB, 
+           SERVERPROPERTY('Collation') ServerCollation, 
+    (
+        SELECT COUNT(*)
+        FROM sys.master_files
+        WHERE database_id = 2
+              AND type = 0
+    ) TempDBDataFileCount, 
+           @ProcessorCount ProcessorCount, 
+    (
+        SELECT value_in_use
+        FROM sys.configurations
+        WHERE name LIKE 'max degree of parallelism'
+    ) MAXDOP,
+	(select value from sys.sysconfigures
+where comment like 'Cost%') CostThreshold,
+           --       @AutoUpdate AutoUpdate,
+           @memory TotalMemory, 
+    (
+        SELECT value_in_use
+        FROM sys.configurations
+        WHERE name LIKE 'min server memory (MB)'
+    ) MinMemory, 
+    (
+        SELECT value_in_use
+        FROM sys.configurations
+        WHERE name LIKE 'max server memory (MB)'
+    ) MaxMemory,
+	(SELECT 
+    CASE 
+        WHEN sql_memory_model_desc = 'LOCK_PAGES' THEN 'LPIM - Enabled'
+        ELSE 'LPIM - Disabled'
+    END AS LPIM_Status
+FROM sys.dm_os_sys_info) LockPagesInMemory,
+(SELECT CONCAT('Total:', @TraceFlagCount, ' (', @TraceFlags, ')') )AS Enabled_Trace_Flags,
+(SELECT CONCAT('Total:', @Count, ' (', @NonStandardConfigs, ')') )AS NonStandardConfigurations,
+           --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
+           @WinName WindowsName, 
+           @WindowsRDP WindowsRDPPort,
+		  case when @IFIValue = 1 then 
+     'Instant file initialization is enabled.'
+else 
+     'Instant file initialization is disabled.' end As InstantFileInitialization,
+           ISNULL(@SystemManufacturer, 'VMware, Inc.') AS SystemManufacturer,
+           CASE
+               WHEN @SystemManufacturer <> 'VMware, Inc.'
+               THEN 'Physical'
+               WHEN @SystemManufacturer IS NULL
+               THEN 'Virtual'
+               WHEN @SystemManufacturer = 'VMware, Inc.'
+               THEN 'Virtual'
+           END AS [Physica/Virtual], 
+           ISNULL(@SystemProductName, 'VMware Virtual Platform') AS SystemProductName, 
+           @CPU_0_Desc AS [CPU Description],
+           --, @CPU_0_MHz AS [CPU 0 MHz]
+           --, @CPU_1_Desc AS [CPU 1 Description]
+           --, @CPU_1_MHz AS [CPU 1 MHz]
+           CASE
+               WHEN SERVERPROPERTY('IsClustered') = 0
+               THEN 'No'
+               WHEN SERVERPROPERTY('IsClustered') = 1
+               THEN 'Yes'
+           END IsClustered, 
+           ISNULL(@WindowsCluster, 'Not Cluster') WindowsCluster, 
+           [DBEngineLogin] = @DBEngineLogin, 
+           [AgentLogin] = @AgentLogin, 
+    (
+        SELECT create_date
+        FROM sys.databases
+        WHERE name LIKE 'tempdb'
+    ) SQLStartTime, 
+    (
+        SELECT DATEADD(s, ((-1) * ([ms_ticks] / 1000)), GETDATE())
+        FROM sys.[dm_os_sys_info]
+    ) OSRebootTime, 
+    (
+        SELECT create_date
+        FROM sys.server_principals
+        WHERE sid = 0x010100000000000512000000
+    ) SQLInstallDate,
+           --(
+           --    SELECT SUBSTRING(
+           --                    (
+           --                        SELECT ' ,'+QUOTENAME(name)
+           --                        FROM sys.sysdatabases
+           --                        WHERE dbid > 4 FOR XML PATH('')
+           --                    ), 3, 8000)
+           --) DBNames,
+	   @TimeZone ServerTimeZone,
+           GETDATE() RunTime;
+		   END
 END TRY
 BEGIN CATCH
     PRINT 'Didn''t work for ' + @@SERVERNAME;
@@ -709,7 +908,8 @@ IF OBJECT_ID('tempdb..#WinNames') IS NOT NULL
 IF OBJECT_ID('tempdb..#aginfo') IS NOT NULL
     DROP TABLE #aginfo
 
-SELECT * FROM #tbl_SQLInformation
+--SELECT * FROM tblSQLInformation
 END
 GO
-#usp_SQLInformation
+EXEC usp_SQLInformation
+GO
