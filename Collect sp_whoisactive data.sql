@@ -1,3 +1,5 @@
+USE tempdb
+GO
 CREATE OR ALTER PROCEDURE usp_LogWhoIsActive
 (
     @destination_table VARCHAR(4000) = 'tblWhoIsActive',
