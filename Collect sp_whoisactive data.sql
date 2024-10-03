@@ -1,10 +1,8 @@
-USE tempdb
-GO
 CREATE OR ALTER PROCEDURE usp_LogWhoIsActive
 (
     @destination_table VARCHAR(4000) = 'tblWhoIsActive',
     @numberOfRuns INT = 2,
-    @delay INT = 60 -- Delay in seconds
+    @delay INT = 9 -- Delay in seconds
 )
 AS
 BEGIN
@@ -14,7 +12,11 @@ BEGIN
         RAISERROR('The number of runs must be greater than 0 and less than 100.', 16, 1);
         RETURN;
     END
-
+	IF @delay < 5 OR @delay >= 300
+    BEGIN
+        RAISERROR('Delay must be between 5 and 300.', 16, 1);
+        RETURN;
+    END
     DECLARE @schema VARCHAR(4000);
     DECLARE @delayTime VARCHAR(8);
 
