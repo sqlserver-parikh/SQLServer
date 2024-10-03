@@ -1,3 +1,5 @@
+USE tempdb
+GO
 CREATE OR ALTER PROCEDURE usp_LogWhoIsActive
 (
     @destination_table VARCHAR(4000) = 'tblWhoIsActive',
@@ -7,14 +9,14 @@ CREATE OR ALTER PROCEDURE usp_LogWhoIsActive
     @tempdbThreshold INT = 400000, -- Tempdb size threshold in KB
     @tempdbblockingRetentionHours INT = 24, -- Retention period for tempdb size threshold in hours
     @blockingRetentionDays INT = 7, -- Retention period for blocking sessions in days
-	@LogData bit = 1
+	@LogData bit = 0
 )
 AS
 BEGIN
 
 	IF @LogData = 0
 	BEGIN
-	EXEC sp_WhoIsActive
+	        EXEC sp_WhoIsActive
              @get_transaction_info = 1,
              @get_plans = 1,
              @get_full_inner_text = 1,
