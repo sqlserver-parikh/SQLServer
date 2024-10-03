@@ -6,17 +6,17 @@ CREATE OR ALTER PROCEDURE usp_LogWhoIsActive
     @numberOfRuns INT = 1,
     @delay INT = 60, -- Delay in seconds
     @deleteAll INT = 10, -- General retention period in days
-    @tempdbThreshold INT = 400000, -- if tempdb current is over 400MB than data will be retain for 10 days
-    @tempdbblockingRetentionHours INT = 24, -- if tempdb current is less than 400MB and no blocking than data will be deleted in 24 hours
-    @blockingRetentionDays INT = 7, -- blocking related data will be deleted afte 7 days.
-    @LogData bit = 0
+    @tempdbThreshold INT = 400000, -- Tempdb size threshold in KB
+    @tempdbblockingRetentionHours INT = 24, -- Retention period for tempdb size threshold in hours
+    @blockingRetentionDays INT = 7, -- Retention period for blocking sessions in days
+	@LogData bit = 1
 )
 AS
 BEGIN
 
 	IF @LogData = 0
 	BEGIN
-	EXEC sp_WhoIsActive
+	        EXEC sp_WhoIsActive
              @get_transaction_info = 1,
              @get_plans = 1,
              @get_full_inner_text = 1,
