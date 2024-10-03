@@ -1,6 +1,8 @@
-CREATE PROCEDURE #usp_readerrorlog
+USE tempdb
+GO
+CREATE OR ALTER PROCEDURE usp_readerrorlog
 (
-    @LookBackHours INT = 24, 
+    @LookBackHours INT = 6, 
     @FilterError VARCHAR(1024) = NULL,
     @StartTime DATETIME = NULL,
     @EndTime DATETIME = NULL,
@@ -303,6 +305,6 @@ BEGIN
     DROP TABLE #ErrorLogFiles;
 END;
 GO
-EXEC #usp_readerrorlog
+EXEC usp_readerrorlog
 GO
-DROP PROCEDURE #usp_readerrorlog
+DROP PROCEDURE usp_readerrorlog
