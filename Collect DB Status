@@ -5,48 +5,81 @@ BEGIN
 CREATE TABLE [dbo].[tblDBStatus](
 	[name] [sysname] NOT NULL,
 	[state_desc] [nvarchar](60) NULL,
-	[RunTime] [datetime] NOT NULL
+	[Ru
+nTime] [datetime] NOT NULL
 ) ON [PRIMARY]
 END
 INSERT INTO tblDBStatus
-SELECT name, state_desc, GETDATE() from sys.databases 
+SELECT name, state_desc COLLATE SQL_Latin1_General_CP1_CI_AS, GETDATE() AS RunTime
+FROM sys.databases
+UNION
+SELECT 'aaa-' + CAST(state_desc AS NVARCHAR(128)) COLLATE SQL_Latin1_General_CP1_CI_AS, CAST(COUNT(*) AS NVARCHAR(128)), GETDATE() AS RunTime
+FROM sys.databases
+GROUP BY state_desc;
+WITH RankedRuns AS (
+    SELECT *,
+           ROW_NUMBER() OVER (partition by name ORDER BY RunTime DESC) AS RowNum
+    FROM tblDBStatus
+)
+DELETE FROM tblDBStatus
+WHERE RunTime < (SELECT max(RunTime) FROM RankedRuns WHERE RowNum = 4);
 GO
+
 CREATE OR ALTER VIEW vwDBStatus
-as 
+AS
 WITH LastTwoEntries AS (
     SELECT 
-       name,
-	   state_desc,
-	   RunTime,
+        name,
+        state_desc,
+        RunTime,
         ROW_NUMBER() OVER (PARTITION BY name ORDER BY RunTime DESC) AS rn
     FROM 
         [DBASupport].[dbo].[tblDBStatus]
 )
-, DBStatusChange AS (
+, CurrentRun AS (
     SELECT 
-        a.name,
-        a.state_desc AS CurrentStatus,
-        b.state_desc AS PreviousStatus,
-        a.RunTime AS CurrentRunTime,
-        b.RunTime AS PreviousRunTime, a.rn
+        name,
+        state_desc AS CurrentStatus,
+        RunTime AS CurrentRunTime
     FROM 
-        LastTwoEntries a
-    LEFT JOIN 
-        LastTwoEntries b
+        LastTwoEntries
+    WHERE rn = 1 AND RunTime = (SELECT RunTime FROM LastTwoEntries WHERE name = 'tempdb' AND rn = 1)
+)
+, PreviousRun AS (
+    SELECT 
+        name,
+        state_desc AS PreviousStatus,
+        RunTime AS PreviousRunTime
+    FROM 
+        LastTwoEntries
+    WHERE RunTime = (SELECT RunTime FROM LastTwoEntries WHERE name = 'tempdb' AND rn = 2 )
+)
+, CombinedRuns AS (
+    SELECT 
+        COALESCE(c.name, p.name) AS name,
+        c.CurrentStatus,
+        p.PreviousStatus,
+        c.CurrentRunTime,
+        p.PreviousRunTime
+    FROM 
+        CurrentRun c
+    FULL OUTER JOIN 
+        PreviousRun p
     ON 
-        a.name = b.name AND a.rn = 1 AND b.rn = 2
+        c.name = p.name
 )
 SELECT 
-   name,
-    CurrentStatus,
-    PreviousStatus,
-    CurrentRunTime,
+    name,
+    ISNULL(CurrentStatus, 'Dropped') AS CurrentStatus,
+    ISNULL(PreviousStatus, 'New') AS PreviousStatus,
+    ISNULL(CurrentRunTime, PreviousRunTime) AS CurrentRunTime,
     PreviousRunTime,
     CASE 
+        WHEN CurrentStatus IS NULL THEN 'Dropped'
+        WHEN PreviousStatus IS NULL THEN 'New'
         WHEN CurrentStatus <> PreviousStatus THEN 'Status Changed'
         ELSE 'No Change'
     END AS StatusChange
 FROM 
-    DBStatusChange
-where rn = 1 
+    CombinedRuns
 GO
