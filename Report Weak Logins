@@ -1,93 +1,91 @@
+CREATE OR ALTER PROCEDURE usp_checkWeakPasswords
+    @WeakPasswords NVARCHAR(MAX) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
 
-SELECT b.name LoginName,
-       Isnull(c.name, 'Public') ServerRole,
-       b.create_date CreateDate,
-       b.modify_date ModifyDate,
-       b.is_disabled Disabled,
-       CASE
-           WHEN d.is_policy_checked = 1
-           THEN 'Yes'
-           ELSE 'No'
-       END PolicyChecked,
-       CASE
-           WHEN d.is_expiration_checked = 1
-           THEN 'Yes'
-           ELSE 'No'
-       END ExpirationChecked
-INTO #cte
-FROM sys.server_role_members a
-     RIGHT JOIN sys.server_principals b ON a.member_principal_id = b.principal_id
-     LEFT JOIN sys.server_principals c ON a.role_principal_id = c.principal_id
-     LEFT JOIN sys.sql_logins d ON b.name = d.name;
-SET NOCOUNT ON;
-DECLARE @WeakPwdList TABLE(WeakPwd NVARCHAR(255));
---Define weak password list
---Use @@Name if users password contain their name
-INSERT INTO @WeakPwdList(WeakPwd)
-       SELECT ''
-       UNION
-       SELECT '123'
-       UNION
-       SELECT '1234'
-       UNION
-       SELECT '12345'
-       UNION
-       SELECT 'abc'
-       UNION
-       SELECT 'default'
-       UNION
-       SELECT 'guest'
-       UNION
-       SELECT '123456'
-       UNION
-       SELECT '@@Name123'
-       UNION
-       SELECT '@@Name'
-       UNION
-       SELECT '@@Name@@Name'
-       UNION
-       SELECT 'admin'
-       UNION
-       SELECT 'Password'
-       UNION
-       SELECT '12345'
-       UNION
-       SELECT 'Welcome#1';
-CREATE TABLE #TEMP
-(DBName    VARCHAR(128),
- UserName  VARCHAR(1280),
- LoginName VARCHAR(1000),
- RoleName  VARCHAR(2000)
-);
-INSERT INTO #TEMP
-EXEC sp_MSforeachdb
-'with cte1
-as 
-(
-select ''["?"]'' DBName, b.name as UserName, c.name as RoleName , suser_sname(b.sid) LoginName
-from [?].dbo.sysmembers a 
-join [?].dbo.sysusers b 
-on a.memberuid = b.uid join [?].dbo.sysusers c
-on a.groupuid = c.uid
-) 
-select DISTINCT DBName, UserName,LoginName, RoleName = substring((select ( '', '' + RoleName)
-from cte1 b
-where a.UserName = b.UserName
-FOR XML PATH ('''')
-),3,8000) FROM cte1 a';
-SELECT DISTINCT
-       @@sERVERNAME ServerName,
-       t1.name [Login Name],
-       REPLACE(t2.WeakPwd, '@@Name', t1.name) AS [Password],
-       #TEMP.RoleName DBRoleName,
-       #cte.ServerRole
-FROM sys.sql_logins t1
-     INNER JOIN @WeakPwdList t2 ON(PWDCOMPARE(t2.WeakPwd, password_hash) = 1
-                                   OR PWDCOMPARE(REPLACE(t2.WeakPwd, '@@Name', t1.name), password_hash) = 1)
-     LEFT JOIN #temp ON t1.name = #TEMP.LoginName
-     LEFT JOIN #cte ON #cte.LoginName = #temp.LoginName
---WHERE t1.name = 'sa';
+    DECLARE @WeakPwdList TABLE (WeakPwd NVARCHAR(255));
+    DECLARE @sql NVARCHAR(MAX);
+
+    -- If @WeakPasswords is provided, split it into individual passwords and insert into @WeakPwdList
+    IF @WeakPasswords IS NOT NULL
+    BEGIN
+        SET @sql = 'INSERT INTO @WeakPwdList (WeakPwd) SELECT value FROM STRING_SPLIT(@WeakPasswords, '','')';
+        EXEC sp_executesql @sql, N'@WeakPwdList TABLE (WeakPwd NVARCHAR(255)), @WeakPasswords NVARCHAR(MAX)', @WeakPwdList = @WeakPwdList OUTPUT, @WeakPasswords = @WeakPasswords;
+    END
+
+    -- Add default weak passwords
+    INSERT INTO @WeakPwdList (WeakPwd)
+    VALUES 
+        ('123456'), ('password'), ('123456789'), ('12345678'), ('12345'), ('1234567'), ('1234567890'), ('qwerty'), ('abc123'), 
+        ('password1'), ('111111'), ('123123'), ('admin'), ('letmein'), ('welcome'), ('monkey'), ('1234'), ('1q2w3e4r'), 
+        ('sunshine'), ('master'), ('123'), ('qwertyuiop'), ('654321'), ('superman'), ('1qaz2wsx'), ('qazwsx'), ('password123'), 
+        ('1q2w3e'), ('123qwe'), ('zxcvbnm'), ('asdfghjkl'), ('michael'), ('princess'), ('charlie'), ('aa12345678'), ('987654321'), 
+        ('qwe123'), ('1q2w3e4r'), ('123qwe'), ('qazwsx'), ('password123'), ('1111'), ('123321'), ('555555'), ('666666'), 
+        ('7777777'), ('888888'), ('999999'), ('000000'), ('121212'), ('112233'), ('123123123'), ('987654'), ('gfhjkm'), 
+        ('159357'), ('abcd1234'), ('131313'), ('789456'), ('luzit2000'), ('aaaaaa'), ('qwerty123'), ('vip'), ('asdasd'), 
+        ('123654'), ('a1b2c3'), ('999999'), ('Groupd2013'), ('1q2w3e'), ('usr'), ('Liman1000'), ('1111111'), ('333333'), 
+        ('9136668099'), ('11111111'), ('mar20lt'), ('gfhjkm'), ('159357'), ('abcd1234'), ('131313'), ('789456'), ('luzit2000'), 
+        ('aaaaaa'), ('zxcvbnm'), ('asdfghjkl'), ('1234qwer'), ('88888888'), ('dragon'), ('987654'), ('888888'), ('qwe123'), 
+        ('football'), ('123456789a'), ('123456789b'), ('123456789c'), ('123456789d'), ('123456789e'), ('123456789f'), 
+        ('123456789g'), ('123456789h'), ('123456789i'), ('123456789j'), ('123456789k'), ('123456789l'), ('123456789m'), 
+        ('123456789n'), ('123456789o'), ('123456789p'), ('123456789q'), ('123456789r'), ('123456789s'), ('123456789t'), 
+        ('123456789u'), ('123456789v'), ('123456789w'), ('123456789x'), ('123456789y'), ('123456789z'),('@@Name'), ('@@Name@@Name'),('@@Name123');
+
+    -- Create temporary tables
+    SELECT b.name AS LoginName,
+           ISNULL(c.name, 'Public') AS ServerRole,
+           b.create_date AS CreateDate,
+           b.modify_date AS ModifyDate,
+           b.is_disabled AS Disabled,
+           CASE WHEN d.is_policy_checked = 1 THEN 'Yes' ELSE 'No' END AS PolicyChecked,
+           CASE WHEN d.is_expiration_checked = 1 THEN 'Yes' ELSE 'No' END AS ExpirationChecked
+    INTO #cte
+    FROM sys.server_role_members a
+         RIGHT JOIN sys.server_principals b ON a.member_principal_id = b.principal_id
+         LEFT JOIN sys.server_principals c ON a.role_principal_id = c.principal_id
+         LEFT JOIN sys.sql_logins d ON b.name = d.name;
+
+    CREATE TABLE #TEMP
+    (
+        DBName    VARCHAR(128),
+        UserName  VARCHAR(1280),
+        LoginName VARCHAR(1000),
+        RoleName  VARCHAR(2000)
+    );
+
+    INSERT INTO #TEMP
+    EXEC sp_MSforeachdb
+    'WITH cte1 AS 
+    (
+        SELECT ''["?"]'' AS DBName, b.name AS UserName, c.name AS RoleName, suser_sname(b.sid) AS LoginName
+        FROM [?].dbo.sysmembers a 
+        JOIN [?].dbo.sysusers b ON a.memberuid = b.uid 
+        JOIN [?].dbo.sysusers c ON a.groupuid = c.uid
+    ) 
+    SELECT DISTINCT DBName, UserName, LoginName, RoleName = SUBSTRING((SELECT ( '', '' + RoleName)
+    FROM cte1 b
+    WHERE a.UserName = b.UserName
+    FOR XML PATH ('''')
+    ), 3, 8000) 
+    FROM cte1 a';
+
+    -- Select weak passwords
+    SELECT DISTINCT
+           @@SERVERNAME AS ServerName,
+           t1.name AS [Login Name],
+           REPLACE(t2.WeakPwd, '@@Name', t1.name) AS [Password],
+           #TEMP.RoleName AS DBRoleName,
+           #cte.ServerRole
+    FROM sys.sql_logins t1
+         INNER JOIN @WeakPwdList t2 ON (PWDCOMPARE(t2.WeakPwd, t1.password_hash) = 1
+                                        OR PWDCOMPARE(REPLACE(t2.WeakPwd, '@@Name', t1.name), t1.password_hash) = 1)
+         LEFT JOIN #TEMP ON t1.name = #TEMP.LoginName
+         LEFT JOIN #cte ON #cte.LoginName = #TEMP.LoginName;
+
+    -- Clean up
+    DROP TABLE #TEMP;
+    DROP TABLE #cte;
+END;
 GO
-DROP TABLE #TEMP;
-GO
-DROP TABLE #cte;
+usp_checkWeakPasswords
