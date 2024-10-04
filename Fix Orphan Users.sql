@@ -1,91 +1,97 @@
---Below script will auto fix orphan users and create script to drop user if no associated login found for particular database.
-SET NOCOUNT ON;
-DECLARE @userid VARCHAR(255);
-CREATE TABLE #OrphanUsers
-(UserName VARCHAR(100),
- USID     NVARCHAR(255)
-);
-INSERT INTO #OrphanUsers
-EXEC sp_change_users_login
-     'report';
-DECLARE FixUser CURSOR
-FOR SELECT UserName
-    FROM #OrphanUsers;
-OPEN FixUser;
-FETCH NEXT FROM FixUser INTO @userid;
-WHILE @@FETCH_STATUS = 0
-    BEGIN TRY
-        EXEC sp_change_users_login
-             'update_one',
-             @userid,
-             @userid;
-        PRINT '--User '+@userid+' is mapped;';
-        FETCH NEXT FROM FixUser INTO @userid;
-    END TRY
-    BEGIN CATCH
-        PRINT 'DROP user '+@userid+';';
-        FETCH NEXT FROM FixUser INTO @userid;
-    END CATCH;
-CLOSE FixUser;
-DEALLOCATE FixUser;
-DROP TABLE #OrphanUsers;
+USE TEMPDB
+GO
+CREATE OR ALTER PROCEDURE usp_FixOrphanUsers
+    @DatabaseName NVARCHAR(255) = '',
+    @PrintOnly BIT = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
 
-/*
---Below script will loop through all database and generate script to map user and drop user.
-SET NOCOUNT ON;
-DECLARE @userid VARCHAR(255);
-DECLARE @dbname VARCHAR(128);
-DECLARE @script NVARCHAR(MAX);
-CREATE TABLE #OrphanUsers
-(DBName   VARCHAR(128),
- UserName VARCHAR(128),
- UserSID  NVARCHAR(255)
-);
-INSERT INTO #OrphanUsers
-EXEC sp_MSforeachdb
-'select "?" DBName,name, sid from [?]..sysusers
-            where issqluser = 1
-            and   (sid is not null and sid <> 0x0)
-            and   (len(sid) <= 16)
-            and   suser_sname(sid) is null
-            order by name';
-DECLARE FixUser CURSOR
-FOR SELECT UserName,
-           DBName
+    DECLARE @userid VARCHAR(255);
+    DECLARE @dbname VARCHAR(128);
+    DECLARE @script NVARCHAR(MAX);
+
+    CREATE TABLE #OrphanUsers
+    (
+        DBName   VARCHAR(128),
+        UserName VARCHAR(128),
+        UserSID  NVARCHAR(255)
+    );
+
+  IF @DatabaseName IS NULL OR @DatabaseName = ''
+  BEGIN
+        INSERT INTO #OrphanUsers
+		EXEC sp_MSforeachdb
+        'IF DATABASEPROPERTYEX(''?'', ''IsReadOnly'') = 0 AND DATABASEPROPERTYEX(''?'', ''Status'') = ''ONLINE''
+         BEGIN
+             SELECT ''?'' AS DBName, name, sid 
+             FROM [?]..sysusers
+             WHERE issqluser = 1
+               AND (sid IS NOT NULL AND sid <> 0x0)
+               AND (LEN(sid) <= 16)
+               AND SUSER_SNAME(sid) IS NULL
+             ORDER BY name
+         END';
+    END
+    ELSE
+    BEGIN
+        SET @script = 'USE ' + QUOTENAME(@DatabaseName) + '; ' +
+                      'INSERT INTO #OrphanUsers (DBName, UserName, UserSID) ' +
+                      'SELECT ''' + @DatabaseName + ''', name, sid ' +
+                      'FROM sysusers ' +
+                      'WHERE issqluser = 1 ' +
+                      'AND (sid IS NOT NULL AND sid <> 0x0) ' +
+                      'AND (LEN(sid) <= 16) ' +
+                      'AND SUSER_SNAME(sid) IS NULL ' +
+                      'ORDER BY name;';
+        EXEC sp_executesql @script;
+    END
+
+    DECLARE FixUser CURSOR FOR
+    SELECT UserName, DBName
     FROM #OrphanUsers;
-OPEN FixUser;
-FETCH NEXT FROM FixUser INTO @userid, @DBName;
-WHILE @@FETCH_STATUS = 0
-    IF EXISTS
-(
-    SELECT 1
-    FROM sys.server_principals
-    WHERE name = @userid
-)
+
+    OPEN FixUser;
+    FETCH NEXT FROM FixUser INTO @userid, @dbname;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @userid)
         BEGIN
-            SET @script = 'USE '+QUOTENAME(@dbname)+';'+CHAR(10)+'EXECUTE sp_change_users_login ''update_one'', '''+@userid+''', '''+@userid+'''';
-            EXEC sp_executesql
-                 @script;
-            PRINT @script;
-            FETCH NEXT FROM FixUser INTO @userid, @DBName;
-        END;
+            SET @script = 'USE ' + QUOTENAME(@dbname) + ';' + CHAR(10) +
+                          'EXEC sp_change_users_login ''update_one'', ''' + @userid + ''', ''' + @userid + ''';';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT @script;
+            END
+            ELSE
+            BEGIN
+                EXEC sp_executesql @script;
+                PRINT @script;
+            END
+        END
         ELSE
         BEGIN
-            IF EXISTS
-(
-    SELECT name
-    FROM sys.schemas
-    WHERE principal_id = USER_ID(@userid)
-)
+            IF EXISTS (SELECT name FROM sys.schemas WHERE principal_id = USER_ID(@userid))
+            BEGIN
+                SET @script = 'USE ' + QUOTENAME(@dbname) + ';' + CHAR(10) +
+                              'DROP USER ' + QUOTENAME(@userid) + ';' + CHAR(10);
+                IF @PrintOnly = 1
                 BEGIN
-                    SET @script = 'USE '+QUOTENAME(@dbname)+';'+CHAR(10)+'DROP USER '+QUOTENAME(@userid)+';'+CHAR(10);
-                    EXEC sp_executesql
-                         @script;
                     PRINT @script;
-                END;
-            FETCH NEXT FROM FixUser INTO @userid, @DBName;
-        END;
-CLOSE FixUser;
-DEALLOCATE FixUser;
-DROP TABLE #OrphanUsers;
-*/
+                END
+                ELSE
+                BEGIN
+                    EXEC sp_executesql @script;
+                    PRINT @script;
+                END
+            END
+        END
+
+        FETCH NEXT FROM FixUser INTO @userid, @dbname;
+    END
+
+    CLOSE FixUser;
+    DEALLOCATE FixUser;
+    DROP TABLE #OrphanUsers;
+END
