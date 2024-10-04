@@ -1,8 +1,5 @@
-USE msdb;
-GO
-
-CREATE OR ALTER PROCEDURE #GetRestoreHistory
-    @RestoreInLastXDays INT = 30,
+CREATE OR ALTER PROCEDURE usp_RestoreReport
+    @RestoreInLastXDays INT = 7,
     @DestinationDBName NVARCHAR(128) = NULL,
     @UserName NVARCHAR(128) = NULL,
     @BackupType CHAR(1) = 'D', -- type L for log restores, I for incremental restores
@@ -36,6 +33,6 @@ BEGIN
     ORDER BY RestoreDate DESC;
 END
 GO
-#GetRestoreHistory
+usp_RestoreReport
 GO
-DROP PROCEDURE #GetRestoreHistory
+DROP PROCEDURE usp_RestoreReport
