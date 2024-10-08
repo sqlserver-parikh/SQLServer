@@ -8,7 +8,7 @@ IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tb
 BEGIN
 CREATE TABLE [dbo].[tblDBStatus](
 	[name] [sysname] NOT NULL,
-	[state_desc] [nvarchar](60) NULL,
+	[state_desc] [nvarchar](128) NULL,
 	[RunTime] [datetime] NOT NULL
 ) ON [PRIMARY]
 END
