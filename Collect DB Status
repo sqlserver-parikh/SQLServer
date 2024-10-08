@@ -8,7 +8,7 @@ IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tb
 BEGIN
 CREATE TABLE [dbo].[tblDBStatus](
 	[name] [sysname] NOT NULL,
-	[state_desc] [nvarchar](128) NULL,
+	[state_desc] [nvarchar](60) NULL,
 	[RunTime] [datetime] NOT NULL
 ) ON [PRIMARY]
 END
@@ -16,8 +16,11 @@ INSERT INTO tblDBStatus
 SELECT 
     name, 
     CASE 
-        WHEN is_read_only = 1 THEN state_desc + '; ReadOnly' 
-        ELSE state_desc 
+        WHEN state_desc = 'ONLINE' AND user_access_desc = 'SINGLE_USER' THEN state_desc + ', SingleUser'
+        WHEN state_desc = 'ONLINE' AND user_access_desc = 'RESTRICTED_USER' THEN state_desc + ', RestrictedUser'
+        WHEN state_desc = 'ONLINE' AND is_read_only = 1 THEN state_desc + ', ReadOnly'
+        WHEN state_desc = 'ONLINE' AND is_read_only = 0 THEN state_desc
+        ELSE state_desc
     END COLLATE SQL_Latin1_General_CP1_CI_AS AS CurrentStatus,
     GETDATE() AS CurrentRunTime
 FROM 
@@ -34,7 +37,7 @@ WITH RankedRuns AS (
 DELETE FROM tblDBStatus
 WHERE RunTime < (SELECT max(RunTime) FROM RankedRuns WHERE  name = 'tempdb' and RowNum = 4);
 GO
-EXEC usp_DBStatus
+--EXEC usp_DBStatus
 GO
 CREATE OR ALTER VIEW vwDBStatus
 AS
@@ -48,11 +51,14 @@ WITH LastTwoEntries AS (
         [dbo].[tblDBStatus]
 )
 , CurrentRun AS (
-   SELECT 
+SELECT 
     name, 
     CASE 
-        WHEN is_read_only = 1 THEN state_desc + '; ReadOnly' 
-        ELSE state_desc 
+        WHEN state_desc = 'ONLINE' AND user_access_desc = 'SINGLE_USER' THEN state_desc + ', SingleUser'
+        WHEN state_desc = 'ONLINE' AND user_access_desc = 'RESTRICTED_USER' THEN state_desc + ', RestrictedUser'
+        WHEN state_desc = 'ONLINE' AND is_read_only = 1 THEN state_desc + ', ReadOnly'
+        WHEN state_desc = 'ONLINE' AND is_read_only = 0 THEN state_desc
+        ELSE state_desc
     END COLLATE SQL_Latin1_General_CP1_CI_AS AS CurrentStatus,
     GETDATE() AS CurrentRunTime
 FROM 
