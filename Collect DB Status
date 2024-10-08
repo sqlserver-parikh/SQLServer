@@ -1,5 +1,7 @@
 --Schdule this to run as SQL Agent job daily and at start of SQL Server Agent
 --Below view can provide easy validation if any database count status changed from previous day. 
+--Schdule this to run as SQL Agent job daily and at start of SQL Server Agent
+--Below view can provide easy validation if any database count status changed from previous day. 
 USE tempdb
 GO
 CREATE OR ALTER PROCEDURE usp_DBStatus
@@ -9,8 +11,7 @@ BEGIN
 CREATE TABLE [dbo].[tblDBStatus](
 	[name] [sysname] NOT NULL,
 	[state_desc] [nvarchar](60) NULL,
-	[Ru
-nTime] [datetime] NOT NULL
+	[RunTime] [datetime] NOT NULL
 ) ON [PRIMARY]
 END
 INSERT INTO tblDBStatus
@@ -28,6 +29,8 @@ WITH RankedRuns AS (
 DELETE FROM tblDBStatus
 WHERE RunTime < (SELECT max(RunTime) FROM RankedRuns WHERE RowNum = 4);
 GO
+EXEC usp_DBStatus
+GO
 CREATE OR ALTER VIEW vwDBStatus
 AS
 WITH LastTwoEntries AS (
@@ -40,13 +43,12 @@ WITH LastTwoEntries AS (
         [dbo].[tblDBStatus]
 )
 , CurrentRun AS (
-    SELECT 
-        name,
-        state_desc AS CurrentStatus,
-        RunTime AS CurrentRunTime
-    FROM 
-        LastTwoEntries
-    WHERE RunTime = (SELECT RunTime FROM LastTwoEntries WHERE name = 'tempdb' AND rn = 1)
+   SELECT name, state_desc COLLATE SQL_Latin1_General_CP1_CI_AS CurrentStatus, GETDATE() AS CurrentRunTime
+FROM sys.databases
+UNION
+SELECT 'aaa-' + CAST(state_desc AS NVARCHAR(128)) COLLATE SQL_Latin1_General_CP1_CI_AS, CAST(COUNT(*) AS NVARCHAR(128)), GETDATE() AS RunTime
+FROM sys.databases
+GROUP BY state_desc
 )
 , PreviousRun AS (
     SELECT 
@@ -55,7 +57,7 @@ WITH LastTwoEntries AS (
         RunTime AS PreviousRunTime
     FROM 
         LastTwoEntries
-    WHERE RunTime = (SELECT RunTime FROM LastTwoEntries WHERE name = 'tempdb' AND rn = 2 )
+    WHERE RunTime = (SELECT RunTime FROM LastTwoEntries WHERE name = 'tempdb' AND rn = 1 )
 )
 , CombinedRuns AS (
     SELECT 
@@ -86,3 +88,5 @@ SELECT
 FROM 
     CombinedRuns
 GO
+
+select * from vwDBStatus
