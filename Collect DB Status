@@ -1,6 +1,6 @@
---Schdule this to run as SQL Agent job daily and at start of SQL Server Agent
+--Schdule this to run as SQL Agent job daily or weekly as per need
 --Below view can provide easy validation if any database count status changed from previous day. 
-USE tempdb
+USE DBASupport
 GO
 CREATE OR ALTER PROCEDURE usp_DBStatus
 AS
@@ -8,7 +8,7 @@ IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tb
 BEGIN
 CREATE TABLE [dbo].[tblDBStatus](
 	[name] [sysname] NOT NULL,
-	[state_desc] [nvarchar](60) NULL,
+	[state_desc] [nvarchar](128) NULL,
 	[RunTime] [datetime] NOT NULL
 ) ON [PRIMARY]
 END
@@ -21,14 +21,22 @@ SELECT
         WHEN state_desc = 'ONLINE' AND is_read_only = 1 THEN state_desc + ', ReadOnly'
         WHEN state_desc = 'ONLINE' AND is_read_only = 0 THEN state_desc
         ELSE state_desc
+    END 
+    + CASE 
+        WHEN is_trustworthy_on = 1 THEN ', Trustworthy'
     END COLLATE SQL_Latin1_General_CP1_CI_AS AS CurrentStatus,
     GETDATE() AS CurrentRunTime
 FROM 
     sys.databases
 UNION
-SELECT 'aaa-' + CAST(state_desc AS NVARCHAR(128)) COLLATE SQL_Latin1_General_CP1_CI_AS, CAST(COUNT(*) AS NVARCHAR(128)), GETDATE() AS RunTime
-FROM sys.databases
-GROUP BY state_desc;
+SELECT 
+    'aaa-' + CAST(state_desc AS NVARCHAR(128)) COLLATE SQL_Latin1_General_CP1_CI_AS, 
+    CAST(COUNT(*) AS NVARCHAR(128)), 
+    GETDATE() AS RunTime
+FROM 
+    sys.databases
+GROUP BY 
+    state_desc;
 WITH RankedRuns AS (
     SELECT *,
            ROW_NUMBER() OVER (partition by name ORDER BY RunTime DESC) AS RowNum
@@ -59,14 +67,22 @@ SELECT
         WHEN state_desc = 'ONLINE' AND is_read_only = 1 THEN state_desc + ', ReadOnly'
         WHEN state_desc = 'ONLINE' AND is_read_only = 0 THEN state_desc
         ELSE state_desc
+    END 
+    + CASE 
+        WHEN is_trustworthy_on = 1 THEN ', Trustworthy'
     END COLLATE SQL_Latin1_General_CP1_CI_AS AS CurrentStatus,
     GETDATE() AS CurrentRunTime
 FROM 
     sys.databases
 UNION
-SELECT 'aaa-' + CAST(state_desc AS NVARCHAR(128)) COLLATE SQL_Latin1_General_CP1_CI_AS, CAST(COUNT(*) AS NVARCHAR(128)), GETDATE() AS RunTime
-FROM sys.databases
-GROUP BY state_desc
+SELECT 
+    'aaa-' + CAST(state_desc AS NVARCHAR(128)) COLLATE SQL_Latin1_General_CP1_CI_AS, 
+    CAST(COUNT(*) AS NVARCHAR(128)), 
+    GETDATE() AS RunTime
+FROM 
+    sys.databases
+GROUP BY 
+    state_desc
 )
 , PreviousRun AS (
     SELECT 
