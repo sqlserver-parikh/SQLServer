@@ -1,5 +1,5 @@
 -- Specify the database name
-DECLARE @DatabaseName NVARCHAR(128) = 'ngprod'; -- Replace with your database name
+DECLARE @DatabaseName NVARCHAR(128) = 'mydb'; -- Replace with your database name
 DECLARE @StartDate DATETIME = '2023-10-04 11:00:04.000';
 
 -- Common Table Expression (CTE) to retrieve log backup information
