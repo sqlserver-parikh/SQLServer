@@ -3,7 +3,7 @@ GO
 
 CREATE OR ALTER PROCEDURE usp_DeleteBackupFiles
 (
-    @DatabaseName NVARCHAR(128) = NULL, -- Specific database name
+    @DatabaseName NVARCHAR(128) = null, -- Specific database name
     @RetainDays INT = null,
     @BackupTypeToDelete CHAR(1) = NULL, -- 'D' for full, 'I' for incremental, 'L' for log
 	@LookBackDays INT = 90 ,
@@ -13,8 +13,15 @@ CREATE OR ALTER PROCEDURE usp_DeleteBackupFiles
 AS
 BEGIN
     SET NOCOUNT ON;
+ -- Ensure that either @RetainDays or @MaxBackupFilesToKeep is provided but not both
+IF ( (@RetainDays IS NULL AND @MaxBackupFilesToKeep IS NULL) OR 
+     (@RetainDays IS NOT NULL AND @MaxBackupFilesToKeep IS NOT NULL))
+BEGIN
+    RAISERROR('Either @RetainDays or @MaxBackupFilesToKeep must be provided, but not both.', 16, 1);
+    RETURN;
+END
 
-    IF @LookBackDays < 0
+   IF @LookBackDays < 0
     BEGIN
         RAISERROR('LookBackDays must be positive number.', 16, 1);
         RETURN;
