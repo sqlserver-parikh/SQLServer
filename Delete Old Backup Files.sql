@@ -5,9 +5,9 @@ CREATE OR ALTER PROCEDURE usp_DeleteBackupFiles
 (
     @DatabaseName NVARCHAR(128) = null, -- Specific database name
     @RetainDays INT = null,
-    @BackupTypeToDelete CHAR(1) = NULL, -- 'D' for full, 'I' for incremental, 'L' for log
+    @BackupTypeToDelete CHAR(1) = 'L', -- 'D' for full, 'I' for incremental, 'L' for log
 	@LookBackDays INT = 90 ,
-	@MaxBackupFilesToKeep INT = 0,
+	@MaxBackupFilesToKeep INT = 2,
     @PrintOnly BIT = 0
 )
 AS
