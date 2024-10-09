@@ -1,9 +1,9 @@
 --Schedule this procedure run under agent job. Most of monitoring tool should be able to alert as its logged in application event log.
-CREATE OR ALTER PROCEDURE uspBackupIssue 
+CREATE OR ALTER PROCEDURE usp_BackupIssue 
 (
     @fullbackup int = 36, 
     @logbackup int = 6, 
-    @lookbackdays int = 30
+    @lookbackdays int = 15
 )
 AS
 BEGIN
