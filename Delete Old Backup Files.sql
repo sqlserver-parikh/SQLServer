@@ -3,36 +3,24 @@ GO
 
 CREATE OR ALTER PROCEDURE usp_DeleteBackupFiles
 (
-    @RetainDays INT = 2,
-    @BackupTypeToDelete CHAR(1) = NULL, -- 'D' for full, 'I' for incremental, 'L' for log
-    @BackupLocation VARCHAR(MAX) = NULL,
     @DatabaseName NVARCHAR(128) = NULL, -- Specific database name
+    @RetainDays INT = null,
+    @BackupTypeToDelete CHAR(1) = NULL, -- 'D' for full, 'I' for incremental, 'L' for log
 	@LookBackDays INT = 90 ,
-    @PrintOnly BIT = 1
+	@MaxBackupFilesToKeep INT = 0,
+    @PrintOnly BIT = 0
 )
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    IF @LookBackDays <= 0
+    IF @LookBackDays < 0
     BEGIN
-        RAISERROR('LookBackDays must be greater than 0.', 16, 1);
+        RAISERROR('LookBackDays must be positive number.', 16, 1);
         RETURN;
     END
     IF @BackupTypeToDelete IS NULL OR @BackupTypeToDelete = ''
         SET @BackupTypeToDelete = '%';
-
-    DECLARE @DefaultBackupDirectory VARCHAR(200);
-    EXECUTE master..xp_instance_regread
-        N'HKEY_LOCAL_MACHINE',
-        N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer',
-        N'BackupDirectory',
-        @DefaultBackupDirectory OUTPUT;
-
-    IF @BackupLocation IS NULL OR @BackupLocation = ''
-        SET @DefaultBackupDirectory = SUBSTRING(@DefaultBackupDirectory, 1, 3);
-    ELSE 
-        SET @DefaultBackupDirectory = @BackupLocation;
 
     IF OBJECT_ID('tempdb..#BackupFiles') IS NOT NULL
         DROP TABLE #BackupFiles;
@@ -70,8 +58,7 @@ BEGIN
            b.description
     FROM msdb..backupmediafamily a
     INNER JOIN msdb..backupset b ON a.media_set_id = b.media_set_id
-    WHERE CONVERT(DATETIME, b.backup_start_date, 102) < GETDATE() - @RetainDays
-    AND b.type LIKE '%' + @BackupTypeToDelete + '%'
+    WHERE b.type LIKE '%' + @BackupTypeToDelete + '%'
 	AND b.backup_start_date >= DATEADD(DAY, -@LookBackDays, GETDATE())
     AND (@DatabaseName IS NULL OR b.database_name = @DatabaseName);
 
@@ -92,6 +79,33 @@ BEGIN
     CLOSE file_cursor;
     DEALLOCATE file_cursor;
 
+	IF (@MaxBackupFilesToKeep IS NOT NULL) OR (@MaxBackupFilesToKeep <> '')
+	BEGIN
+	  ;WITH RankedFiles AS
+    (
+        SELECT 
+            physical_device_name,
+            database_name,
+            backup_type,
+            ROW_NUMBER() OVER (PARTITION BY database_name, backup_type ORDER BY backup_start_date DESC) AS RowNum
+        FROM #BackupFiles
+    )
+    DELETE FROM #BackupFiles
+    WHERE physical_device_name IN 
+    (
+        SELECT physical_device_name 
+        FROM RankedFiles 
+        WHERE RowNum <= @MaxBackupFilesToKeep
+    );
+
+	END
+
+	IF (@RetainDays IS NOT NULL ) OR (@RetainDays <> '')
+	BEGIN 
+		DELETE FROM #BackupFiles
+		WHERE backup_start_date > DATEADD(DD,-@RetainDays,GETDATE())
+	END
+
     IF @PrintOnly = 1
     BEGIN
         SELECT 
@@ -105,7 +119,7 @@ BEGIN
             backup_size,
             logical_device_name,
             backupset_name,
-            description
+            description, file_exists 
         FROM #BackupFiles
         WHERE file_exists = 1;
     END
