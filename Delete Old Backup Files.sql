@@ -7,12 +7,18 @@ CREATE OR ALTER PROCEDURE usp_DeleteBackupFiles
     @BackupTypeToDelete CHAR(1) = NULL, -- 'D' for full, 'I' for incremental, 'L' for log
     @BackupLocation VARCHAR(MAX) = NULL,
     @DatabaseName NVARCHAR(128) = NULL, -- Specific database name
+	@LookBackDays INT = 90 ,
     @PrintOnly BIT = 1
 )
 AS
 BEGIN
     SET NOCOUNT ON;
 
+    IF @LookBackDays <= 0
+    BEGIN
+        RAISERROR('LookBackDays must be greater than 0.', 16, 1);
+        RETURN;
+    END
     IF @BackupTypeToDelete IS NULL OR @BackupTypeToDelete = ''
         SET @BackupTypeToDelete = '%';
 
@@ -66,6 +72,7 @@ BEGIN
     INNER JOIN msdb..backupset b ON a.media_set_id = b.media_set_id
     WHERE CONVERT(DATETIME, b.backup_start_date, 102) < GETDATE() - @RetainDays
     AND b.type LIKE '%' + @BackupTypeToDelete + '%'
+	AND b.backup_start_date >= DATEADD(DAY, -@LookBackDays, GETDATE())
     AND (@DatabaseName IS NULL OR b.database_name = @DatabaseName);
 
     DECLARE @physical_device_name NVARCHAR(512);
