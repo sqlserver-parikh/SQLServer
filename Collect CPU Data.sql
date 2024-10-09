@@ -1,6 +1,6 @@
 USE tempdb
 GO
-CREATE OR ALTER PROCEDURE [dbo].[spCPUUsage](@retentiondays INT = 30)
+CREATE OR ALTER PROCEDURE [dbo].[usp_CPUUsage](@retentiondays INT = 30)
 AS
      SET NOCOUNT ON;
      SET QUOTED_IDENTIFIER ON;
@@ -47,4 +47,4 @@ AS
      WHERE RunTime < DATEADD(DD, -@retentiondays, GETDATE());
 GO
 
-EXEC [spCPUUsage]
+EXEC [usp_CPUUsage]
