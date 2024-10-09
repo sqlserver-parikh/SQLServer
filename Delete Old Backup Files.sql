@@ -3,29 +3,31 @@ GO
 
 CREATE OR ALTER PROCEDURE usp_DeleteBackupFiles
 (
-    @DatabaseName NVARCHAR(128) = null, -- Specific database name
+    @DatabaseName NVARCHAR(128) = NULL, -- Specific database name
     @RetainDays INT = 30,
-    @BackupTypeToDelete CHAR(1) = null, -- 'D' for full, 'I' for incremental, 'L' for log
-	@LookBackDays INT = 60 ,
-	@MaxBackupFilesToKeep INT = null,
+    @BackupTypeToDelete CHAR(1) = NULL, -- 'D' for full, 'I' for incremental, 'L' for log
+    @LookBackDays INT = 60,
+    @MaxBackupFilesToKeep INT = NULL,
     @PrintOnly BIT = 1
-)                                                          
+)
 AS
 BEGIN
     SET NOCOUNT ON;
- -- Ensure that either @RetainDays or @MaxBackupFilesToKeep is provided but not both
-IF ( (@RetainDays IS NULL AND @MaxBackupFilesToKeep IS NULL) OR 
-     (@RetainDays IS NOT NULL AND @MaxBackupFilesToKeep IS NOT NULL))
-BEGIN
-    RAISERROR('Either @RetainDays or @MaxBackupFilesToKeep must be provided, but not both.', 16, 1);
-    RETURN;
-END
 
-   IF @LookBackDays < 0
+    -- Ensure that either @RetainDays or @MaxBackupFilesToKeep is provided but not both
+    IF ((@RetainDays IS NULL AND @MaxBackupFilesToKeep IS NULL) OR 
+        (@RetainDays IS NOT NULL AND @MaxBackupFilesToKeep IS NOT NULL))
     BEGIN
-        RAISERROR('LookBackDays must be positive number.', 16, 1);
+        RAISERROR('Either @RetainDays or @MaxBackupFilesToKeep must be provided, but not both.', 16, 1);
         RETURN;
     END
+
+    IF @LookBackDays < 0
+    BEGIN
+        RAISERROR('LookBackDays must be a positive number.', 16, 1);
+        RETURN;
+    END
+
     IF @BackupTypeToDelete IS NULL OR @BackupTypeToDelete = ''
         SET @BackupTypeToDelete = '%';
 
@@ -48,54 +50,55 @@ END
         file_exists BIT
     );
 
-	IF @RetainDays IS NOT NULL
-	BEGIN
-    INSERT INTO #BackupFiles (physical_device_name, database_name, backup_start_date, backup_finish_date, expiration_date, backup_type, backup_size, logical_device_name, backupset_name, description)
-    SELECT a.physical_device_name, 
-           b.database_name,
-           b.backup_start_date,
-           b.backup_finish_date,
-           b.expiration_date,
-           CASE b.type
-               WHEN 'D' THEN 'Database'
-               WHEN 'L' THEN 'Log'
-               WHEN 'I' THEN 'Incremental'
-           END AS backup_type,
-           b.backup_size,
-           a.logical_device_name,
-           b.name AS backupset_name,
-           b.description
-    FROM msdb..backupmediafamily a
-    INNER JOIN msdb..backupset b ON a.media_set_id = b.media_set_id
-    WHERE b.type LIKE '%' + @BackupTypeToDelete + '%'
-	AND b.backup_start_date >= DATEADD(DAY, -@LookBackDays, GETDATE())
-    AND (@DatabaseName IS NULL OR b.database_name = @DatabaseName);
-	END
-	ELSE 
-	BEGIN
-	    INSERT INTO #BackupFiles (physical_device_name, database_name, backup_start_date, backup_finish_date, expiration_date, backup_type, backup_size, logical_device_name, backupset_name, description)
-    SELECT a.physical_device_name, 
-           b.database_name,
-           b.backup_start_date,
-           b.backup_finish_date,
-           b.expiration_date,
-           CASE b.type
-               WHEN 'D' THEN 'Database'
-               WHEN 'L' THEN 'Log'
-               WHEN 'I' THEN 'Incremental'
-           END AS backup_type,
-           b.backup_size,
-           a.logical_device_name,
-           b.name AS backupset_name,
-           b.description
-    FROM msdb..backupmediafamily a
-    INNER JOIN msdb..backupset b ON a.media_set_id = b.media_set_id
-    WHERE b.type LIKE '%' + @BackupTypeToDelete + '%'
-	and backup_start_date < DATEADD(DD,-@RetainDays,GETDATE())
-	AND b.backup_start_date >= DATEADD(DAY, -@LookBackDays, GETDATE())
-    AND (@DatabaseName IS NULL OR b.database_name = @DatabaseName);
-	END
-	DECLARE @physical_device_name NVARCHAR(512);
+    IF @RetainDays IS NOT NULL
+    BEGIN
+        INSERT INTO #BackupFiles (physical_device_name, database_name, backup_start_date, backup_finish_date, expiration_date, backup_type, backup_size, logical_device_name, backupset_name, description)
+        SELECT a.physical_device_name, 
+               b.database_name,
+               b.backup_start_date,
+               b.backup_finish_date,
+               b.expiration_date,
+               CASE b.type
+                   WHEN 'D' THEN 'Database'
+                   WHEN 'L' THEN 'Log'
+                   WHEN 'I' THEN 'Incremental'
+               END AS backup_type,
+               b.backup_size,
+               a.logical_device_name,
+               b.name AS backupset_name,
+               b.description
+        FROM msdb..backupmediafamily a
+        INNER JOIN msdb..backupset b ON a.media_set_id = b.media_set_id
+        WHERE b.type LIKE '%' + @BackupTypeToDelete + '%'
+        AND b.backup_start_date >= DATEADD(DAY, -@LookBackDays, GETDATE())
+        AND (@DatabaseName IS NULL OR b.database_name = @DatabaseName);
+    END
+    ELSE 
+    BEGIN
+        INSERT INTO #BackupFiles (physical_device_name, database_name, backup_start_date, backup_finish_date, expiration_date, backup_type, backup_size, logical_device_name, backupset_name, description)
+        SELECT a.physical_device_name, 
+               b.database_name,
+               b.backup_start_date,
+               b.backup_finish_date,
+               b.expiration_date,
+               CASE b.type
+                   WHEN 'D' THEN 'Database'
+                   WHEN 'L' THEN 'Log'
+                   WHEN 'I' THEN 'Incremental'
+               END AS backup_type,
+               b.backup_size,
+               a.logical_device_name,
+               b.name AS backupset_name,
+               b.description
+        FROM msdb..backupmediafamily a
+        INNER JOIN msdb..backupset b ON a.media_set_id = b.media_set_id
+        WHERE b.type LIKE '%' + @BackupTypeToDelete + '%'
+        AND b.backup_start_date < DATEADD(DD, -@RetainDays, GETDATE())
+        AND b.backup_start_date >= DATEADD(DAY, -@LookBackDays, GETDATE())
+        AND (@DatabaseName IS NULL OR b.database_name = @DatabaseName);
+    END
+
+    DECLARE @physical_device_name NVARCHAR(512);
     DECLARE @file_exists INT;
     DECLARE file_cursor CURSOR FOR 
     SELECT physical_device_name FROM #BackupFiles;
@@ -112,26 +115,25 @@ END
     CLOSE file_cursor;
     DEALLOCATE file_cursor;
 
-	IF (@MaxBackupFilesToKeep IS NOT NULL) OR (@MaxBackupFilesToKeep <> '')
-	BEGIN
-	  ;WITH RankedFiles AS
-    (
-        SELECT 
-            physical_device_name,
-            database_name,
-            backup_type,
-            ROW_NUMBER() OVER (PARTITION BY database_name, backup_type ORDER BY backup_start_date DESC) AS RowNum
-        FROM #BackupFiles
-    )
-    DELETE FROM #BackupFiles
-    WHERE physical_device_name IN 
-    (
-        SELECT physical_device_name 
-        FROM RankedFiles 
-        WHERE RowNum <= @MaxBackupFilesToKeep
-    );
-
-	END
+    IF @MaxBackupFilesToKeep IS NOT NULL
+    BEGIN
+        ;WITH RankedFiles AS
+        (
+            SELECT 
+                physical_device_name,
+                database_name,
+                backup_type,
+                ROW_NUMBER() OVER (PARTITION BY database_name, backup_type ORDER BY backup_start_date DESC) AS RowNum
+            FROM #BackupFiles
+        )
+        DELETE FROM #BackupFiles
+        WHERE physical_device_name IN 
+        (
+            SELECT physical_device_name 
+            FROM RankedFiles 
+            WHERE RowNum <= @MaxBackupFilesToKeep
+        );
+    END
 
     IF @PrintOnly = 1
     BEGIN
@@ -146,7 +148,8 @@ END
             backup_size,
             logical_device_name,
             backupset_name,
-            description, file_exists 
+            description, 
+            file_exists 
         FROM #BackupFiles
         WHERE file_exists = 1;
     END
