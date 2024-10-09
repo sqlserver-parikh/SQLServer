@@ -1,4 +1,4 @@
-CREATE OR ALTER procedure [dbo].[spCleanupTable]
+CREATE OR ALTER procedure [usp_CleanupTable]
     @tablename nvarchar(256) = 'incident',
     @entiretable bit = 0,
     @filtercolumnName nvarchar(256) = 'createat',
