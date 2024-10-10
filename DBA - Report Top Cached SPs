@@ -1,6 +1,6 @@
 CREATE OR ALTER PROCEDURE usp_GetTopCachedSPs 
 (
-    @DBName NVARCHAR(128) = 'db_qsrdrivethrucloud_dev', -- Database name to query against. Must be a valid database name
+    @DBName NVARCHAR(128) = 'test', -- Database name to query against. Must be a valid database name
     @SortColumn INT = 2,   -- Sort column. Possible values: 
                             -- 1 = 'execution_count', 
 							-- 2 = 'Calls/Minute'
