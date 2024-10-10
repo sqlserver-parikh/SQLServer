@@ -76,4 +76,4 @@ END
 GO
 
 -- Example of executing the stored procedure
-EXEC usp_IndexAnalysis @BADIndex = 1, @MissingIndex = 1, @DatabaseName = 'db_qsrdrivethrucloud_dev';
+EXEC usp_IndexAnalysis @BADIndex = 1, @MissingIndex = 1, @DatabaseName = 'test';
