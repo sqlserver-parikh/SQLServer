@@ -1,11 +1,12 @@
 CREATE OR ALTER PROCEDURE usp_GetTopCachedSPs 
 (
     @DBName NVARCHAR(128) = 'db_qsrdrivethrucloud_dev', -- Database name to query against. Must be a valid database name
-    @SortColumn INT = 1,   -- Sort column. Possible values: 
+    @SortColumn INT = 2,   -- Sort column. Possible values: 
                             -- 1 = 'execution_count', 
-                            -- 2 = 'Avg Elapsed Time', 
-                            -- 3 = 'Avg Worker Time', 
-                            -- 4 = 'Avg Logical Reads'
+							-- 2 = 'Calls/Minute'
+                            -- 3 = 'Avg Elapsed Time', 
+                            -- 4 = 'Avg Worker Time', 
+                            -- 5 = 'Avg Logical Reads'
     @SortOrder NVARCHAR(4) = 'DESC', -- Sort order. Possible values: 'ASC', 'DESC'
     @TopN INT = 25,       -- Number of rows to return. Must be a positive integer
     @ShowQueryPlan BIT = 1 -- Show query plan. Possible values: 1 = Yes, 0 = No
@@ -22,9 +23,9 @@ BEGIN
     END
 
     -- Validation for @SortColumn
-    IF @SortColumn NOT IN (1, 2, 3, 4)
+    IF @SortColumn NOT IN (1, 2, 3, 4,5 )
     BEGIN
-        RAISERROR('Invalid value for @SortColumn. Possible values: 1 = ''execution_count'', 2 = ''Avg Elapsed Time'', 3 = ''Avg Worker Time'', 4 = ''Avg Logical Reads''.', 16, 1);
+        RAISERROR('Invalid value for @SortColumn. Possible values: 1 = ''execution_count'', 2 = ''Calls/Minute'', 3 = ''Avg Elapsed Time'', 4 = ''Avg Worker Time'', 5 = ''Avg Logical Reads''.', 16, 1);
         RETURN;
     END
 
@@ -68,14 +69,12 @@ BEGIN
 ORDER BY 
         CASE 
             WHEN @SortColumn = 1 THEN qs.execution_count 
-            WHEN @SortColumn = 2 THEN (qs.total_elapsed_time / qs.execution_count)
-            WHEN @SortColumn = 3 THEN (qs.total_worker_time / qs.execution_count) 
-            WHEN @SortColumn = 4 THEN (qs.total_logical_reads / qs.execution_count)
+			WHEN @SortColumn = 2 THEN (ISNULL(qs.execution_count / DATEDIFF(Minute, qs.cached_time, GETDATE()), 0))
+            WHEN @SortColumn = 3 THEN (qs.total_elapsed_time / qs.execution_count)
+            WHEN @SortColumn = 4 THEN (qs.total_worker_time / qs.execution_count) 
+            WHEN @SortColumn = 5 THEN (qs.total_logical_reads / qs.execution_count)
         END ' + @SortOrder + ' OPTION (RECOMPILE);'; 
     -- Pass the parameters to sp_executesql
-	print @query
-	print @sortcolumn
-	print @sortorder
     EXEC sp_executesql @Query,
         N'@TopN INT, @SortColumn INT, @DBName NVARCHAR(128)',
         @TopN = @TopN, 
