@@ -1,0 +1,168 @@
+USE tempdb;
+GO
+
+CREATE OR ALTER PROCEDURE usp_ResourceUtilization
+(
+    @CPUByDB BIT = 0,      -- Set to 1 to include CPU utilization by database
+    @IOByDB BIT = 0,       -- Set to 1 to include I/O utilization by database
+    @BufferByDB BIT = 0,   -- Set to 1 to include Buffer usage by database
+    @TempDBByDB BIT = 0,   -- Set to 1 to include tempdb version store space usage by database
+    @TopWaits BIT = 0      -- Set to 1 to include top waits by database
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Check CPU utilization by database
+    IF @CPUByDB = 1
+    BEGIN
+        WITH DB_CPU_Stats
+        AS
+        (
+            SELECT pa.DatabaseID, DB_Name(pa.DatabaseID) AS [Database Name], SUM(qs.total_worker_time / 1000) AS [CPU_Time_Ms]
+            FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
+            CROSS APPLY 
+            (
+                SELECT CONVERT(int, value) AS [DatabaseID]
+                FROM sys.dm_exec_plan_attributes(qs.plan_handle)
+                WHERE attribute = N'dbid'
+            ) AS pa
+            GROUP BY DatabaseID
+        )
+        SELECT ROW_NUMBER() OVER (ORDER BY [CPU_Time_Ms] DESC) AS [CPU Rank],
+               [Database Name], [CPU_Time_Ms] AS [CPU Time (ms)], 
+               CAST([CPU_Time_Ms] * 1.0 / SUM([CPU_Time_Ms]) OVER() * 100.0 AS DECIMAL(5, 2)) AS [CPU Percent]
+        FROM DB_CPU_Stats
+        WHERE DatabaseID <> 32767 -- ResourceDB
+        ORDER BY [CPU Rank] OPTION (RECOMPILE);
+    END
+
+    -- Check I/O utilization by database
+    IF @IOByDB = 1
+    BEGIN
+        WITH Aggregate_IO_Statistics
+        AS 
+        (
+            SELECT DB_NAME(database_id) AS [Database Name],
+                   CAST(SUM(num_of_bytes_read + num_of_bytes_written) / 1048576 AS DECIMAL(12, 2)) AS [ioTotalMB],
+                   CAST(SUM(num_of_bytes_read) / 1048576 AS DECIMAL(12, 2)) AS [ioReadMB],
+                   CAST(SUM(num_of_bytes_written) / 1048576 AS DECIMAL(12, 2)) AS [ioWriteMB]
+            FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS [DM_IO_STATS]
+            GROUP BY database_id
+        )
+        SELECT ROW_NUMBER() OVER (ORDER BY ioTotalMB DESC) AS [I/O Rank],
+               [Database Name], ioTotalMB AS [Total I/O (MB)],
+               CAST(ioTotalMB / SUM(ioTotalMB) OVER () * 100.0 AS DECIMAL(5, 2)) AS [Total I/O %],
+               ioReadMB AS [Read I/O (MB)], 
+               CAST(ioReadMB / SUM(ioReadMB) OVER () * 100.0 AS DECIMAL(5, 2)) AS [Read I/O %],
+               ioWriteMB AS [Write I/O (MB)], 
+               CAST(ioWriteMB / SUM(ioWriteMB) OVER () * 100.0 AS DECIMAL(5, 2)) AS [Write I/O %]
+        FROM Aggregate_IO_Statistics
+        ORDER BY [I/O Rank] OPTION (RECOMPILE);
+    END
+
+    -- Check buffer usage by database
+    IF @BufferByDB = 1
+    BEGIN
+        WITH AggregateBufferPoolUsage
+        AS
+        (
+            SELECT DB_NAME(database_id) AS [Database Name],
+                   CAST(COUNT_BIG(*) * 8 / 1024.0 AS DECIMAL(15, 2))  AS [CachedSize]
+            FROM sys.dm_os_buffer_descriptors WITH (NOLOCK)
+            WHERE database_id <> 32767 -- ResourceDB
+            GROUP BY DB_NAME(database_id)
+        )
+        SELECT ROW_NUMBER() OVER (ORDER BY CachedSize DESC) AS [Buffer Pool Rank], 
+               [Database Name], CachedSize AS [Cached Size (MB)],
+               CAST(CachedSize / SUM(CachedSize) OVER() * 100.0 AS DECIMAL(5, 2)) AS [Buffer Pool Percent]
+        FROM AggregateBufferPoolUsage
+        ORDER BY [Buffer Pool Rank] OPTION (RECOMPILE);
+    END
+
+    -- Check tempdb version store space usage by database
+    IF @TempDBByDB = 1
+    BEGIN
+        SELECT DB_NAME(database_id) AS [Database Name],
+               reserved_page_count AS [Version Store Reserved Page Count], 
+               reserved_space_kb / 1024 AS [Version Store Reserved Space (MB)] 
+        FROM sys.dm_tran_version_store_space_usage WITH (NOLOCK) 
+        ORDER BY reserved_space_kb / 1024 DESC OPTION (RECOMPILE);
+    END
+
+
+    IF @TopWaits = 1
+    BEGIN
+        WITH [Waits] 
+        AS 
+        (
+            SELECT wait_type, 
+                   wait_time_ms / 1000.0 AS [WaitS],
+                   (wait_time_ms - signal_wait_time_ms) / 1000.0 AS [ResourceS],
+                   signal_wait_time_ms / 1000.0 AS [SignalS],
+                   waiting_tasks_count AS [WaitCount],
+                   100.0 * wait_time_ms / SUM(wait_time_ms) OVER() AS [Percentage],
+                   ROW_NUMBER() OVER(ORDER BY wait_time_ms DESC) AS [RowNum]
+            FROM sys.dm_os_wait_stats WITH (NOLOCK)
+            WHERE [wait_type] NOT IN 
+            (
+                N'BROKER_EVENTHANDLER', N'BROKER_RECEIVE_WAITFOR', N'BROKER_TASK_STOP',
+                N'BROKER_TO_FLUSH', N'BROKER_TRANSMITTER', N'CHECKPOINT_QUEUE',
+                N'CHKPT', N'CLR_AUTO_EVENT', N'CLR_MANUAL_EVENT', N'CLR_SEMAPHORE', N'CXCONSUMER',
+                N'DBMIRROR_DBM_EVENT', N'DBMIRROR_EVENTS_QUEUE', N'DBMIRROR_WORKER_QUEUE',
+                N'DBMIRRORING_CMD', N'DIRTY_PAGE_POLL', N'DISPATCHER_QUEUE_SEMAPHORE',
+                N'EXECSYNC', N'FSAGENT', N'FT_IFTS_SCHEDULER_IDLE_WAIT', N'FT_IFTSHC_MUTEX',
+                N'HADR_CLUSAPI_CALL', N'HADR_FILESTREAM_IOMGR_IOCOMPLETION', N'HADR_LOGCAPTURE_WAIT', 
+                N'HADR_NOTIFICATION_DEQUEUE', N'HADR_TIMER_TASK', N'HADR_WORK_QUEUE',
+                N'KSOURCE_WAKEUP', N'LAZYWRITER_SLEEP', N'LOGMGR_QUEUE', 
+                N'MEMORY_ALLOCATION_EXT', N'ONDEMAND_TASK_QUEUE',
+                N'PARALLEL_REDO_DRAIN_WORKER', N'PARALLEL_REDO_LOG_CACHE', N'PARALLEL_REDO_TRAN_LIST',
+                N'PARALLEL_REDO_WORKER_SYNC', N'PARALLEL_REDO_WORKER_WAIT_WORK',
+                N'PREEMPTIVE_HADR_LEASE_MECHANISM', N'PREEMPTIVE_SP_SERVER_DIAGNOSTICS',
+                N'PREEMPTIVE_OS_LIBRARYOPS', N'PREEMPTIVE_OS_COMOPS', N'PREEMPTIVE_OS_CRYPTOPS',
+                N'PREEMPTIVE_OS_PIPEOPS', N'PREEMPTIVE_OS_AUTHENTICATIONOPS',
+                N'PREEMPTIVE_OS_GENERICOPS', N'PREEMPTIVE_OS_VERIFYTRUST',
+                N'PREEMPTIVE_OS_FILEOPS', N'PREEMPTIVE_OS_DEVICEOPS', N'PREEMPTIVE_OS_QUERYREGISTRY',
+                N'PREEMPTIVE_OS_WRITEFILE',
+                N'PREEMPTIVE_XE_CALLBACKEXECUTE', N'PREEMPTIVE_XE_DISPATCHER',
+                N'PREEMPTIVE_XE_GETTARGETSTATE', N'PREEMPTIVE_XE_SESSIONCOMMIT',
+                N'PREEMPTIVE_XE_TARGETINIT', N'PREEMPTIVE_XE_TARGETFINALIZE',
+                N'PWAIT_ALL_COMPONENTS_INITIALIZED', N'PWAIT_DIRECTLOGCONSUMER_GETNEXT',
+                N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
+                N'QDS_ASYNC_QUEUE',
+                N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP', N'REQUEST_FOR_DEADLOCK_SEARCH',
+                N'RESOURCE_QUEUE', N'SERVER_IDLE_CHECK', N'SLEEP_BPOOL_FLUSH', N'SLEEP_DBSTARTUP',
+                N'SLEEP_DCOMSTARTUP', N'SLEEP_MASTERDBREADY', N'SLEEP_MASTERMDREADY',
+                N'SLEEP_MASTERUPGRADED', N'SLEEP_MSDBSTARTUP', N'SLEEP_SYSTEMTASK', N'SLEEP_TASK',
+                N'SLEEP_TEMPDBSTARTUP', N'SNI_HTTP_ACCEPT', N'SP_SERVER_DIAGNOSTICS_SLEEP',
+                N'SQLTRACE_BUFFER_FLUSH', N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', N'SQLTRACE_WAIT_ENTRIES',
+                N'WAIT_FOR_RESULTS', N'WAITFOR', N'WAITFOR_TASKSHUTDOWN', N'WAIT_XTP_HOST_WAIT',
+                N'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', N'WAIT_XTP_CKPT_CLOSE', N'WAIT_XTP_RECOVERY',
+                N'XE_BUFFERMGR_ALLPROCESSED_EVENT', N'XE_DISPATCHER_JOIN',
+                N'XE_DISPATCHER_WAIT', N'XE_LIVE_TARGET_TVF', N'XE_TIMER_EVENT'
+            )
+            AND waiting_tasks_count > 0
+        )
+        SELECT
+            MAX(W1.wait_type) AS [WaitType],
+            CAST(MAX(W1.Percentage) AS DECIMAL(5,2)) AS [Wait Percentage],
+            CAST((MAX(W1.WaitS) / MAX(W1.WaitCount)) AS DECIMAL(16,4)) AS [AvgWait_Sec],
+            CAST((MAX(W1.ResourceS) / MAX(W1.WaitCount)) AS DECIMAL(16,4)) AS [AvgRes_Sec],
+            CAST((MAX(W1.SignalS) / MAX(W1.WaitCount)) AS DECIMAL(16,4)) AS [AvgSig_Sec], 
+            CAST(MAX(W1.WaitS) AS DECIMAL(16,2)) AS [Wait_Sec],
+            CAST(MAX(W1.ResourceS) AS DECIMAL(16,2)) AS [Resource_Sec],
+            CAST(MAX(W1.SignalS) AS DECIMAL(16,2)) AS [Signal_Sec],
+            MAX(W1.WaitCount) AS [Wait Count],
+            CAST(N'https://www.sqlskills.com/help/waits/' + W1.wait_type AS XML) AS [Help/Info URL]
+        FROM Waits AS W1
+        INNER JOIN Waits AS W2
+            ON W2.RowNum <= W1.RowNum
+        GROUP BY W1.RowNum, W1.wait_type
+        HAVING SUM(W2.Percentage) - MAX(W1.Percentage) < 99 -- percentage threshold
+        OPTION (RECOMPILE);
+    END
+END
+GO
+
+-- Example of executing the stored procedure
+EXEC usp_ResourceUtilization @CPUByDB = 1, @IOByDB = 1, @BufferByDB = 1, @TempDBByDB = 1, @TopWaits = 1;
