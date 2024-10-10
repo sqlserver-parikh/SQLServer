@@ -1,0 +1,86 @@
+CREATE OR ALTER PROCEDURE usp_GetTopCachedSPs 
+(
+    @DBName NVARCHAR(128) = 'db_qsrdrivethrucloud_dev', -- Database name to query against. Must be a valid database name
+    @SortColumn INT = 1,   -- Sort column. Possible values: 
+                            -- 1 = 'execution_count', 
+                            -- 2 = 'Avg Elapsed Time', 
+                            -- 3 = 'Avg Worker Time', 
+                            -- 4 = 'Avg Logical Reads'
+    @SortOrder NVARCHAR(4) = 'DESC', -- Sort order. Possible values: 'ASC', 'DESC'
+    @TopN INT = 25,       -- Number of rows to return. Must be a positive integer
+    @ShowQueryPlan BIT = 1 -- Show query plan. Possible values: 1 = Yes, 0 = No
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Validation for @DBName
+    IF NOT EXISTS(SELECT * FROM sys.databases WHERE name = @DBName)
+    BEGIN
+        RAISERROR('Invalid database name specified in @DBName. Please provide a valid database name.', 16, 1);
+        RETURN;
+    END
+
+    -- Validation for @SortColumn
+    IF @SortColumn NOT IN (1, 2, 3, 4)
+    BEGIN
+        RAISERROR('Invalid value for @SortColumn. Possible values: 1 = ''execution_count'', 2 = ''Avg Elapsed Time'', 3 = ''Avg Worker Time'', 4 = ''Avg Logical Reads''.', 16, 1);
+        RETURN;
+    END
+
+    -- Validation for @SortOrder
+    IF @SortOrder NOT IN ('ASC', 'DESC')
+    BEGIN
+        RAISERROR('Invalid value for @SortOrder. Possible values: ''ASC'', ''DESC''.', 16, 1);
+        RETURN;
+    END
+
+    -- Validation for @TopN
+    IF @TopN <= 0
+    BEGIN
+        RAISERROR('Invalid value for @TopN. Must be a positive integer.', 16, 1);
+        RETURN;
+    END
+
+    DECLARE @Query NVARCHAR(MAX);
+    
+    -- Construct the dynamic SQL query
+    SET @Query = N'SELECT TOP(@TopN) 
+       ''' + (@DBName) + ''' DBName, p.name AS [SP Name], 
+        qs.execution_count AS [Execution Count],
+        ISNULL(qs.execution_count / DATEDIFF(Minute, qs.cached_time, GETDATE()), 0) AS [Calls/Minute],
+        qs.total_elapsed_time / qs.execution_count AS [Avg Elapsed Time],
+        qs.total_worker_time / qs.execution_count AS [Avg Worker Time],    
+        qs.total_logical_reads / qs.execution_count AS [Avg Logical Reads],
+        CASE 
+            WHEN CONVERT(NVARCHAR(MAX), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N''%<MissingIndexes>%'' 
+            THEN 1 ELSE 0 
+        END AS [Has Missing Index],
+        CONVERT(NVARCHAR(25), qs.last_execution_time, 20) AS [Last Execution Time],
+        CONVERT(NVARCHAR(25), qs.cached_time, 20) AS [Plan Cached Time]' 
+        + CASE WHEN @ShowQueryPlan = 1 THEN ', qp.query_plan AS [Query Plan]' ELSE '' END + 
+    N' FROM ' + QUOTENAME(@DBName) + N'.sys.procedures AS p WITH (NOLOCK)
+        INNER JOIN ' + QUOTENAME(@DBName) + N'.sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
+            ON p.[object_id] = qs.[object_id]
+        CROSS APPLY ' + QUOTENAME(@DBName) + N'.sys.dm_exec_query_plan(qs.plan_handle) AS qp
+        WHERE qs.database_id = DB_ID(@DBName)
+        AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0
+ORDER BY 
+        CASE 
+            WHEN @SortColumn = 1 THEN qs.execution_count 
+            WHEN @SortColumn = 2 THEN (qs.total_elapsed_time / qs.execution_count)
+            WHEN @SortColumn = 3 THEN (qs.total_worker_time / qs.execution_count) 
+            WHEN @SortColumn = 4 THEN (qs.total_logical_reads / qs.execution_count)
+        END ' + @SortOrder + ' OPTION (RECOMPILE);'; 
+    -- Pass the parameters to sp_executesql
+	print @query
+	print @sortcolumn
+	print @sortorder
+    EXEC sp_executesql @Query,
+        N'@TopN INT, @SortColumn INT, @DBName NVARCHAR(128)',
+        @TopN = @TopN, 
+        @SortColumn = @SortColumn,
+        @DBName = @DBName; -- Pass all parameters to the dynamic query
+END;
+GO
+EXEC usp_GetTopCachedSPs 
