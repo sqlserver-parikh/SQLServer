@@ -1,7 +1,7 @@
 USE tempdb 
 GO
 CREATE OR ALTER PROCEDURE usp_SQLInformation
-(@LogToTable bit = 0, @Retention int = 26) 
+(@LogToTable bit = 1, @Retention int = 26) 
 AS
 BEGIN
 
@@ -908,8 +908,8 @@ IF OBJECT_ID('tempdb..#WinNames') IS NOT NULL
 IF OBJECT_ID('tempdb..#aginfo') IS NOT NULL
     DROP TABLE #aginfo
 
---SELECT * FROM tblSQLInformation
 END
 GO
 EXEC usp_SQLInformation
 GO
+SELECT * FROM tblSQLInformation
