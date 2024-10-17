@@ -4,7 +4,7 @@ GO
 CREATE OR ALTER PROCEDURE usp_RPOWorstCaseMinutes
 (
     @DbNames NVARCHAR(MAX) = '', -- NULL: All DBs
-    @LookBackDays INT = 7,       -- Must be > 0
+    @LookBackDays INT = 4,       -- Must be > 0
     @LogToTable BIT = 0
 )
 AS
@@ -56,10 +56,10 @@ BEGIN
                bs.backup_finish_date, bsPrior.backup_finish_date AS backup_finish_date_prior,
                DATEDIFF(ss, bsPrior.backup_finish_date, bs.backup_finish_date) AS backup_gap_seconds
         INTO #backup_gaps
-        FROM msdb.dbo.backupset AS bs
+        FROM msdb.dbo.backupset AS bs WITH (NOLOCK)
         CROSS APPLY ( 
             SELECT TOP 1 bs1.backup_set_id, bs1.backup_finish_date
-            FROM msdb.dbo.backupset AS bs1
+            FROM msdb.dbo.backupset AS bs1 WITH (NOLOCK)
             WHERE bs.database_name = bs1.database_name
                   AND bs.database_guid = bs1.database_guid
                   AND bs.backup_finish_date > bs1.backup_finish_date
