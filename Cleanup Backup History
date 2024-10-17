@@ -3,88 +3,112 @@ GO
 
 CREATE OR ALTER PROCEDURE usp_DeleteBackupHistory
 (
-    @DeleteLogDays int = 30,
-    @DeleteDiffDays int = 90,
-    @AllDeleteDays int = 365
+    @DeleteLogDays INT = 30,
+    @DeleteDiffDays INT = 30,
+    @DeleteFullDays INT = 30, -- Number of days to retain full backups before considering deletion
+    @AllDeleteDays INT = 365 -- First full backup for every month will be retained for AllDeleteDays
 )
 AS
 BEGIN
     DECLARE @LogDeleteDate DATETIME;
     SET @LogDeleteDate = DATEADD(DAY, -@DeleteLogDays, GETDATE());
 
-    -- Delete related records from backupfilegroup
-    DELETE FROM msdb..backupfilegroup
-    WHERE backup_set_id IN (
-                               SELECT backup_set_id
-                               FROM msdb..backupset
-                               WHERE type = 'L'
-                                     AND backup_finish_date < @LogDeleteDate
-                           );
-
-    -- Delete related records from backupfile
-    DELETE FROM msdb..backupfile
-    WHERE backup_set_id IN (
-                               SELECT backup_set_id
-                               FROM msdb..backupset
-                               WHERE type = 'L'
-                                     AND backup_finish_date < @LogDeleteDate
-                           );
-
-    -- Delete records from backupmediafamily
-    DELETE FROM msdb..backupmediafamily
-    WHERE media_set_id IN (
-                              SELECT media_set_id
-                              FROM msdb..backupset
-                              WHERE type = 'L'
-                                    AND backup_finish_date < @LogDeleteDate
-                          );
-
-    -- Delete records from backupset
-    DELETE FROM msdb..backupset
-    WHERE type = 'L'
-          AND backup_finish_date < @LogDeleteDate;
+    DECLARE @DiffDeleteDate DATETIME;
+    SET @DiffDeleteDate = DATEADD(DAY, -@DeleteDiffDays, GETDATE());
 
     DECLARE @AllDeleteDate DATETIME;
     SET @AllDeleteDate = DATEADD(DAY, -@AllDeleteDays, GETDATE());
 
-    -- Delete old backup history
-    EXEC msdb..sp_delete_backuphistory @oldest_date = @AllDeleteDate;
+    -- Temporary tables to store IDs for deletion
+    CREATE TABLE #backup_set_id (backup_set_id INT);
+    CREATE TABLE #restore_history_id (restore_history_id INT);
+    CREATE TABLE #media_set_id (media_set_id INT);
 
-    -- Additional logic for DeleteDiffDays if needed
-    -- For example, deleting differential backups older than @DeleteDiffDays
-    DECLARE @DiffDeleteDate DATETIME;
-    SET @DiffDeleteDate = DATEADD(DAY, -@DeleteDiffDays, GETDATE());
+    -- Insert IDs for log backups older than @DeleteLogDays
+    INSERT INTO #backup_set_id
+    SELECT backup_set_id
+    FROM msdb..backupset WITH (NOLOCK)
+    WHERE type = 'L'
+    AND backup_finish_date < @LogDeleteDate;
+
+    -- Insert IDs for differential backups older than @DeleteDiffDays
+    INSERT INTO #backup_set_id
+    SELECT backup_set_id
+    FROM msdb..backupset WITH (NOLOCK)
+    WHERE type = 'I'
+    AND backup_finish_date < @DiffDeleteDate;
+
+    -- Insert IDs for full backups older than @DeleteFullDays, excluding the first full backup of each month
+    WITH FirstFullBackupOfMonth AS (
+        SELECT 
+            database_name,
+            MIN(backup_finish_date) AS FirstBackupDate
+        FROM 
+            msdb..backupset WITH (NOLOCK)
+        WHERE 
+            type = 'D'
+            AND backup_finish_date < DATEADD(DAY, -@DeleteFullDays, GETDATE())
+        GROUP BY 
+            database_name, 
+            YEAR(backup_finish_date), 
+            MONTH(backup_finish_date)
+    )
+    INSERT INTO #backup_set_id
+    SELECT backup_set_id
+    FROM msdb..backupset WITH (NOLOCK)
+    WHERE type = 'D'
+    AND backup_finish_date < DATEADD(DAY, -@DeleteFullDays, GETDATE())
+    AND backup_finish_date NOT IN (
+        SELECT FirstBackupDate
+        FROM FirstFullBackupOfMonth
+    );
+
+    -- Insert restore history IDs related to the backup sets
+    INSERT INTO #restore_history_id
+    SELECT restore_history_id
+    FROM msdb..restorehistory WITH (NOLOCK)
+    WHERE backup_set_id IN (SELECT backup_set_id FROM #backup_set_id);
+
+    -- Insert media set IDs related to the backup sets
+    INSERT INTO #media_set_id
+    SELECT media_set_id
+    FROM msdb..backupset WITH (NOLOCK)
+    WHERE backup_set_id IN (SELECT backup_set_id FROM #backup_set_id);
+
+    -- Delete related records in the correct order
+    DELETE FROM msdb..restorefile
+    WHERE restore_history_id IN (SELECT restore_history_id FROM #restore_history_id);
+
+    DELETE FROM msdb..restorefilegroup
+    WHERE restore_history_id IN (SELECT restore_history_id FROM #restore_history_id);
+
+    DELETE FROM msdb..restorehistory
+    WHERE restore_history_id IN (SELECT restore_history_id FROM #restore_history_id);
 
     DELETE FROM msdb..backupfilegroup
-    WHERE backup_set_id IN (
-                               SELECT backup_set_id
-                               FROM msdb..backupset
-                               WHERE type = 'I'
-                                     AND backup_finish_date < @DiffDeleteDate
-                           );
+    WHERE backup_set_id IN (SELECT backup_set_id FROM #backup_set_id);
 
-    -- Delete related records from backupfile
     DELETE FROM msdb..backupfile
-    WHERE backup_set_id IN (
-                               SELECT backup_set_id
-                               FROM msdb..backupset
-                               WHERE type = 'I'
-                                     AND backup_finish_date < @DiffDeleteDate
-                           );
+    WHERE backup_set_id IN (SELECT backup_set_id FROM #backup_set_id);
 
-    -- Delete records from backupmediafamily
     DELETE FROM msdb..backupmediafamily
-    WHERE media_set_id IN (
-                              SELECT media_set_id
-                              FROM msdb..backupset
-                              WHERE type = 'I'
-                                    AND backup_finish_date < @DiffDeleteDate
-                          );
+    WHERE media_set_id IN (SELECT media_set_id FROM #media_set_id)
+    AND ((SELECT COUNT(*) FROM msdb..backupset WITH (NOLOCK) WHERE media_set_id = msdb..backupmediafamily.media_set_id) = 0);
 
-    -- Delete records from backupset
+    DELETE FROM msdb..backupmediaset
+    WHERE media_set_id IN (SELECT media_set_id FROM #media_set_id)
+    AND ((SELECT COUNT(*) FROM msdb..backupset WITH (NOLOCK) WHERE media_set_id = msdb..backupmediaset.media_set_id) = 0);
+
     DELETE FROM msdb..backupset
-    WHERE type = 'I'
-          AND backup_finish_date < @DiffDeleteDate;
+    WHERE backup_set_id IN (SELECT backup_set_id FROM #backup_set_id);
+
+    -- Clean up old backup history
+    EXEC msdb..sp_delete_backuphistory @oldest_date = @AllDeleteDate;
+
+    -- Clean up temporary tables
+    DROP TABLE #backup_set_id;
+    DROP TABLE #restore_history_id;
+    DROP TABLE #media_set_id;
 END
 GO
 
