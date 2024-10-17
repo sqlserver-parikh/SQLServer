@@ -1,4 +1,6 @@
-CREATE OR ALTER PROCEDURE #usp_BackupReport
+USE tempdb
+GO
+CREATE OR ALTER PROCEDURE usp_BackupReport
 (
     @DbNames NVARCHAR(MAX) = '' -- NULL: All DBs
   , @BackupType CHAR(1) = 'L'   -- D: Full, L: Log, I: Incremental, NULL: All backup types
@@ -104,16 +106,16 @@ BEGIN
         RPOWorstCaseBackupSetPriorFinishTime DATETIME
     );
 
-    -- Calculate RPOWorstCaseMinutes
+     -- Calculate RPOWorstCaseMinutes
     DECLARE @StringToExecute NVARCHAR(MAX) = N'
         SELECT bs.database_name, bs.database_guid, bs.backup_set_id, bsPrior.backup_set_id AS backup_set_id_prior,
                bs.backup_finish_date, bsPrior.backup_finish_date AS backup_finish_date_prior,
                DATEDIFF(ss, bsPrior.backup_finish_date, bs.backup_finish_date) AS backup_gap_seconds
         INTO #backup_gaps
-        FROM msdb.dbo.backupset AS bs
+        FROM msdb.dbo.backupset AS bs WITH (NOLOCK)
         CROSS APPLY ( 
             SELECT TOP 1 bs1.backup_set_id, bs1.backup_finish_date
-            FROM msdb.dbo.backupset AS bs1
+            FROM msdb.dbo.backupset AS bs1 WITH (NOLOCK)
             WHERE bs.database_name = bs1.database_name
                   AND bs.database_guid = bs1.database_guid
                   AND bs.backup_finish_date > bs1.backup_finish_date
@@ -126,18 +128,24 @@ BEGIN
         CREATE CLUSTERED INDEX cx_backup_gaps ON #backup_gaps (database_name, database_guid, backup_set_id, backup_finish_date, backup_gap_seconds);
 
         WITH max_gaps AS (
-            SELECT g.database_name, MAX(g.backup_gap_seconds) AS max_backup_gap_seconds 
+            SELECT g.database_name, g.database_guid, g.backup_set_id, g.backup_set_id_prior, g.backup_finish_date_prior, 
+                   g.backup_finish_date, MAX(g.backup_gap_seconds) AS max_backup_gap_seconds 
             FROM #backup_gaps AS g
-            GROUP BY g.database_name
+            GROUP BY g.database_name, g.database_guid, g.backup_set_id, g.backup_set_id_prior, g.backup_finish_date_prior, g.backup_finish_date
         )
-        INSERT INTO #RPOWorstCase (DatabaseName, RPOWorstCaseMinutes)
-        SELECT database_name, max_backup_gap_seconds / 60.0
-        FROM max_gaps;
+        INSERT INTO #RPOWorstCase (DatabaseName, RPOWorstCaseMinutes, RPOWorstCaseBackupSetFinishTime, RPOWorstCaseBackupSetPriorFinishTime)
+        SELECT bg.database_name, bg.max_backup_gap_seconds / 60.0,
+               bg.backup_finish_date AS RPOWorstCaseBackupSetFinishTime,
+               bg.backup_finish_date_prior AS RPOWorstCaseBackupSetPriorFinishTime
+        FROM max_gaps bg
+        LEFT OUTER JOIN max_gaps bgBigger ON bg.database_name = bgBigger.database_name AND bg.database_guid = bgBigger.database_guid AND bg.max_backup_gap_seconds < bgBigger.max_backup_gap_seconds
+        WHERE bgBigger.backup_set_id IS NULL;
 
         DROP TABLE #backup_gaps;
     ';
 
     EXEC sp_executesql @StringToExecute, N'@DbNames NVARCHAR(MAX), @LookBackDays INT', @DbNames, @LookBackDays;
+
 	------------------------------
 
 		SELECT 
@@ -312,6 +320,9 @@ ORDER BY
              , [Last Differential Backup]
              , [Last Log Backup]
 			 , RWC.RPOWorstCaseMinutes
+			   ,RWC.RPOWorstCaseBackupSetFinishTime
+              , RWC.RPOWorstCaseBackupSetPriorFinishTime
+
              , DS.FreeSpace
              , [0]
              , [-1]
@@ -351,4 +362,4 @@ left join #RPOWorstCase RWC ON D.name = RWC.DatabaseName
     END
 END
 GO
-#usp_BackupReport
+EXEC usp_BackupReport
