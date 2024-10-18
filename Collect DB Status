@@ -1,6 +1,6 @@
 --Schdule this to run as SQL Agent job daily or weekly as per need
 --Below view can provide easy validation if any database count status changed from previous day. 
-USE DBASupport
+USE tempdb
 GO
 CREATE OR ALTER PROCEDURE usp_DBStatus
 AS
