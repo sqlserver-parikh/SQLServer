@@ -9,11 +9,27 @@ CREATE OR ALTER PROCEDURE usp_RPOWorstCaseMinutes
 )
 AS
 BEGIN
+
+CREATE TABLE #TempHelpDB (
+    name NVARCHAR(128),
+    db_size NVARCHAR(128),
+    owner NVARCHAR(128),
+    dbid SMALLINT,
+    created DATETIME,
+    status NVARCHAR(512),
+    compatibility_level TINYINT
+);
+
+-- Step 2: Insert the results of sp_helpdb into the temporary table
+INSERT INTO #TempHelpDB
+EXEC sp_helpdb;
+
     IF @LogToTable = 1
     BEGIN
         IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblRPODetails]') AND type in (N'U'))
         CREATE TABLE [dbo].tblRPODetails (
             [DatabaseName] NVARCHAR(128) NULL,
+			[DBSize] nvarchar(128) NULL,
             [RPOWorstCaseMinutes] INT NULL,
             [RecoveryModel] NVARCHAR(60) NULL,
             [DBStatus] VARCHAR(20) NOT NULL,
@@ -94,7 +110,7 @@ BEGIN
     IF @LogToTable = 1
     BEGIN
         INSERT INTO tblRPODetails
-        SELECT DatabaseName, RPOWorstCaseMinutes,
+        SELECT DatabaseName, THD.db_size, RPOWorstCaseMinutes,
                D.recovery_model_desc AS RecoveryModel,
                CASE WHEN D.is_read_only = 1 THEN 'READ ONLY' ELSE 'READ WRITE' END AS DBStatus,
                GETUTCDATE() AS RunTimeUTC,
@@ -102,13 +118,14 @@ BEGIN
                RPOWorstCaseBackupSetPriorFinishTime,
                @LookBackDays AS LookBackDays
         FROM #RPOWorstCase RWC
-        LEFT JOIN sys.databases D ON RWC.DatabaseName = D.name;
+        LEFT JOIN sys.databases D ON RWC.DatabaseName = D.name
+		LEFT JOIN #TempHelpDB THD ON THD.name = D.name;
 
         -- Clean up old records
         DELETE FROM tblRPODetails
         WHERE RunTimeUTC < DATEADD(DD, -180, GETUTCDATE());
 
-        SELECT @@SERVERNAME AS ServerName, DatabaseName, RPOWorstCaseMinutes,
+        SELECT @@SERVERNAME AS ServerName, DatabaseName,THD.db_size, RPOWorstCaseMinutes,
                D.recovery_model_desc AS RecoveryModel,
                CASE WHEN D.is_read_only = 1 THEN 'READ ONLY' ELSE 'READ WRITE' END AS DBStatus,
                GETUTCDATE() AS RunTimeUTC,
@@ -117,11 +134,12 @@ BEGIN
                @LookBackDays AS LookBackDays
         FROM #RPOWorstCase RWC
         LEFT JOIN sys.databases D ON RWC.DatabaseName = D.name
+		LEFT JOIN #TempHelpDB THD ON THD.name = D.name
         ORDER BY RPOWorstCaseMinutes DESC;
     END
     ELSE 
     BEGIN 
-        SELECT @@SERVERNAME AS ServerName, DatabaseName, RPOWorstCaseMinutes,
+        SELECT @@SERVERNAME AS ServerName, DatabaseName,THD.db_size, RPOWorstCaseMinutes,
                D.recovery_model_desc AS RecoveryModel,
                CASE WHEN D.is_read_only = 1 THEN 'READ ONLY' ELSE 'READ WRITE' END AS DBStatus,
                GETUTCDATE() AS RunTimeUTC,
@@ -130,6 +148,7 @@ BEGIN
                @LookBackDays AS LookBackDays
         FROM #RPOWorstCase RWC
         LEFT JOIN sys.databases D ON RWC.DatabaseName = D.name
+		LEFT JOIN #TempHelpDB THD ON THD.name = D.name
         ORDER BY RPOWorstCaseMinutes DESC;
     END
 
