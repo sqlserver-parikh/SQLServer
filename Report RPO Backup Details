@@ -125,7 +125,7 @@ EXEC sp_helpdb;
         DELETE FROM tblRPODetails
         WHERE RunTimeUTC < DATEADD(DD, -180, GETUTCDATE());
 
-        SELECT @@SERVERNAME AS ServerName, DatabaseName,THD.db_size, RPOWorstCaseMinutes,
+        SELECT @@SERVERNAME AS ServerName, DatabaseName,THD.db_size DBSize, RPOWorstCaseMinutes,
                D.recovery_model_desc AS RecoveryModel,
                CASE WHEN D.is_read_only = 1 THEN 'READ ONLY' ELSE 'READ WRITE' END AS DBStatus,
                GETUTCDATE() AS RunTimeUTC,
@@ -139,7 +139,7 @@ EXEC sp_helpdb;
     END
     ELSE 
     BEGIN 
-        SELECT @@SERVERNAME AS ServerName, DatabaseName,THD.db_size, RPOWorstCaseMinutes,
+        SELECT @@SERVERNAME AS ServerName, DatabaseName,THD.db_size DBSize, RPOWorstCaseMinutes,
                D.recovery_model_desc AS RecoveryModel,
                CASE WHEN D.is_read_only = 1 THEN 'READ ONLY' ELSE 'READ WRITE' END AS DBStatus,
                GETUTCDATE() AS RunTimeUTC,
