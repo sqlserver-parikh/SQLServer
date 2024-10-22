@@ -1,54 +1,158 @@
 USE tempdb;
 GO
-
-CREATE OR ALTER PROCEDURE usp_RPOWorstCaseMinutes
+IF EXISTS
+(
+    SELECT *
+    FROM sys.objects
+    WHERE object_id = OBJECT_ID(N'[dbo].[tblRPODetails]')
+          AND type in ( N'U' )
+)
+    DROP TABLE tblRPODetails
+go
+IF EXISTS
+(
+    SELECT *
+    FROM sys.objects
+    WHERE object_id = OBJECT_ID(N'[dbo].[usp_RPOWorstCaseMinutes]')
+          AND type in ( N'P' )
+)
+    DROP PROCEDURE usp_RPOWorstCaseMinutes
+GO
+CREATE PROCEDURE usp_RPOWorstCaseMinutes
 (
     @DbNames NVARCHAR(MAX) = '', -- NULL: All DBs
-    @LookBackDays INT = 4,       -- Must be > 0
-    @LogToTable BIT = 0
+    @LookBackDays INT = 7,       -- Must be > 0
+    @LogToTable BIT = 1
 )
 AS
 BEGIN
 
-CREATE TABLE #TempHelpDB (
-    name NVARCHAR(128),
-    db_size NVARCHAR(128),
-    owner NVARCHAR(128),
-    dbid SMALLINT,
-    created DATETIME,
-    status NVARCHAR(512),
-    compatibility_level TINYINT
-);
+    -- Temporary table to store log backup statistics
+    CREATE TABLE #LogBackupStats
+    (
+        DatabaseName NVARCHAR(128),
+        TotalLogBackupSizeMB DECIMAL(18, 2),
+        LogBackupCount INT,
+        AvgBackupSpeedMBps DECIMAL(18, 2),
+        TotalTimeSpentSeconds INT
+    );
 
--- Step 2: Insert the results of sp_helpdb into the temporary table
-INSERT INTO #TempHelpDB
-EXEC sp_helpdb;
+    -- Insert all databases into the temporary table
+    INSERT INTO #LogBackupStats
+    (
+        DatabaseName,
+        TotalLogBackupSizeMB,
+        LogBackupCount,
+        AvgBackupSpeedMBps,
+        TotalTimeSpentSeconds
+    )
+    SELECT name AS DatabaseName,
+           0 AS TotalLogBackupSizeMB,
+           0 AS LogBackupCount,
+           0 AS AvgBackupSpeedMBps,
+           0 AS TotalTimeSpentSeconds
+    FROM sys.databases;
+
+    -- Update the temporary table with log backup statistics
+    UPDATE #LogBackupStats
+    SET TotalLogBackupSizeMB = ISNULL(backup_data.TotalLogBackupSizeMB, 0),
+        LogBackupCount = ISNULL(backup_data.LogBackupCount, 0),
+        AvgBackupSpeedMBps = ISNULL(backup_data.AvgBackupSpeedMBps, 0),
+        TotalTimeSpentSeconds = ISNULL(backup_data.TotalTimeSpentSeconds, 0)
+    FROM #LogBackupStats stats
+        LEFT JOIN
+        (
+            SELECT bs.database_name AS DatabaseName,
+                   SUM(bs.backup_size / 1048576.0) AS TotalLogBackupSizeMB, -- Convert bytes to MB
+                   COUNT(*) AS LogBackupCount,
+                   CASE
+                       WHEN SUM(bs.backup_size / 1048576.0) = 0 THEN
+                           0
+                       ELSE
+                           SUM(bs.backup_size / 1048576.0)
+                           / NULLIF(SUM(DATEDIFF(SECOND, bs.backup_start_date, bs.backup_finish_date)), 0)
+                   END AS AvgBackupSpeedMBps,
+                   SUM(DATEDIFF(SECOND, bs.backup_start_date, bs.backup_finish_date)) AS TotalTimeSpentSeconds
+            FROM msdb.dbo.backupset bs
+            WHERE bs.type = 'L' -- Log backups
+                  AND bs.backup_finish_date > DATEADD(DAY, -@LookBackDays, GETDATE())
+            GROUP BY bs.database_name
+        ) AS backup_data
+            ON stats.DatabaseName = backup_data.DatabaseName;
+
+    SELECT ag.name AS AvailabilityGroupName,
+           dbcs.database_name AS DatabaseName,
+           ag.automated_backup_preference_desc AS BackupPreference,
+           ars.role_desc
+    INTO #BackupPreference
+    FROM sys.availability_groups ag
+        JOIN sys.dm_hadr_availability_replica_states ars
+            ON ag.group_id = ars.group_id
+        JOIN sys.dm_hadr_database_replica_cluster_states dbcs
+            ON ars.replica_id = dbcs.replica_id
+    ORDER BY ag.name,
+             dbcs.database_name;
+
+    CREATE TABLE #TempHelpDB
+    (
+        name NVARCHAR(128),
+        db_size NVARCHAR(128),
+        owner NVARCHAR(128),
+        dbid SMALLINT,
+        created DATETIME,
+        status NVARCHAR(512),
+        compatibility_level TINYINT
+    );
+
+    -- Step 2: Insert the results of sp_helpdb into the temporary table
+    INSERT INTO #TempHelpDB
+    EXEC sp_helpdb;
 
     IF @LogToTable = 1
     BEGIN
-        IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblRPODetails]') AND type in (N'U'))
-        CREATE TABLE [dbo].tblRPODetails (
-            [DatabaseName] NVARCHAR(128) NULL,
-			[DBSize] nvarchar(128) NULL,
-            [RPOWorstCaseMinutes] INT NULL,
-            [RecoveryModel] NVARCHAR(60) NULL,
-            [DBStatus] VARCHAR(20) NOT NULL,
-            [RunTimeUTC] DATETIME NOT NULL,
-            [RPOWorstCaseBackupSetFinishTime] DATETIME NULL,
-            [RPOWorstCaseBackupSetPriorFinishTime] DATETIME NULL,
-            [LookBackDays] INT NULL
-        ) ON [PRIMARY];
+        IF NOT EXISTS
+        (
+            SELECT *
+            FROM sys.objects
+            WHERE object_id = OBJECT_ID(N'[dbo].[tblRPODetails]')
+                  AND type in ( N'U' )
+        )
+            CREATE TABLE [dbo].[tblRPODetails]
+            (
+                [DatabaseName] NVARCHAR(128) NULL,
+                [DBSize] NVARCHAR(128) NULL,
+                [AGName] NVARCHAR(128) NULL,
+                [BackupPreference] NVARCHAR(128) NULL,
+                [AGRole] NVARCHAR(128) NULL,
+                [RPOWorstCaseMinutes] INT NULL,
+                [RPOWorstCaseHour] AS CAST([RPOWorstCaseMinutes] / 60.0 AS DECIMAL(10, 2)),
+                [RPOWorstCaseDays] AS CAST([RPOWorstCaseMinutes] / 1440.0 AS DECIMAL(10, 2)),
+                [RecoveryModel] NVARCHAR(60) NULL,
+                [DBStatus] VARCHAR(20) NOT NULL,
+                TotalLogBackupSizeMB DECIMAL(18, 2),
+                LogBackupCount INT,
+                AvgBackupSpeedMBps DECIMAL(18, 2),
+                LogBackupTimeInSec int,
+                [RPOWorstCaseBackupSetFinishTime] DATETIME NULL,
+                [RPOWorstCaseBackupSetPriorFinishTime] DATETIME NULL,
+                [LookBackDays] INT NULL,
+				[RunTimeUTC] DATETIME NOT NULL
+            ) ON [PRIMARY];
+
     END
 
     -- Set default values if parameters are NULL or empty
-    IF @DbNames IS NULL OR @DbNames = ''
+    IF @DbNames IS NULL
+       OR @DbNames = ''
         SET @DbNames = '%';
 
     -- Split the @DbNames into a temporary table
     CREATE TABLE #DbNameTable (DbName SYSNAME);
-    INSERT INTO #DbNameTable (DbName)
-    SELECT value
-    FROM STRING_SPLIT(@DbNames, ',');
+    INSERT INTO #DbNameTable
+    (
+        DbName
+    )
+    SELECT @DbNames
 
     -- Validate @LookBackDays
     IF @LookBackDays <= 0
@@ -67,7 +171,8 @@ EXEC sp_helpdb;
     );
 
     -- Calculate RPOWorstCaseMinutes
-    DECLARE @StringToExecute NVARCHAR(MAX) = N'
+    DECLARE @StringToExecute NVARCHAR(MAX)
+        = N'
         SELECT bs.database_name, bs.database_guid, bs.backup_set_id, bsPrior.backup_set_id AS backup_set_id_prior,
                bs.backup_finish_date, bsPrior.backup_finish_date AS backup_finish_date_prior,
                DATEDIFF(ss, bsPrior.backup_finish_date, bs.backup_finish_date) AS backup_gap_seconds
@@ -104,57 +209,122 @@ EXEC sp_helpdb;
         DROP TABLE #backup_gaps;
     ';
 
-    EXEC sp_executesql @StringToExecute, N'@DbNames NVARCHAR(MAX), @LookBackDays INT', @DbNames, @LookBackDays;
+    EXEC sp_executesql @StringToExecute,
+                       N'@DbNames NVARCHAR(MAX), @LookBackDays INT',
+                       @DbNames,
+                       @LookBackDays;
 
     -- Select the results
     IF @LogToTable = 1
     BEGIN
         INSERT INTO tblRPODetails
-        SELECT DatabaseName, THD.db_size, RPOWorstCaseMinutes,
+        SELECT D.name,
+               THD.db_size,
+               ISNULL(AvailabilityGroupName, 'Not part of AG') AGName,
+               ISNULL(BP.BackupPreference, 'Not part of AG') BackupPreference,
+               ISNULL(bp.role_desc, 'Not part of AG'),
+               RPOWorstCaseMinutes,
                D.recovery_model_desc AS RecoveryModel,
-               CASE WHEN D.is_read_only = 1 THEN 'READ ONLY' ELSE 'READ WRITE' END AS DBStatus,
-               GETUTCDATE() AS RunTimeUTC,
+               CASE
+                   WHEN D.is_read_only = 1 THEN
+                       'READ ONLY / ' + state_desc
+                   ELSE
+                       'READ WRITE / ' + state_desc
+               END AS DBStatus,
+               TotalLogBackupSizeMB,
+               LogBackupCount,
+               AvgBackupSpeedMBps,
+               TotalTimeSpentSeconds as LogBackupTimeInSec,
                RPOWorstCaseBackupSetFinishTime,
                RPOWorstCaseBackupSetPriorFinishTime,
-               @LookBackDays AS LookBackDays
-        FROM #RPOWorstCase RWC
-        LEFT JOIN sys.databases D ON RWC.DatabaseName = D.name
-		LEFT JOIN #TempHelpDB THD ON THD.name = D.name;
+               @LookBackDays AS LookBackDays,
+               GETUTCDATE() AS RunTimeUTC
+        FROM sys.databases D
+            LEFT JOIN #RPOWorstCase RWC
+                ON RWC.DatabaseName = D.name
+            LEFT JOIN #TempHelpDB THD
+                ON THD.name = D.name
+            LEFT JOIN #BackupPreference bp
+                ON BP.DATABASENAME = D.NAME
+            LEFT JOIN #LogBackupStats LBS
+                ON LBS.DatabaseName = d.name
 
         -- Clean up old records
         DELETE FROM tblRPODetails
         WHERE RunTimeUTC < DATEADD(DD, -180, GETUTCDATE());
 
-        SELECT @@SERVERNAME AS ServerName, DatabaseName,THD.db_size DBSize, RPOWorstCaseMinutes,
+        SELECT @@SERVERNAME AS ServerName,
+               D.name,
+               THD.db_size,
+               ISNULL(AvailabilityGroupName, 'Not part of AG') AGName,
+               ISNULL(BP.BackupPreference, 'Not part of AG') BackupPreference,
+               ISNULL(bp.role_desc, 'Not part of AG') AGRole,
+               RPOWorstCaseMinutes,
+               CONVERT(DECIMAL(10, 2), ([RPOWorstCaseMinutes] / 60.0)) AS [RPOWorstCaseHour],
+               CONVERT(DECIMAL(10, 2), ([RPOWorstCaseMinutes] / 1440.0)) AS [RPOWorstCaseDays],
                D.recovery_model_desc AS RecoveryModel,
-               CASE WHEN D.is_read_only = 1 THEN 'READ ONLY' ELSE 'READ WRITE' END AS DBStatus,
-               GETUTCDATE() AS RunTimeUTC,
+               CASE
+                   WHEN D.is_read_only = 1 THEN
+                       'READ ONLY / ' + state_desc
+                   ELSE
+                       'READ WRITE / ' + state_desc
+               END AS DBStatus,
+               TotalLogBackupSizeMB,
+               LogBackupCount,
+               AvgBackupSpeedMBps,
+               TotalTimeSpentSeconds as LogBackupTimeInSec,
                RPOWorstCaseBackupSetFinishTime,
                RPOWorstCaseBackupSetPriorFinishTime,
-               @LookBackDays AS LookBackDays
-        FROM #RPOWorstCase RWC
-        LEFT JOIN sys.databases D ON RWC.DatabaseName = D.name
-		LEFT JOIN #TempHelpDB THD ON THD.name = D.name
+               @LookBackDays AS LookBackDays,
+               GETUTCDATE() AS RunTimeUTC
+        FROM sys.databases D
+            LEFT JOIN #RPOWorstCase RWC
+                ON RWC.DatabaseName = D.name
+            LEFT JOIN #TempHelpDB THD
+                ON THD.name = D.name
+            LEFT JOIN #BackupPreference bp
+                ON BP.DATABASENAME = D.NAME
+            LEFT JOIN #LogBackupStats LBS
+                ON LBS.DatabaseName = d.name
         ORDER BY RPOWorstCaseMinutes DESC;
     END
-    ELSE 
-    BEGIN 
-        SELECT @@SERVERNAME AS ServerName, DatabaseName,THD.db_size DBSize, RPOWorstCaseMinutes,
+    ELSE
+    BEGIN
+        SELECT @@SERVERNAME AS ServerName,
+               D.name,
+               THD.db_size DBSize,
+               ISNULL(AvailabilityGroupName, 'Not part of AG') AGName,
+               ISNULL(BP.BackupPreference, 'Not part of AG') BackupPreference,
+               ISNULL(bp.role_desc, 'Not part of AG') AGRole,
+               RPOWorstCaseMinutes,
+               CONVERT(DECIMAL(10, 2), ([RPOWorstCaseMinutes] / 60.0)) AS [RPOWorstCaseHour],
+               CONVERT(DECIMAL(10, 2), ([RPOWorstCaseMinutes] / 1440.0)) AS [RPOWorstCaseDays],
                D.recovery_model_desc AS RecoveryModel,
-               CASE WHEN D.is_read_only = 1 THEN 'READ ONLY' ELSE 'READ WRITE' END AS DBStatus,
-               GETUTCDATE() AS RunTimeUTC,
+               CASE
+                   WHEN D.is_read_only = 1 THEN
+                       'READ ONLY / ' + state_desc
+                   ELSE
+                       'READ WRITE / ' + state_desc
+               END AS DBStatus,
+               TotalLogBackupSizeMB,
+               LogBackupCount,
+               AvgBackupSpeedMBps,
+               TotalTimeSpentSeconds as LogBackupTimeInSec,
                RPOWorstCaseBackupSetFinishTime,
                RPOWorstCaseBackupSetPriorFinishTime,
-               @LookBackDays AS LookBackDays
-        FROM #RPOWorstCase RWC
-        LEFT JOIN sys.databases D ON RWC.DatabaseName = D.name
-		LEFT JOIN #TempHelpDB THD ON THD.name = D.name
+               @LookBackDays AS LookBackDays,
+               GETUTCDATE() AS RunTimeUTC
+        FROM sys.databases D
+            LEFT JOIN #RPOWorstCase RWC
+                ON D.name = RWC.DatabaseName
+            LEFT JOIN #TempHelpDB THD
+                ON THD.name = D.name
+            LEFT JOIN #BackupPreference bp
+                ON BP.DATABASENAME = D.NAME
+            LEFT JOIN #LogBackupStats LBS
+                ON LBS.DatabaseName = d.name
         ORDER BY RPOWorstCaseMinutes DESC;
     END
-
-    -- Clean up
-    DROP TABLE #RPOWorstCase;
-    DROP TABLE #DbNameTable;
 END
 GO
 
