@@ -201,11 +201,12 @@ BEGIN
         )
         INSERT INTO #RPOWorstCase (DatabaseName, RPOWorstCaseMinutes, RPOWorstCaseBackupSetFinishTime, RPOWorstCaseBackupSetPriorFinishTime)
         SELECT bg.database_name, bg.max_backup_gap_seconds / 60.0,
-               bg.backup_finish_date AS RPOWorstCaseBackupSetFinishTime,
-               bg.backup_finish_date_prior AS RPOWorstCaseBackupSetPriorFinishTime
+               max(bg.backup_finish_date) AS RPOWorstCaseBackupSetFinishTime,
+               max(bg.backup_finish_date_prior) AS RPOWorstCaseBackupSetPriorFinishTime
         FROM max_gaps bg
         LEFT OUTER JOIN max_gaps bgBigger ON bg.database_name = bgBigger.database_name AND bg.database_guid = bgBigger.database_guid AND bg.max_backup_gap_seconds < bgBigger.max_backup_gap_seconds
-        WHERE bgBigger.backup_set_id IS NULL;
+        WHERE bgBigger.backup_set_id IS NULL
+		GROUP BY bg.database_name, bg.max_backup_gap_seconds / 60.0
 
         DROP TABLE #backup_gaps;
     ';
@@ -255,7 +256,7 @@ BEGIN
         DELETE FROM tblRPODetails
         WHERE RunTimeUTC < DATEADD(DD, -180, GETUTCDATE());
 
-        SELECT @@SERVERNAME AS ServerName,
+        SELECT DISTINCT @@SERVERNAME AS ServerName,
                D.name,
                THD.db_size,
                ISNULL(AvailabilityGroupName, 'Not part of AG') AGName,
@@ -293,7 +294,7 @@ BEGIN
     END
     ELSE
     BEGIN
-        SELECT @@SERVERNAME AS ServerName,
+        SELECT DISTINCT @@SERVERNAME AS ServerName,
                D.name,
                THD.db_size DBSize,
                ISNULL(AvailabilityGroupName, 'Not part of AG') AGName,
