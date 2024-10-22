@@ -129,7 +129,7 @@ BEGIN
                 [RPOWorstCaseHour] AS CAST([RPOWorstCaseMinutes] / 60.0 AS DECIMAL(10, 2)),
                 [RPOWorstCaseDays] AS CAST([RPOWorstCaseMinutes] / 1440.0 AS DECIMAL(10, 2)),
                 [RecoveryModel] NVARCHAR(60) NULL,
-                [DBStatus] VARCHAR(20) NOT NULL,
+                [DBStatus] VARCHAR(30) NOT NULL,
                 TotalLogBackupSizeMB DECIMAL(18, 2),
                 LogBackupCount INT,
                 AvgBackupSpeedMBps DECIMAL(18, 2),
