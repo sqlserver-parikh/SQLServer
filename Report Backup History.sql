@@ -20,8 +20,7 @@ BEGIN
     (
         DbName
     )
-    SELECT value
-    FROM STRING_SPLIT(@DbNames, ',');
+    SELECT @DbNames
     IF @BackupGrowthReport = 0
     BEGIN
         -- Validate @LookBackDays
@@ -151,7 +150,8 @@ BEGIN
 		SELECT 
     ag.name AS AvailabilityGroupName,
     dbcs.database_name AS DatabaseName,
-    ag.automated_backup_preference_desc AS BackupPreference
+    ag.automated_backup_preference_desc AS BackupPreference,
+	ars.role_desc
 INTO #BackupPreference
 FROM 
     sys.availability_groups ag
@@ -159,6 +159,7 @@ JOIN
     sys.dm_hadr_availability_replica_states ars ON ag.group_id = ars.group_id
 JOIN 
     sys.dm_hadr_database_replica_cluster_states dbcs ON ars.replica_id = dbcs.replica_id
+WHERE is_local = 1 
 ORDER BY 
     ag.name, dbcs.database_name;
 
@@ -225,10 +226,77 @@ ORDER BY
           , FreeSpace
         )
         SELECT DatabaseName
-             , 'TotalSize:' + CAST(convert(decimal(20, 2), DBSizeMB) as nvarchar(50)) + ' DataFree: '
+             ,' DataFree: '
                + CAST(convert(decimal(20, 2), DataFreeMB) AS NVARCHAR(50)) + 'MB LogFree: '
                + CAST(convert(decimal(20, 2), LogFreeMB) AS NVARCHAR(50)) + 'MB'
         FROM #IntermediateFreeSpace;
+    CREATE TABLE #TempHelpDB
+    (
+        name NVARCHAR(128),
+        db_size NVARCHAR(128),
+        owner NVARCHAR(128),
+        dbid SMALLINT,
+        created DATETIME,
+        status NVARCHAR(512),
+        compatibility_level TINYINT
+    );
+
+    -- Step 2: Insert the results of sp_helpdb into the temporary table
+    INSERT INTO #TempHelpDB
+    EXEC sp_helpdb;
+
+
+		    CREATE TABLE #LogBackupStats
+    (
+        DatabaseName NVARCHAR(128),
+        TotalLogBackupSizeMB DECIMAL(18, 2),
+        LogBackupCount INT,
+        AvgBackupSpeedMBps DECIMAL(18, 2),
+        TotalTimeSpentSeconds INT
+    );
+
+    -- Insert all databases into the temporary table
+    INSERT INTO #LogBackupStats
+    (
+        DatabaseName,
+        TotalLogBackupSizeMB,
+        LogBackupCount,
+        AvgBackupSpeedMBps,
+        TotalTimeSpentSeconds
+    )
+    SELECT name AS DatabaseName,
+           0 AS TotalLogBackupSizeMB,
+           0 AS LogBackupCount,
+           0 AS AvgBackupSpeedMBps,
+           0 AS TotalTimeSpentSeconds
+    FROM sys.databases;
+
+    -- Update the temporary table with log backup statistics
+    UPDATE #LogBackupStats
+    SET TotalLogBackupSizeMB = ISNULL(backup_data.TotalLogBackupSizeMB, 0),
+        LogBackupCount = ISNULL(backup_data.LogBackupCount, 0),
+        AvgBackupSpeedMBps = ISNULL(backup_data.AvgBackupSpeedMBps, 0),
+        TotalTimeSpentSeconds = ISNULL(backup_data.TotalTimeSpentSeconds, 0)
+    FROM #LogBackupStats stats
+        LEFT JOIN
+        (
+            SELECT bs.database_name AS DatabaseName,
+                   SUM(bs.backup_size / 1048576.0) AS TotalLogBackupSizeMB, -- Convert bytes to MB
+                   COUNT(*) AS LogBackupCount,
+                   CASE
+                       WHEN SUM(bs.backup_size / 1048576.0) = 0 THEN
+                           0
+                       ELSE
+                           SUM(bs.backup_size / 1048576.0)
+                           / NULLIF(SUM(DATEDIFF(SECOND, bs.backup_start_date, bs.backup_finish_date)), 0)
+                   END AS AvgBackupSpeedMBps,
+                   SUM(DATEDIFF(SECOND, bs.backup_start_date, bs.backup_finish_date)) AS TotalTimeSpentSeconds
+            FROM msdb.dbo.backupset bs
+            WHERE bs.type = 'L' -- Log backups
+                  AND bs.backup_finish_date > DATEADD(DAY, -@LookBackDays, GETDATE())
+            GROUP BY bs.database_name
+        ) AS backup_data
+            ON stats.DatabaseName = backup_data.DatabaseName;
 
         -- Select the results from the final temporary table
 
@@ -308,10 +376,12 @@ ORDER BY
                , d.[name]
         OPTION (RECOMPILE);
         SELECT D.name
+			, THD.db_size
              , d.user_access_desc
              , d.state_desc
 			 , ISNULL(AvailabilityGroupName,'Not part of AG') AGName
 			 , ISNULL(BP.BackupPreference,'Not part of AG') BackupPreference
+			 , role_desc AGRole
              , SUSER_SNAME(owner_sid)    DBOwnerName
              , d.compatibility_level
              , d.recovery_model_desc
@@ -322,7 +392,10 @@ ORDER BY
 			 , RWC.RPOWorstCaseMinutes
 			   ,RWC.RPOWorstCaseBackupSetFinishTime
               , RWC.RPOWorstCaseBackupSetPriorFinishTime
-
+			, LBS.TotalLogBackupSizeMB
+			, LBS.AvgBackupSpeedMBps AvgLogBackupMBPS
+			  , LBS.LogBackupCount
+			  , lbs.TotalTimeSpentSeconds LogBackupTime
              , DS.FreeSpace
              , [0]
              , [-1]
@@ -337,6 +410,8 @@ ORDER BY
              , [-10]
              , [-11]
              , [-12]
+			 , @LookBackDays LookBack
+			 , getutcdate() ReportTimeUTC
         FROM SYS.DATABASES       D
             LEFT JOIN #BACKUP    B
                 on D.name = B.DBName
@@ -347,6 +422,8 @@ left join #RPOWorstCase RWC ON D.name = RWC.DatabaseName
             left join #FreeSpace DS
                 on D.name = DS.DatabaseName
 			LEFT JOIN #BackupPreference bp ON BP.DATABASENAME = D.NAME
+			LEFT JOIN #LogBackupStats LBS ON LBS.DatabaseName = D.name
+			LEFT JOIN #TempHelpDB THD ON THD.name = D.name
         WHERE D.name <> 'tempdb' and (
                   D.name LIKE @DbNames
                   OR EXISTS
