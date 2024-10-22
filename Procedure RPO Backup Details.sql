@@ -22,7 +22,7 @@ CREATE PROCEDURE usp_RPOWorstCaseMinutes
 (
     @DbNames NVARCHAR(MAX) = '', -- NULL: All DBs
     @LookBackDays INT = 7,       -- Must be > 0
-    @LogToTable BIT = 1
+    @LogToTable BIT = 0
 )
 AS
 BEGIN
@@ -90,6 +90,7 @@ BEGIN
             ON ag.group_id = ars.group_id
         JOIN sys.dm_hadr_database_replica_cluster_states dbcs
             ON ars.replica_id = dbcs.replica_id
+	WHERE is_local = 1 AND name NOT LIKE 'TEMPDB'
     ORDER BY ag.name,
              dbcs.database_name;
 
@@ -248,6 +249,7 @@ BEGIN
                 ON BP.DATABASENAME = D.NAME
             LEFT JOIN #LogBackupStats LBS
                 ON LBS.DatabaseName = d.name
+		WHERE D.name NOT LIKE 'tempdb'
 
         -- Clean up old records
         DELETE FROM tblRPODetails
@@ -286,6 +288,7 @@ BEGIN
                 ON BP.DATABASENAME = D.NAME
             LEFT JOIN #LogBackupStats LBS
                 ON LBS.DatabaseName = d.name
+		WHERE D.name NOT LIKE 'tempdb'
         ORDER BY RPOWorstCaseMinutes DESC;
     END
     ELSE
@@ -323,7 +326,8 @@ BEGIN
                 ON BP.DATABASENAME = D.NAME
             LEFT JOIN #LogBackupStats LBS
                 ON LBS.DatabaseName = d.name
-        ORDER BY RPOWorstCaseMinutes DESC;
+		WHERE D.name NOT LIKE 'tempdb'
+        ORDER BY TotalLogBackupSizeMB DESC;
     END
 END
 GO
