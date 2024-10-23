@@ -377,15 +377,20 @@ ORDER BY
         OPTION (RECOMPILE);
         SELECT D.name
 			, THD.db_size
-             , d.user_access_desc
-             , d.state_desc
-			 , ISNULL(AvailabilityGroupName,'Not part of AG') AGName
-			 , ISNULL(BP.BackupPreference,'Not part of AG') BackupPreference
-			 , role_desc AGRole
-             , SUSER_SNAME(owner_sid)    DBOwnerName
-             , d.compatibility_level
+             , DS.FreeSpace
+			 , CASE
+                   WHEN D.is_read_only = 1 THEN
+                       'READ ONLY / ' + state_desc + ' / ' + user_access_desc
+                   ELSE
+                       'READ WRITE / ' + state_desc + ' / ' + user_access_desc
+               END AS DBStatus
+			 , d.compatibility_level
              , d.recovery_model_desc
              , d.log_reuse_wait_desc
+			 , ISNULL(AvailabilityGroupName,'Not part of AG') AGName
+			 , ISNULL(BP.BackupPreference,'Not part of AG') BackupPreference
+			 , ISNULL(role_desc,'Not part of AG') AGRole
+             , SUSER_SNAME(owner_sid)    DBOwnerName
              , [Last Full Backup]
              , [Last Differential Backup]
              , [Last Log Backup]
@@ -396,7 +401,7 @@ ORDER BY
 			, LBS.AvgBackupSpeedMBps AvgLogBackupMBPS
 			  , LBS.LogBackupCount
 			  , lbs.TotalTimeSpentSeconds LogBackupTime
-             , DS.FreeSpace
+			 , @LookBackDays LookBack
              , [0]
              , [-1]
              , [-2]
@@ -410,7 +415,6 @@ ORDER BY
              , [-10]
              , [-11]
              , [-12]
-			 , @LookBackDays LookBack
 			 , getutcdate() ReportTimeUTC
         FROM SYS.DATABASES       D
             LEFT JOIN #BACKUP    B
