@@ -8,7 +8,7 @@ IF EXISTS
           AND type in ( N'U' )
 )
     DROP TABLE tblRPODetails
-go
+GO
 IF EXISTS
 (
     SELECT *
