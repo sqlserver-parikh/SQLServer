@@ -22,6 +22,7 @@ CREATE PROCEDURE usp_RPOWorstCaseMinutes
 (
     @DbNames NVARCHAR(MAX) = '', -- NULL: All DBs
     @LookBackDays INT = 7,       -- Must be > 0
+	@RetentionDays INT = 60,
     @LogToTable BIT = 0
 )
 AS
@@ -122,6 +123,7 @@ BEGIN
             (
                 [DatabaseName] NVARCHAR(128) NULL,
                 [DBSize] NVARCHAR(128) NULL,
+				[DBCreateDate] datetime NULL,
                 [AGName] NVARCHAR(128) NULL,
                 [BackupPreference] NVARCHAR(128) NULL,
                 [AGRole] NVARCHAR(128) NULL,
@@ -222,6 +224,7 @@ BEGIN
         INSERT INTO tblRPODetails
         SELECT D.name,
                THD.db_size,
+			   d.create_date,
                ISNULL(AvailabilityGroupName, 'Not part of AG') AGName,
                ISNULL(BP.BackupPreference, 'Not part of AG') BackupPreference,
                ISNULL(bp.role_desc, 'Not part of AG'),
@@ -254,11 +257,12 @@ BEGIN
 
         -- Clean up old records
         DELETE FROM tblRPODetails
-        WHERE RunTimeUTC < DATEADD(DD, -180, GETUTCDATE());
+        WHERE RunTimeUTC < DATEADD(DD, -@RetentionDays, GETUTCDATE());
 
         SELECT DISTINCT @@SERVERNAME AS ServerName,
                D.name,
                THD.db_size,
+			   D.create_date DBCreateDate,
                ISNULL(AvailabilityGroupName, 'Not part of AG') AGName,
                ISNULL(BP.BackupPreference, 'Not part of AG') BackupPreference,
                ISNULL(bp.role_desc, 'Not part of AG') AGRole,
@@ -297,6 +301,7 @@ BEGIN
         SELECT DISTINCT @@SERVERNAME AS ServerName,
                D.name,
                THD.db_size DBSize,
+			   D.create_date DBCreateDate,
                ISNULL(AvailabilityGroupName, 'Not part of AG') AGName,
                ISNULL(BP.BackupPreference, 'Not part of AG') BackupPreference,
                ISNULL(bp.role_desc, 'Not part of AG') AGRole,
