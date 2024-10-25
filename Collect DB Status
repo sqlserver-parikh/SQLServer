@@ -7,13 +7,15 @@ AS
 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblDBStatus]') AND type in (N'U'))
 BEGIN
 CREATE TABLE [dbo].[tblDBStatus](
+	[ServerName] sysname NOT NULL,
 	[name] [sysname] NOT NULL,
 	[state_desc] [nvarchar](128) NULL,
-	[RunTime] [datetime] NOT NULL
+	[RunTimeUTC] [datetime] NOT NULL
 ) ON [PRIMARY]
 END
 INSERT INTO tblDBStatus
 SELECT 
+	@@SERVERNAME,
     name, 
     CASE 
         WHEN state_desc = 'ONLINE' AND user_access_desc = 'SINGLE_USER' THEN state_desc + ', SingleUser'
@@ -25,27 +27,28 @@ SELECT
     + CASE 
         WHEN is_trustworthy_on = 1 THEN ', Trustworthy'
     END COLLATE SQL_Latin1_General_CP1_CI_AS AS CurrentStatus,
-    GETDATE() AS CurrentRunTime
+    GETUTCDATE() AS CurrentRunTimeUTC
 FROM 
     sys.databases
 UNION
 SELECT 
+	@@SERVERNAME,
     'aaa-' + CAST(state_desc AS NVARCHAR(128)) COLLATE SQL_Latin1_General_CP1_CI_AS, 
     CAST(COUNT(*) AS NVARCHAR(128)), 
-    GETDATE() AS RunTime
+    GETUTCDATE() AS RunTimeUTC
 FROM 
     sys.databases
 GROUP BY 
     state_desc;
 WITH RankedRuns AS (
     SELECT *,
-           ROW_NUMBER() OVER (partition by name ORDER BY RunTime DESC) AS RowNum
+           ROW_NUMBER() OVER (partition by name ORDER BY RunTimeUTC DESC) AS RowNum
     FROM tblDBStatus
 )
 DELETE FROM tblDBStatus
-WHERE RunTime < (SELECT max(RunTime) FROM RankedRuns WHERE  name = 'tempdb' and RowNum = 4);
+WHERE RunTimeUTC < (SELECT max(RunTimeUTC) FROM RankedRuns WHERE  name = 'tempdb' and RowNum = 4);
 GO
---EXEC usp_DBStatus
+EXEC usp_DBStatus
 GO
 CREATE OR ALTER VIEW vwDBStatus
 AS
@@ -53,8 +56,8 @@ WITH LastTwoEntries AS (
     SELECT 
         name,
         state_desc,
-        RunTime,
-        ROW_NUMBER() OVER (PARTITION BY name ORDER BY RunTime DESC) AS rn
+        RunTimeUTC,
+        ROW_NUMBER() OVER (PARTITION BY name ORDER BY RunTimeUTC DESC) AS rn
     FROM 
         [dbo].[tblDBStatus]
 )
@@ -71,14 +74,14 @@ SELECT
     + CASE 
         WHEN is_trustworthy_on = 1 THEN ', Trustworthy'
     END COLLATE SQL_Latin1_General_CP1_CI_AS AS CurrentStatus,
-    GETDATE() AS CurrentRunTime
+    GETUTCDATE() AS CurrentRunTimeUTC
 FROM 
     sys.databases
 UNION
 SELECT 
     'aaa-' + CAST(state_desc AS NVARCHAR(128)) COLLATE SQL_Latin1_General_CP1_CI_AS, 
     CAST(COUNT(*) AS NVARCHAR(128)), 
-    GETDATE() AS RunTime
+    GETUTCDATE() AS RunTimeUTC
 FROM 
     sys.databases
 GROUP BY 
@@ -88,18 +91,18 @@ GROUP BY
     SELECT 
         name,
         state_desc AS PreviousStatus,
-        RunTime AS PreviousRunTime
+        RunTimeUTC AS PreviousRunTimeUTC
     FROM 
         LastTwoEntries
-    WHERE RunTime = (SELECT RunTime FROM LastTwoEntries WHERE name = 'tempdb' AND rn = 1 )
+    WHERE RunTimeUTC = (SELECT RunTimeUTC FROM LastTwoEntries WHERE name = 'tempdb' AND rn = 1 )
 )
 , CombinedRuns AS (
     SELECT 
         COALESCE(c.name, p.name) AS name,
         c.CurrentStatus,
         p.PreviousStatus,
-        c.CurrentRunTime,
-        p.PreviousRunTime
+        c.CurrentRunTimeUTC,
+        p.PreviousRunTimeUTC
     FROM 
         CurrentRun c
     FULL OUTER JOIN 
@@ -111,8 +114,8 @@ SELECT
     name,
     ISNULL(CurrentStatus, 'Dropped') AS CurrentStatus,
     ISNULL(PreviousStatus, 'New') AS PreviousStatus,
-    ISNULL(CONVERT(VARCHAR(19),CurrentRunTime, 121), 'Dropped') AS CurrentRunTime,
-    ISNULL(CONVERT(VARCHAR(19), PreviousRunTime,121), 'New') AS PreviousRunTime,
+    ISNULL(CONVERT(VARCHAR(19),CurrentRunTimeUTC, 121), 'Dropped') AS CurrentRunTimeUTC,
+    ISNULL(CONVERT(VARCHAR(19), PreviousRunTimeUTC,121), 'New') AS PreviousRunTimeUTC,
     CASE 
         WHEN CurrentStatus IS NULL THEN 'Dropped'
         WHEN PreviousStatus IS NULL THEN 'New'
