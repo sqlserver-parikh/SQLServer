@@ -1,0 +1,144 @@
+# Define variables
+$AppendTable = $FALSE  # Set to $false to truncate the table before inserting data
+$CMSGroupName = "TestToday"
+$sourceDatabase = "SourceDB"
+$destinationServer = "CMSServerName"
+$destinationDatabase = "TestToday"
+$tableNames = "tblRPODetails,tblDBStatus,tblFileStats"  # Comma-separated list of table names
+
+# Function to get source servers from CMS group
+function Get-CMSServers {
+    param (
+        [string]$CMSGroupName,
+        [string]$destinationServer
+    )
+    try {
+        $query = @"
+SELECT s.server_name 
+FROM msdb.dbo.sysmanagement_shared_registered_servers_internal s
+JOIN msdb.dbo.sysmanagement_shared_server_groups_internal g
+ON s.server_group_id = g.server_group_id
+WHERE g.name = '$CMSGroupName'
+"@
+        $servers = Invoke-Sqlcmd -ServerInstance $destinationServer -Database msdb -Query $query
+        return $servers.server_name
+    } catch {
+        Write-Host "Error retrieving servers from CMS group: $($_.Exception.Message)"
+        return @()
+    }
+}
+
+# Get the list of source servers from the CMS group
+$sourceServers = Get-CMSServers -CMSGroupName $CMSGroupName -destinationServer $destinationServer
+Write-Host "Total source servers found: $($sourceServers.Count)"
+
+# Process each destination server
+foreach ($SServer in $sourceServers) {
+    Write-Host "Processing destination server: $SServer"
+
+    # Create connections to the destination server
+    $destinationConnectionString = "Server=$destinationServer;Database=$destinationDatabase;Integrated Security=True"
+    $destinationConnection = New-Object System.Data.SqlClient.SqlConnection
+    $destinationConnection.ConnectionString = $destinationConnectionString
+    $destinationConnection.Open()
+
+    # Process each table
+    foreach ($tableName in $tableNames.Split(',')) {
+        Write-Host "Processing table: $tableName"
+
+        # Check if the table exists in the destination database
+        $tableExists = $false
+        $command = $destinationConnection.CreateCommand()
+        $command.CommandText = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$tableName'"
+        $reader = $command.ExecuteReader()
+        if ($reader.Read()) {
+            $tableExists = $true
+        }
+        $reader.Close()
+
+        # If the table exists and $AppendTable is false, truncate it
+        if ($tableExists -and -not $AppendTable) {
+            $truncateCommand = $destinationConnection.CreateCommand()
+            $truncateCommand.CommandText = "TRUNCATE TABLE [$tableName]"
+            $truncateCommand.ExecuteNonQuery()
+            Write-Host "Table $tableName truncated in $destinationDatabase on $destinationServer."
+        } elseif ($tableExists -and $AppendTable) {
+            Write-Host "Appending data to existing table $tableName in $destinationDatabase on $destinationServer."
+        } else {
+            Write-Host "Table $tableName does not exist in $destinationDatabase on $destinationServer. Creating table."
+            # Retrieve the table schema from the source database
+            $sourceConnectionString = "Server=$($sourceServers[0]);Database=$sourceDatabase;Integrated Security=True"
+            $sourceConnection = New-Object System.Data.SqlClient.SqlConnection
+            $sourceConnection.ConnectionString = $sourceConnectionString
+            $sourceConnection.Open()
+
+            $command = $sourceConnection.CreateCommand()
+            $command.CommandText = "SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$tableName'"
+            $reader = $command.ExecuteReader()
+
+            # Create a script to recreate the table in the destination database
+            $createTableScript = @()
+            $createTableScript += "USE [$destinationDatabase]"
+            $createTableScript += "CREATE TABLE [$tableName] ("
+
+            while ($reader.Read()) {
+                $columnName = $reader["COLUMN_NAME"]
+                $dataType = $reader["DATA_TYPE"]
+                $maxLength = $reader["CHARACTER_MAXIMUM_LENGTH"]
+                $isNullable = $reader["IS_NULLABLE"]
+
+                $columnDefinition = "[$columnName] $dataType"
+
+                if ($maxLength -ne [DBNull]::Value) {
+                    $columnDefinition += "($maxLength)"
+                }
+
+                if ($isNullable -eq "NO") {
+                    $columnDefinition += " NOT NULL"
+                }
+
+                $createTableScript += $columnDefinition + ","
+            }
+
+            $createTableScript[-1] = $createTableScript[-1].TrimEnd(',')
+            $createTableScript += ")"
+
+            # Execute the script on the destination database
+            $command = $destinationConnection.CreateCommand()
+            $command.CommandText = $createTableScript -join "`r`n"
+            $command.ExecuteNonQuery()
+            
+            Write-Host "Table $tableName created in $destinationDatabase on $destinationServer."
+
+            # Clean up source connection
+            $sourceConnection.Close()
+        }
+
+        # Retrieve data from the source table
+        $sourceConnectionString = "Server=$($sourceServers[0]);Database=$sourceDatabase;Integrated Security=True"
+        $sourceConnection = New-Object System.Data.SqlClient.SqlConnection
+        $sourceConnection.ConnectionString = $sourceConnectionString
+        $sourceConnection.Open()
+
+        $sourceCommand = $sourceConnection.CreateCommand()
+        $sourceCommand.CommandText = "SELECT * FROM $tableName"
+        $sourceAdapter = New-Object Data.SqlClient.SqlDataAdapter $sourceCommand
+        $sourceDataSet = New-Object Data.DataSet
+        $sourceAdapter.Fill($sourceDataSet)
+
+        # Use SqlBulkCopy to copy data to the destination table
+        $bulkCopy = New-Object Data.SqlClient.SqlBulkCopy($destinationConnection)
+        $bulkCopy.DestinationTableName = $tableName
+        $bulkCopy.WriteToServer($sourceDataSet.Tables[0])
+
+        # Clean up source connection
+        $sourceConnection.Close()
+
+        Write-Host "Copied $($sourceDataSet.Tables[0].Rows.Count) rows in table $tableName from $sourceDatabase to $destinationDatabase on $destinationServer."
+    }
+
+    # Close the destination connection
+    $destinationConnection.Close()
+}
+
+Write-Host "Data transfer completed."
