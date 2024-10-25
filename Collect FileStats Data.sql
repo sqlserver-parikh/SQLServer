@@ -3,7 +3,7 @@ GO
 IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblFileStats]') AND type in (N'U'))
 DROP TABLE tblFileStats
 GO
-CREATE PROCEDURE [dbo].[usp_FileStats](@retentiondays INT = 4, @waitfordelaysec int = 30)
+CREATE or ALTER PROCEDURE [dbo].[usp_FileStats](@retentiondays INT = 4, @waitfordelaysec int = 30)
 AS
      SET NOCOUNT ON;
 
@@ -33,7 +33,7 @@ END
 	DECLARE @lastruntime DATETIME;
      SET @lastruntime = ISNULL(
                               (
-                                  SELECT MAX(RunTime)
+                                  SELECT MAX(RunTimeUTC)
                                   FROM tblFileStats
                               ), GETDATE());
      IF OBJECT_ID('tempdb..#io') IS NOT NULL
@@ -77,8 +77,7 @@ END
      DELETE FROM tblFileStats
      WHERE NumOfBytesRead = 0
            AND NumOfBytesWritten = 0
-           AND RunTime > @lastruntime;
+           AND RunTimeUTC > @lastruntime;
      DELETE FROM tblFileStats
-     WHERE RunTime < DATEADD(DD, -@retentiondays, GETUTCDATE());
+     WHERE RunTimeUTC < DATEADD(DD, -@retentiondays, GETUTCDATE());
 GO
-
