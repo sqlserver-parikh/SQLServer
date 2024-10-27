@@ -2,7 +2,17 @@
 --Below view can provide easy validation if any database count status changed from previous day. 
 USE tempdb
 GO
-CREATE OR ALTER PROCEDURE usp_DBStatus
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[usp_DBStatus]') AND type in (N'P'))
+BEGIN
+DROP PROCEDURE usp_DBStatus
+END
+GO
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblDBStatus]') AND type in (N'U'))
+BEGIN
+DROP TABLE tblDBStatus
+END
+GO
+CREATE PROCEDURE usp_DBStatus
 AS
 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblDBStatus]') AND type in (N'U'))
 BEGIN
