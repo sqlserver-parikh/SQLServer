@@ -121,6 +121,7 @@ BEGIN
         )
             CREATE TABLE [dbo].[tblRPODetails]
             (
+				ServerName nvarchar(128) NULL,
                 [DatabaseName] NVARCHAR(128) NULL,
                 [DBSize] NVARCHAR(128) NULL,
 				[DBCreateDate] datetime NULL,
@@ -222,7 +223,7 @@ BEGIN
     IF @LogToTable = 1
     BEGIN
         INSERT INTO tblRPODetails
-        SELECT D.name,
+        SELECT @@SERVERNAME, D.name,
                THD.db_size,
 			   d.create_date,
                ISNULL(AvailabilityGroupName, 'Not part of AG') AGName,
