@@ -1,7 +1,7 @@
 USE tempdb 
 GO
 CREATE OR ALTER PROCEDURE usp_SQLInformation
-(@LogToTable bit = 1, @Retention int = 26) 
+(@LogToTable bit = 0, @Retention int = 26) 
 AS
 BEGIN
 
@@ -65,7 +65,7 @@ NonStandardConfigurations varchar(max) NULL,
 	[OSRebootTime] [datetime] NULL,
 	[SQLInstallDate] [datetime] NULL,
 	[ServerTimeZone] varchar(100) NULL,
-	[RunTime] [datetime] NOT NULL
+	[RunTimeUTC] [datetime] NOT NULL
 ) ON [PRIMARY]
 END 
 DECLARE @DomainNames NVARCHAR(MAX) = '';
@@ -146,7 +146,7 @@ VALUES
 ),
 ('10.0 (20348)', 
  'Windows Server 2022'
-),
+), ('6.3 (17763)', 'Windows Server 2022'),
 ('10.0 (10240)', 
  'Windows 10'
 ),
@@ -705,15 +705,15 @@ else
            --                    ), 3, 8000)
            --) DBNames,
 	   @TimeZone ServerTimeZone,
-           GETDATE() RunTime;
+           GETUTCDATE() RunTimeUTC;
 
 		   WITH RankedRuns AS (
     SELECT *,
-           ROW_NUMBER() OVER (ORDER BY RunTime DESC) AS RowNum
+           ROW_NUMBER() OVER (ORDER BY RunTimeUTC DESC) AS RowNum
     FROM tblSQLInformation
 )
 DELETE FROM tblSQLInformation
-WHERE RunTime < (SELECT max(RunTime) FROM RankedRuns WHERE RowNum = @Retention);
+WHERE RunTimeUTC < (SELECT max(RunTimeUTC) FROM RankedRuns WHERE RowNum = @Retention);
 
 		   END
 		   ELSE 
@@ -891,7 +891,7 @@ else
            --                    ), 3, 8000)
            --) DBNames,
 	   @TimeZone ServerTimeZone,
-           GETDATE() RunTime;
+           GETUTCDATE() RunTimeUTC;
 		   END
 END TRY
 BEGIN CATCH
