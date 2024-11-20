@@ -1,9 +1,11 @@
 --Schedule this procedure run under agent job. Most of monitoring tool should be able to alert as its logged in application event log.
+use tempdb 
+go
 CREATE OR ALTER PROCEDURE usp_BackupIssue 
 (
-    @fullbackup int = 168, 
-    @logbackup int = 12, 
-	@logSizeFullMB int = 124,
+    @fullbackup int = 168, --Alert if full backup not done in X hours
+    @logbackup int = 24, --Alert if log backup not done in X hours
+	@logSizeFullMB int = 512000, --Alert if log size is above X MB
     @lookbackdays int = 8
 )
 AS
@@ -46,6 +48,7 @@ BEGIN
         LEFT JOIN msdb.dbo.backupset AS bs WITH (NOLOCK) ON bs.[database_name] = d.[name] 
 		LEFT JOIN #LogSizeTemp LST ON LST.[Database] = D.name
         WHERE d.name <> N'tempdb' AND bs.backup_finish_date > DATEADD(DD, -@lookbackdays, GETDATE())
+		AND D.is_read_only = 0 and source_database_id is null
         GROUP BY ISNULL(d.[name], bs.[database_name]), d.recovery_model_desc, d.log_reuse_wait_desc, d.[name] 
 		, LST.[Log Used (MB)] , LST.[Log Used %] 
     )
@@ -71,10 +74,10 @@ BEGIN
             + CONVERT(VARCHAR(5), @fullbackup) 
             + ' hours or transaction log backup is not taken in last ' 
             + CONVERT(VARCHAR(5), @logbackup) 
-            + ' hours. Databases: ' + @DBMissingBackup;
-        RAISERROR(@message, 20, 1) WITH LOG;
+            + ' hours or Used log size is above : ' 
+			+ CONVERT(VARCHAR(20), CONVERT(DECIMAL(10,2),@logSizeFullMB/1024.0))
+			+ 'GB. Databases: ' + @DBMissingBackup;
+        RAISERROR(@message, 18, 1) WITH LOG;
     END
-
     DROP TABLE #TempCTE;
 END
-
