@@ -4,7 +4,7 @@ CREATE OR ALTER PROCEDURE usp_BackupIssue
 (
     @fullbackup int = 168, --Alert if full backup not done in X hours
     @logbackup int = 24, --Alert if log backup not done in X hours
-	@logSizeFullMB int = 512000, --Alert if log size is above X MB
+	@logSizeFullMB int = 5120, --Alert if log size is above X MB
     @lookbackdays int = 30
 )
 AS
@@ -116,7 +116,7 @@ WHERE command IN ( 'RESTORE DATABASE', 'BACKUP DATABASE' ,'BACKUP LOG');
         LEFT JOIN msdb.dbo.backupset AS bs WITH (NOLOCK) ON bs.[database_name] = d.[name] 
 		LEFT JOIN #LogSizeTemp LST ON LST.[Database] = D.name
 		LEFT JOIN #backupdetail BD ON BD.DBName = D.name
-        WHERE d.name <> N'tempdb' AND bs.backup_finish_date > DATEADD(DD, -@lookbackdays, GETDATE())
+        WHERE d.name <> N'tempdb' AND bs.backup_finish_date > DATEADD(DD, -20, GETDATE())
 		AND D.is_read_only = 0 and source_database_id is null
         GROUP BY ISNULL(d.[name], bs.[database_name]), d.recovery_model_desc, d.log_reuse_wait_desc, d.[name] 
 		, LST.[Log Used (MB)] , LST.[Log Used %] , BD.ETA, BD.TimeElapsed_DDHHMMSS, BD.TimeRemaining_DDHHMMSS , BD.TotalEstimatedTime_DDHHMMSS, BD.command
@@ -125,10 +125,10 @@ WHERE command IN ( 'RESTORE DATABASE', 'BACKUP DATABASE' ,'BACKUP LOG');
 				+ ', Log Backup: ' + CONVERT(VARCHAR(18),ISNULL([Last Log Backup],''),120)
 				+ ', LogUsedMB: ' + CONVERT(VARCHAR(20),LogUsedMB)
 				+ ', LogUsedPct: ' + CONVERT(VARCHAR(20),LogUsedPCT)
-				+ ', Command: ' + command 
-				+ ', BackupETA: ' + CONVERT(VARCHAR(20),ETA ) 
-				+ ', TimeElapsed: ' + CONVERT(VARCHAR(20),TimeElapsed_DDHHMMSS)
-				+ ', TimeRemaining: ' + CONVERT(VARCHAR(20),TimeRemaining_DDHHMMSS)
+				+ ', Command: ' + ISNULL(command ,'Not Running')
+				+ ', BackupETA: ' + CONVERT(VARCHAR(20),ISNULL(ETA,'Not Running') ) 
+				+ ', TimeElapsed: ' + CONVERT(VARCHAR(20),ISNULL(TimeElapsed_DDHHMMSS,'Not Running'))
+				+ ', TimeRemaining: ' + CONVERT(VARCHAR(20),ISNULL(TimeRemaining_DDHHMMSS,'Not Running'))
 				+ ')' as DBName, * 
     INTO #TempCTE
     FROM CTE
@@ -138,6 +138,7 @@ WHERE command IN ( 'RESTORE DATABASE', 'BACKUP DATABASE' ,'BACKUP LOG');
         OR [Last Full Backup] IS NULL 
         OR ([Last Log Backup] IS NULL AND [Recovery Model] <> 'SIMPLE')
 		OR LogUsedMB > @logSizeFullMB
+	select * from #TempCTE
     SELECT @DBMissingBackup = STRING_AGG(DBName, ', ')
     FROM #TempCTE;
 
