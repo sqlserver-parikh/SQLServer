@@ -1,4 +1,3 @@
---Schedule this procedure run under agent job. Most of monitoring tool should be able to alert as its logged in application event log.
 use tempdb 
 go
 CREATE OR ALTER PROCEDURE usp_BackupIssue 
@@ -6,11 +5,80 @@ CREATE OR ALTER PROCEDURE usp_BackupIssue
     @fullbackup int = 168, --Alert if full backup not done in X hours
     @logbackup int = 24, --Alert if log backup not done in X hours
 	@logSizeFullMB int = 512000, --Alert if log size is above X MB
-    @lookbackdays int = 8
+    @lookbackdays int = 30
 )
 AS
 BEGIN
     SET NOCOUNT ON;
+	SELECT @@SERVERNAME ServerName,
+       dmr.session_id SessionID,
+
+       CONVERT(VARCHAR(20), DATEADD(ms, dmr.estimated_completion_time, GetDate()), 20) AS ETA,
+       CONVERT(varchar, datediff(second, start_time, getdate()) / 86400) + ':' + -- Days
+       CONVERT(varchar, DATEADD(ms, ((datediff(second, start_time, getdate())) % 86400) * 1000, 0), 114) TimeElapsed_DDHHMMSS,
+       CONVERT(
+                  varchar,
+                  Datediff(
+                              second,
+                              getdate(),
+                              CONVERT(VARCHAR(20), DATEADD(ms, dmr.estimated_completion_time, GetDate()), 20)
+                          ) / 86400
+              ) + ':'
+       + -- Days
+       CONVERT(
+                  varchar,
+                  DATEADD(
+                             ms,
+                             ((Datediff(
+                                           second,
+                                           getdate(),
+                                           CONVERT(
+                                                      VARCHAR(20),
+                                                      DATEADD(ms, dmr.estimated_completion_time, GetDate()),
+                                                      20
+                                                  )
+                                       )
+                              ) % 86400
+                             ) * 1000,
+                             0
+                         ),
+                  114
+              ) TimeRemaining_DDHHMMSS,
+       CONVERT(
+                  varchar,
+                  datediff(
+                              second,
+                              start_time,
+                              CONVERT(VARCHAR(20), DATEADD(ms, dmr.estimated_completion_time, GetDate()), 20)
+                          ) / 86400
+              ) + ':'
+       + -- Days
+       CONVERT(
+                  varchar,
+                  DATEADD(
+                             ms,
+                             ((datediff(
+                                           second,
+                                           start_time,
+                                           CONVERT(
+                                                      VARCHAR(20),
+                                                      DATEADD(ms, dmr.estimated_completion_time, GetDate()),
+                                                      20
+                                                  )
+                                       )
+                              ) % 86400
+                             ) * 1000,
+                             0
+                         ),
+                  114
+              ) TotalEstimatedTime_DDHHMMSS,
+       CONVERT(NUMERIC(6, 2), dmr.percent_complete) AS [Percent Complete],
+       CONVERT(NUMERIC(10, 2), dmr.total_elapsed_time / 1000.0 / 60.0) AS [Elapsed Min], db_name(des.database_id) DBName, command
+	INTO #backupdetail
+FROM sys.dm_exec_requests dmr
+inner join sys.dm_exec_sessions des on dmr.session_id = des.session_id
+WHERE command IN ( 'RESTORE DATABASE', 'BACKUP DATABASE' ,'BACKUP LOG');
+
 
     DECLARE @DBMissingBackup NVARCHAR(MAX);
 	        ;WITH LogSizeCTE AS
@@ -43,19 +111,25 @@ BEGIN
             MAX(CASE WHEN [type] = 'D' THEN bs.backup_finish_date ELSE NULL END) AS [Last Full Backup],
             MAX(CASE WHEN [type] = 'I' THEN bs.backup_finish_date ELSE NULL END) AS [Last Differential Backup],
             MAX(CASE WHEN [type] = 'L' THEN bs.backup_finish_date ELSE NULL END) AS [Last Log Backup],
-			LST.[Log Used (MB)] LogUsedMB, LST.[Log Used %] LogUsedPCT
+			LST.[Log Used (MB)] LogUsedMB, LST.[Log Used %] LogUsedPCT, BD.ETA, BD.TimeElapsed_DDHHMMSS, BD.TimeRemaining_DDHHMMSS , BD.TotalEstimatedTime_DDHHMMSS,BD.command
         FROM sys.databases AS d WITH (NOLOCK)
         LEFT JOIN msdb.dbo.backupset AS bs WITH (NOLOCK) ON bs.[database_name] = d.[name] 
 		LEFT JOIN #LogSizeTemp LST ON LST.[Database] = D.name
+		LEFT JOIN #backupdetail BD ON BD.DBName = D.name
         WHERE d.name <> N'tempdb' AND bs.backup_finish_date > DATEADD(DD, -@lookbackdays, GETDATE())
 		AND D.is_read_only = 0 and source_database_id is null
         GROUP BY ISNULL(d.[name], bs.[database_name]), d.recovery_model_desc, d.log_reuse_wait_desc, d.[name] 
-		, LST.[Log Used (MB)] , LST.[Log Used %] 
+		, LST.[Log Used (MB)] , LST.[Log Used %] , BD.ETA, BD.TimeElapsed_DDHHMMSS, BD.TimeRemaining_DDHHMMSS , BD.TotalEstimatedTime_DDHHMMSS, BD.command
     )
     SELECT DatabaseName + '(Full Backup: ' + CONVERT(VARCHAR(18),ISNULL([Last Full Backup],''),120)
 				+ ', Log Backup: ' + CONVERT(VARCHAR(18),ISNULL([Last Log Backup],''),120)
 				+ ', LogUsedMB: ' + CONVERT(VARCHAR(20),LogUsedMB)
-				+ ', LogUsedPct: ' + CONVERT(VARCHAR(20),LogUsedPCT) + ')' as DBName, * 
+				+ ', LogUsedPct: ' + CONVERT(VARCHAR(20),LogUsedPCT)
+				+ ', Command: ' + command 
+				+ ', BackupETA: ' + CONVERT(VARCHAR(20),ETA ) 
+				+ ', TimeElapsed: ' + CONVERT(VARCHAR(20),TimeElapsed_DDHHMMSS)
+				+ ', TimeRemaining: ' + CONVERT(VARCHAR(20),TimeRemaining_DDHHMMSS)
+				+ ')' as DBName, * 
     INTO #TempCTE
     FROM CTE
     WHERE 
@@ -77,7 +151,7 @@ BEGIN
             + ' hours or Used log size is above : ' 
 			+ CONVERT(VARCHAR(20), CONVERT(DECIMAL(10,2),@logSizeFullMB/1024.0))
 			+ 'GB. Databases: ' + @DBMissingBackup;
-        RAISERROR(@message, 18, 1) WITH LOG;
+        RAISERROR(@message, 17, 1) WITH LOG;
     END
     DROP TABLE #TempCTE;
 END
