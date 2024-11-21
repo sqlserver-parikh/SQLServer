@@ -1,0 +1,58 @@
+CREATE OR ALTER PROCEDURE usp_TrackBackupProgress
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Calculate database sizes and store in a temporary table
+    SELECT 
+        database_id AS DBID,
+        SUM(CAST(size AS BIGINT) * 8 / 1024) AS DatabaseSizeMB
+    INTO #dbsize
+    FROM 
+        sys.master_files
+    GROUP BY 
+        database_id;
+
+    -- Select backup details along with database sizes
+    SELECT 
+        @@SERVERNAME AS ServerName,
+        DB_NAME(des.database_id) AS DBName,
+        FORMAT(ds.DatabaseSizeMB, 'N0') AS DatabaseSizeMB, -- Format with commas
+        CONVERT(DECIMAL(10, 2), (ds.DatabaseSizeMB * CONVERT(NUMERIC(6, 2), dmr.percent_complete) / 100) / DATEDIFF(SECOND, start_time, GETDATE())) AS MBPS,
+        dmr.session_id AS SessionID,
+        start_time AS StartTime,
+        GETDATE() AS CurrTime,
+        CONVERT(VARCHAR(20), DATEADD(ms, dmr.estimated_completion_time, GETDATE()), 20) AS [ETA Completion Time],
+        CONVERT(VARCHAR, DATEDIFF(SECOND, start_time, GETDATE()) / 86400) + ':' + 
+        CONVERT(VARCHAR, DATEADD(ms, ((DATEDIFF(SECOND, start_time, GETDATE())) % 86400) * 1000, 0), 114) AS TimeElapsed_DDHHMMSS,
+        CONVERT(VARCHAR, DATEDIFF(SECOND, GETDATE(), DATEADD(ms, dmr.estimated_completion_time, GETDATE())) / 86400) + ':' + 
+        CONVERT(VARCHAR, DATEADD(ms, ((DATEDIFF(SECOND, GETDATE(), DATEADD(ms, dmr.estimated_completion_time, GETDATE()))) % 86400) * 1000, 0), 114) AS TimeRemaining_DDHHMMSS,
+        CONVERT(VARCHAR, DATEDIFF(SECOND, start_time, DATEADD(ms, dmr.estimated_completion_time, GETDATE())) / 86400) + ':' + 
+        CONVERT(VARCHAR, DATEADD(ms, ((DATEDIFF(SECOND, start_time, DATEADD(ms, dmr.estimated_completion_time, GETDATE()))) % 86400) * 1000, 0), 114) AS TotalEstimatedTime_DDHHMMSS,
+        CONVERT(NUMERIC(6, 2), dmr.percent_complete) AS [Percent Complete],
+        CONVERT(NUMERIC(10, 2), dmr.total_elapsed_time / 1000.0 / 60.0) AS [Elapsed Min],
+        CONVERT(NUMERIC(10, 2), dmr.estimated_completion_time / 1000.0 / 60.0) AS [ETA Min],
+        CONVERT(NUMERIC(10, 2), dmr.estimated_completion_time / 1000.0 / 60.0 / 60.0) AS [ETA Hours],
+        CONVERT(VARCHAR(1000),
+            (
+                SELECT SUBSTRING(text, dmr.statement_start_offset / 2,
+                    CASE
+                        WHEN dmr.statement_end_offset = -1 THEN 1000
+                        ELSE (dmr.statement_end_offset - dmr.statement_start_offset) / 2
+                    END
+                )
+                FROM sys.dm_exec_sql_text(sql_handle)
+            )
+        ) AS [SQLCommand]
+    FROM 
+        sys.dm_exec_requests dmr
+    INNER JOIN 
+        sys.dm_exec_sessions des ON dmr.session_id = des.session_id
+    LEFT JOIN 
+        #dbsize ds ON des.database_id = ds.DBID
+    WHERE 
+        command IN ('RESTORE DATABASE', 'BACKUP DATABASE', 'BACKUP LOG');
+
+    -- Drop the temporary table
+    DROP TABLE #dbsize;
+END;
