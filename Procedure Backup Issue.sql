@@ -154,7 +154,7 @@ WHERE command IN ( 'RESTORE DATABASE', 'BACKUP DATABASE' ,'BACKUP LOG');
 	
 	select * from #TempCTE
     
-	SELECT @DBMissingBackup = STRING_AGG(DBName, ', ')
+	SELECT @DBMissingBackup = STRING_AGG(DBName, ', ' + CHAR(10))
     FROM #TempCTE;
 
     IF @DBMissingBackup IS NOT NULL
@@ -166,7 +166,7 @@ WHERE command IN ( 'RESTORE DATABASE', 'BACKUP DATABASE' ,'BACKUP LOG');
             + CONVERT(VARCHAR(5), @logbackup) 
             + ' hours or Used log size is above : ' 
 			+ CONVERT(VARCHAR(20), CONVERT(DECIMAL(10,2),@logSizeFullMB/1024.0))
-			+ 'GB. Databases: ' + @DBMissingBackup;
+			+ 'GB. ' + CHAR(10) + CHAR(13) + 'Databases: ' + CHAR(13) + @DBMissingBackup;
         RAISERROR(@message, 17, 1) WITH LOG;
     END
     DROP TABLE #TempCTE;
