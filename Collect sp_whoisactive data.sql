@@ -6,13 +6,15 @@ CREATE OR ALTER PROCEDURE usp_LogWhoIsActive
     @numberOfRuns INT = 1,
     @delay INT = 60, -- Delay in seconds
     @deleteAll INT = 10, -- General retention period in days
-    @tempdbThreshold INT = 400000, -- Tempdb size threshold in KB
+    @tempdbThreshold INT = 400, -- Tempdb size threshold in MB
     @tempdbblockingRetentionHours INT = 24, -- Retention period for tempdb size threshold in hours
     @blockingRetentionDays INT = 7, -- Retention period for blocking sessions in days
 	@LogData bit = 1
 )
 AS
 BEGIN
+
+    SET @tempdbThreshold = @tempdbThreshold * 1024
 
 	IF @LogData = 0
 	BEGIN
