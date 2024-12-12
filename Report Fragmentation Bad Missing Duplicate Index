@@ -4,7 +4,8 @@ GO
 CREATE OR ALTER PROCEDURE usp_IndexAnalysis
 (
     @DatabaseName NVARCHAR(128) = 'test', -- Specify the database name
-    @BADIndex BIT = 1,        -- Set to 1 to include analysis of bad non-clustered indexes
+    @BADIndex BIT = 1,    
+    @IndexUsage BIT = 1 ,-- Set to 1 to include analysis of bad non-clustered indexes
     @MissingIndex BIT = 0,    -- Set to 1 to include analysis of missing indexes
     @IndexFragmentation BIT = 0,  -- This will take a lot of time if DB is big with indexes
     @PageCount INT = 2500,
@@ -25,6 +26,61 @@ BEGIN
         RAISERROR('Database %s does not exist.', 10, 1, @DatabaseName);
         RETURN;
     END
+
+	IF @IndexUsage = 1
+	BEGIN
+        SELECT 'Index Usage Report' AS ReportName;
+        SET @sql = N'USE ' + QUOTENAME(@DatabaseName) + '; 
+		SELECT ''' + @DatabaseName + ''' AS DBName, 
+
+			OBJECT_NAME(i.[object_id]) AS [ObjectName], 
+			i.[name] AS [IndexName], 
+			i.index_id, 
+			s.user_seeks, 
+			s.user_scans, 
+			s.user_lookups,
+			s.user_seeks + s.user_scans + s.user_lookups AS [Total Reads], 
+			s.user_updates AS [Writes],  
+			i.[type_desc] AS [Index Type], 
+			i.fill_factor AS [Fill Factor], 
+			i.has_filter, 
+			i.filter_definition, 
+			s.last_user_scan, 
+			s.last_user_lookup, 
+			s.last_user_seek,
+			FORMAT(CAST(8.0 * SUM(ps.used_page_count) / 1024 AS DECIMAL(10, 2)), ''N0'') + ''MB'' AS [IndexSizeMB]
+		FROM 
+			sys.indexes AS i WITH (NOLOCK)
+		LEFT OUTER JOIN 
+			sys.dm_db_index_usage_stats AS s WITH (NOLOCK) ON i.[object_id] = s.[object_id]
+			AND i.index_id = s.index_id
+			AND s.database_id = DB_ID()
+		LEFT OUTER JOIN 
+			sys.dm_db_partition_stats AS ps ON i.[object_id] = ps.[object_id] 
+			AND i.index_id = ps.index_id
+		WHERE 
+			OBJECTPROPERTY(i.[object_id],''IsUserTable'') = 1
+		GROUP BY 
+			OBJECT_NAME(i.[object_id]), 
+			i.[name], 
+			i.index_id, 
+			s.user_seeks, 
+			s.user_scans, 
+			s.user_lookups,
+			s.user_updates,  
+			i.[type_desc], 
+			i.fill_factor, 
+			i.has_filter, 
+			i.filter_definition, 
+			s.last_user_scan, 
+			s.last_user_lookup, 
+			s.last_user_seek
+		ORDER BY 
+			s.user_seeks + s.user_scans + s.user_lookups DESC 
+		OPTION (RECOMPILE); -- Order by reads
+		';
+        EXEC sp_executesql @sql, N'@DatabaseName NVARCHAR(128)', @DatabaseName;
+	END
 
 	    IF @BADIndex = 1
     BEGIN
@@ -184,7 +240,7 @@ GO
 
 -- Example of executing the stored procedure
 EXEC usp_IndexAnalysis
-    @DatabaseName = 'test', 
+    @DatabaseName = 'TEST', 
     @BADIndex = 1, 
     @MissingIndex = 1, 
     @IndexFragmentation = 0, 
