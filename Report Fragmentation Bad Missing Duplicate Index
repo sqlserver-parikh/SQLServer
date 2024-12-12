@@ -22,14 +22,13 @@ BEGIN
 
     IF @dbExists IS NULL
     BEGIN
-        RAISERROR('Database %s does not exist.', 16, 1, @DatabaseName);
+        RAISERROR('Database %s does not exist.', 10, 1, @DatabaseName);
         RETURN;
     END
 
-    -- Analyze bad non-clustered indexes
-    IF @BADIndex = 1
+	    IF @BADIndex = 1
     BEGIN
-		SELECT 'Bad Index Report' ReportName;
+        SELECT 'Bad Index Report' AS ReportName;
         SET @sql = N'USE ' + QUOTENAME(@DatabaseName) + ';
         SELECT ''' + @DatabaseName + ''' AS DBName, 
                SCHEMA_NAME(o.[schema_id]) AS [Schema Name], 
@@ -42,11 +41,13 @@ BEGIN
                i.fill_factor,
                s.user_updates AS [Total Writes], 
                s.user_seeks + s.user_scans + s.user_lookups AS [Total Reads],
-               s.user_updates - (s.user_seeks + s.user_scans + s.user_lookups) AS [Difference]
-        FROM sys.dm_db_index_usage_stats AS s WITH (NOLOCK)
+               s.user_updates - (s.user_seeks + s.user_scans + s.user_lookups) AS [Difference],
+			(FORMAT(8 * SUM(ps.used_page_count) / 1024, ''N0'') + '' MB'') AS [IndexSizeMB]
+		FROM sys.dm_db_index_usage_stats AS s WITH (NOLOCK)
         INNER JOIN sys.indexes AS i WITH (NOLOCK) ON s.[object_id] = i.[object_id] AND i.index_id = s.index_id
         INNER JOIN sys.objects AS o WITH (NOLOCK) ON i.[object_id] = o.[object_id]
-        WHERE OBJECTPROPERTY(s.[object_id],''IsUserTable'') = 1
+        LEFT JOIN sys.dm_db_partition_stats AS ps ON i.object_id = ps.object_id AND i.index_id = ps.index_id
+        WHERE OBJECTPROPERTY(s.[object_id], ''IsUserTable'') = 1
         AND s.database_id = DB_ID(@DatabaseName)
         AND s.user_updates > (s.user_seeks + s.user_scans + s.user_lookups)
         AND i.index_id > 1 
@@ -54,9 +55,12 @@ BEGIN
         AND i.is_primary_key = 0 
         AND i.is_unique_constraint = 0 
         AND i.is_unique = 0
+        GROUP BY SCHEMA_NAME(o.[schema_id]), OBJECT_NAME(s.[object_id]), i.name, i.index_id, i.is_disabled, i.is_hypothetical, i.has_filter, i.fill_factor, s.user_updates, s.user_seeks, s.user_scans, s.user_lookups
         ORDER BY [Difference] DESC, [Total Writes] DESC, [Total Reads] ASC OPTION (RECOMPILE);';
         EXEC sp_executesql @sql, N'@DatabaseName NVARCHAR(128)', @DatabaseName;
     END
+
+    -- Analyze bad non-clustered indexes
 
     -- Analyze missing indexes
     IF @MissingIndex = 1
@@ -108,58 +112,73 @@ BEGIN
     END
 
     -- Analyze duplicate indexes
-    IF @findDuplicateIndex = 1
-    BEGIN
-	    SELECT 'Duplicate Index Report' ReportName;
+IF @findDuplicateIndex = 1
+BEGIN
+    SELECT 'Duplicate Index Report' AS ReportName;
 
-        -- Temporary table to store duplicate index information
-        CREATE TABLE #duplicateIndex (
-            DBName         SYSNAME,
-            TableName      SYSNAME,
-            IndexName      SYSNAME,
-            ExactDuplicate SYSNAME
-        );
+    -- Temporary table to store duplicate index information
+    CREATE TABLE #duplicateIndex (
+        DBName         SYSNAME,
+        TableName      SYSNAME,
+        IndexName      NVARCHAR(256),
+        ExactDuplicate NVARCHAR(256)
+    );
 
-        -- Dynamic SQL to analyze duplicate indexes
-        SET @sql = N'
-        USE ' + QUOTENAME(@DatabaseName) + ';
-        WITH indexcols AS (
-            SELECT object_id AS id, index_id AS indid, name,
-                (
-                    SELECT CASE keyno WHEN 0 THEN NULL ELSE colid END AS [data()]
-                    FROM sys.sysindexkeys AS k
-                    WHERE k.id = i.object_id AND k.indid = i.index_id
-                    ORDER BY keyno, colid
-                    FOR XML PATH('''')
-                ) AS cols,
-                (
-                    SELECT CASE keyno WHEN 0 THEN colid ELSE NULL END AS [data()]
-                    FROM sys.sysindexkeys AS k
-                    WHERE k.id = i.object_id AND k.indid = i.index_id
-                    ORDER BY colid
-                    FOR XML PATH('''')
-                ) AS inc
-            FROM sys.indexes AS i
-        )
-        SELECT DB_NAME(DB_ID()) AS DBName,
-               OBJECT_SCHEMA_NAME(c1.id) + '' '' + OBJECT_NAME(c1.id) AS TableName,
-               c1.name AS IndexName,
-               c2.name AS ExactDuplicate
-        FROM indexcols AS c1
+    -- Dynamic SQL to analyze duplicate indexes
+    SET @sql = N'
+    USE ' + QUOTENAME(@DatabaseName) + ';
+    WITH indexcols AS (
+        SELECT i.object_id AS id, i.index_id AS indid, i.name,
+            (
+                SELECT CASE keyno WHEN 0 THEN NULL ELSE colid END AS [data()]
+                FROM sys.sysindexkeys AS k
+                WHERE k.id = i.object_id AND k.indid = i.index_id
+                ORDER BY keyno, colid
+                FOR XML PATH('''')
+            ) AS cols,
+            (
+                SELECT CASE keyno WHEN 0 THEN colid ELSE NULL END AS [data()]
+                FROM sys.sysindexkeys AS k
+                WHERE k.id = i.object_id AND k.indid = i.index_id
+                ORDER BY colid
+                FOR XML PATH('''')
+            ) AS inc
+        FROM sys.indexes AS i
+    ),
+    index_sizes AS (
+        SELECT
+            i.object_id, i.index_id,
+            SUM(a.used_pages) * 8 / 1024.0 AS IndexSizeMB
+        FROM
+            sys.indexes AS i
+            JOIN sys.dm_db_partition_stats AS p ON i.object_id = p.object_id AND i.index_id = p.index_id
+            JOIN sys.allocation_units AS a ON p.partition_id = a.container_id
+        GROUP BY i.object_id, i.index_id
+    )
+    SELECT
+        DB_NAME() AS DBName,
+        OBJECT_SCHEMA_NAME(c1.id) + '' '' + OBJECT_NAME(c1.id) AS TableName,
+        c1.name + '', Size:'' + CONVERT(VARCHAR(20), CAST(is1.IndexSizeMB AS DECIMAL(10,2))) + ''MB'' AS IndexName,
+        c2.name + '', Size:'' + CONVERT(VARCHAR(20), CAST(is2.IndexSizeMB AS DECIMAL(10,2))) + ''MB'' AS ExactDuplicate
+    FROM
+        indexcols AS c1
         JOIN indexcols AS c2 ON c1.id = c2.id
                              AND c1.indid < c2.indid
                              AND c1.cols = c2.cols
-                             AND c1.inc = c2.inc;
-        ';
+                             AND c1.inc = c2.inc
+        LEFT JOIN index_sizes AS is1 ON c1.id = is1.object_id AND c1.indid = is1.index_id
+        LEFT JOIN index_sizes AS is2 ON c2.id = is2.object_id AND c2.indid = is2.index_id
+    ';
 
-        INSERT INTO #duplicateIndex
-        EXEC sp_executesql @sql;
+    INSERT INTO #duplicateIndex
+    EXEC sp_executesql @sql;
 
-        SELECT *
-        FROM #duplicateIndex;
+    SELECT *
+    FROM #duplicateIndex;
 
-        DROP TABLE #duplicateIndex;
-    END
+    DROP TABLE #duplicateIndex;
+END;
+
 END;
 GO
 
