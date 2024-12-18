@@ -1,0 +1,207 @@
+CREATE  OR  PROCEDURE usp_QueryStoreStatistics    
+(      
+    @SPOrQuery NVARCHAR(128) = NULL,  -- Specify a stored procedure name or ad hoc query to filter results      
+    @TimeRange NVARCHAR(10) = '60Mi',  -- Specify the time range for the data (default is past 15 minutes)      
+    @MaxResults INT = 50,  -- Specify the maximum number of results to return (default is 50)      
+    @OrderBy NVARCHAR(50) = 'total_duration desc ',  -- Specify the column to order by (default is TotalDuration)      
+    @StartTime DATETIME = NULL, -- Specify the start time for the custom time frame       
+    @EndTime DATETIME = NULL ,  
+ @QueryID INT = NULL,  
+ @MinPlans INT = NULL  
+)      
+AS      
+BEGIN      
+    SET NOCOUNT ON;    
+    DECLARE @WhereClause NVARCHAR(MAX) = '';    
+    DECLARE @SQL NVARCHAR(MAX) = '';    
+    
+    -- Convert TimeRange to actual datetime range      
+    IF @StartTime IS NULL      
+    BEGIN      
+        IF @TimeRange LIKE '%Mi'      
+            SET @StartTime = DATEADD(MINUTE, -CAST(LEFT(@TimeRange, LEN(@TimeRange) - 2) AS INT), GETUTCDATE());      
+        ELSE IF @TimeRange LIKE '%D'      
+            SET @StartTime = DATEADD(DAY, -CAST(LEFT(@TimeRange, LEN(@TimeRange) - 1) AS INT), GETUTCDATE());      
+        ELSE IF @TimeRange LIKE '%M'      
+            SET @StartTime = DATEADD(MONTH, -CAST(LEFT(@TimeRange, LEN(@TimeRange) - 1) AS INT), GETUTCDATE());      
+        ELSE      
+            SET @StartTime = DATEADD(MINUTE, -15, GETUTCDATE()); -- Default to past 15 minutes      
+  SET @EndTime = GETUTCDATE()    
+    END      
+    ELSE IF (@StartTime IS NOT NULL AND @EndTime IS NULL)      
+    BEGIN      
+        IF @TimeRange LIKE '%Mi'      
+            SET @EndTime = DATEADD(MINUTE, CAST(LEFT(@TimeRange, LEN(@TimeRange) - 2) AS INT), @StartTime);      
+        ELSE IF @TimeRange LIKE '%D'      
+            SET @EndTime = DATEADD(DAY, CAST(LEFT(@TimeRange, LEN(@TimeRange) - 1) AS INT), @StartTime);      
+        ELSE IF @TimeRange LIKE '%M'      
+            SET @EndTime = DATEADD(MONTH, CAST(LEFT(@TimeRange, LEN(@TimeRange) - 1) AS INT), @StartTime);      
+        ELSE      
+            SET @EndTime = DATEADD(MINUTE, -15, GETUTCDATE()); -- Default to past 15 minutes      
+    END       
+        
+    -- Common WHERE clause to filter by stored procedure name or query text if provided      
+    IF @SPOrQuery IS NOT NULL      
+        SET @WhereClause = @WhereClause + ' AND (ISNULL(rs.object_name, '''') = ''' + @SPOrQuery + ''' OR rs.query_sql_text LIKE ''%' + @SPOrQuery + '%'')'  
+  
+    
+        
+    -- Dynamic SQL to gather statistics from Query Store DMVs    
+    SET @SQL = N'    
+    WITH     
+    runtime_stats AS    
+    (    
+        SELECT TOP (' + CONVERT(VARCHAR(6), @MaxResults) + ')     
+            p.query_id query_id,    
+            q.object_id object_id,    
+            ISNULL(OBJECT_NAME(q.object_id), '''') object_name,    
+            qt.query_sql_text query_sql_text,    
+            -- Duration    
+            ROUND(CONVERT(float, SUM(rs.avg_duration * rs.count_executions)) * 0.001, 2) total_duration,    
+            ROUND(CONVERT(float, AVG(rs.avg_duration)) * 0.001, 2) avg_duration,    
+            ROUND(CONVERT(float, MIN(rs.min_duration)) * 0.001, 2) min_duration,    
+            ROUND(CONVERT(float, MAX(rs.max_duration)) * 0.001, 2) max_duration,    
+            ROUND(CONVERT(float, SQRT(SUM(rs.stdev_duration * rs.stdev_duration * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))) * 0.001, 2) stdev_duration,    
+            -- CPU Time    
+            ROUND(CONVERT(float, SUM(rs.avg_cpu_time * rs.count_executions)) * 0.001, 2) total_cpu_time,    
+            ROUND(CONVERT(float, AVG(rs.avg_cpu_time)) * 0.001, 2) avg_cpu_time,    
+            ROUND(CONVERT(float, MIN(rs.min_cpu_time)) * 0.001, 2) min_cpu_time,    
+            ROUND(CONVERT(float, MAX(rs.max_cpu_time)) * 0.001, 2) max_cpu_time,    
+            ROUND(CONVERT(float, SQRT(SUM(rs.stdev_cpu_time * rs.stdev_cpu_time * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))) * 0.001, 2) stdev_cpu_time,    
+            -- Logical Reads    
+            ROUND(CONVERT(float, SUM(rs.avg_logical_io_reads * rs.count_executions)) * 8, 2) total_logical_reads_kb,    
+            ROUND(CONVERT(float, AVG(rs.avg_logical_io_reads)) * 8, 2) avg_logical_reads_kb,    
+            ROUND(CONVERT(float, MIN(rs.min_logical_io_reads)) * 8, 2) min_logical_reads_kb,    
+            ROUND(CONVERT(float, MAX(rs.max_logical_io_reads)) * 8, 2) max_logical_reads_kb,    
+            ROUND(CONVERT(float, SQRT(SUM(rs.stdev_logical_io_reads * rs.stdev_logical_io_reads * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))) * 8, 2) stdev_logical_reads_kb,    
+            -- Logical Writes    
+            ROUND(CONVERT(float, SUM(rs.avg_logical_io_writes * rs.count_executions)) * 8, 2) total_logical_writes_kb,    
+            ROUND(CONVERT(float, AVG(rs.avg_logical_io_writes)) * 8, 2) avg_logical_writes_kb,    
+            ROUND(CONVERT(float, MIN(rs.min_logical_io_writes)) * 8, 2) min_logical_writes_kb,    
+            ROUND(CONVERT(float, MAX(rs.max_logical_io_writes)) * 8, 2) max_logical_writes_kb,    
+            ROUND(CONVERT(float, SQRT(SUM(rs.stdev_logical_io_writes * rs.stdev_logical_io_writes * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))) * 8, 2) stdev_logical_writes_kb,    
+            -- Physical Reads (KB)    
+            ROUND(CONVERT(float, SUM(rs.avg_physical_io_reads * rs.count_executions)) * 8, 2) total_physical_reads_kb,    
+            ROUND(CONVERT(float, AVG(rs.avg_physical_io_reads)) * 8, 2) avg_physical_reads_kb,    
+            ROUND(CONVERT(float, MIN(rs.min_physical_io_reads)) * 8, 2) min_physical_reads_kb,    
+            ROUND(CONVERT(float, MAX(rs.max_physical_io_reads)) * 8, 2) max_physical_reads_kb,    
+            ROUND(CONVERT(float, SQRT(SUM(rs.stdev_physical_io_reads * rs.stdev_physical_io_reads * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))) * 8, 2) stdev_physical_reads_kb,    
+            -- CLR Time (ms)    
+            ROUND(CONVERT(float, SUM(rs.avg_clr_time * rs.count_executions)) * 0.001, 2) total_clr_time,    
+            ROUND(CONVERT(float, AVG(rs.avg_clr_time)) * 0.001, 2) avg_clr_time,    
+            ROUND(CONVERT(float, MIN(rs.min_clr_time)) * 0.001, 2) min_clr_time,    
+            ROUND(CONVERT(float, MAX(rs.max_clr_time)) * 0.001, 2) max_clr_time,    
+            ROUND(CONVERT(float, SQRT(SUM(rs.stdev_clr_time * rs.stdev_clr_time * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))) * 0.001, 2) stdev_clr_time,    
+            -- DOP    
+            ROUND(CONVERT(float, SUM(rs.avg_dop * rs.count_executions)), 2) total_dop,    
+            ROUND(CONVERT(float, AVG(rs.avg_dop)), 2) avg_dop,    
+            ROUND(CONVERT(float, MIN(rs.min_dop)), 2) min_dop,    
+            ROUND(CONVERT(float, MAX(rs.max_dop)), 2) max_dop,    
+   ROUND(CONVERT(float, SQRT(SUM(rs.stdev_dop * rs.stdev_dop * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))), 2) stdev_dop,    
+            -- Memory Consumption (KB)    
+            ROUND(CONVERT(float, SUM(rs.avg_log_bytes_used * rs.count_executions)) / 1024, 2) total_memory_consumption_kb,    
+            ROUND(CONVERT(float, AVG(rs.avg_log_bytes_used)) / 1024, 2) avg_memory_consumption_kb,    
+            ROUND(CONVERT(float, MIN(rs.min_log_bytes_used)) / 1024, 2) min_memory_consumption_kb,    
+            ROUND(CONVERT(float, MAX(rs.max_log_bytes_used)) / 1024, 2) max_memory_consumption_kb,    
+            ROUND(CONVERT(float, SQRT(SUM(rs.stdev_log_bytes_used * rs.stdev_log_bytes_used * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))) / 1024, 2) stdev_memory_consumption_kb,    
+            -- Row Count    
+            SUM(rs.avg_rowcount * rs.count_executions) total_row_count,    
+            AVG(rs.avg_rowcount) avg_row_count,    
+            MIN(rs.min_rowcount) min_row_count,    
+            MAX(rs.max_rowcount) max_row_count,    
+            SQRT(SUM(rs.stdev_rowcount * rs.stdev_rowcount * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0)) stdev_row_count,    
+            -- Log Memory Used (KB)    
+            ROUND(CONVERT(float, SUM(rs.avg_log_bytes_used * rs.count_executions)) / 1024, 2) total_log_memory_used_kb,    
+            ROUND(CONVERT(float, AVG(rs.avg_log_bytes_used)) / 1024, 2) avg_log_memory_used_kb,    
+            ROUND(CONVERT(float, MIN(rs.min_log_bytes_used)) / 1024, 2) min_log_memory_used_kb,    
+            ROUND(CONVERT(float, MAX(rs.max_log_bytes_used)) / 1024, 2) max_log_memory_used_kb,    
+            ROUND(CONVERT(float, SQRT(SUM(rs.stdev_log_bytes_used * rs.stdev_log_bytes_used * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))) / 1024, 2) stdev_log_memory_used_kb,    
+            -- Temp DB Memory Used (KB)    
+            ROUND(CONVERT(float, SUM(rs.avg_tempdb_space_used * rs.count_executions)) / 1024, 2) total_temp_db_memory_used_kb,    
+            ROUND(CONVERT(float, AVG(rs.avg_tempdb_space_used)) / 1024, 2) avg_temp_db_memory_used_kb,    
+            ROUND(CONVERT(float, MIN(rs.min_tempdb_space_used)) / 1024, 2) min_temp_db_memory_used_kb,    
+            ROUND(CONVERT(float, MAX(rs.max_tempdb_space_used)) / 1024, 2) max_temp_db_memory_used_kb,    
+            ROUND(CONVERT(float, SQRT(SUM(rs.stdev_tempdb_space_used * rs.stdev_tempdb_space_used * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0))) / 1024, 2) stdev_temp_db_memory_used_kb,    
+            SUM(rs.count_executions) count_executions,    
+            COUNT(DISTINCT p.plan_id) AS plan_count,    
+            STRING_AGG(CAST(p.plan_id AS NVARCHAR(MAX)), '', '') WITHIN GROUP (ORDER BY p.plan_id) AS plan_ids    
+    FROM sys.query_store_runtime_stats rs    
+    JOIN sys.query_store_plan p ON p.plan_id = rs.plan_id    
+    JOIN sys.query_store_query q ON q.query_id = p.query_id    
+    JOIN sys.query_store_query_text qt ON q.query_text_id = qt.query_text_id    
+    WHERE NOT (rs.first_execution_time > @ENDtime OR rs.last_execution_time < @starttime)    
+  
+    GROUP BY p.query_id, qt.query_sql_text, q.object_id   
+)    
+SELECT     
+    rs.query_id,    
+    rs.object_id,    
+    rs.object_name,    
+    rs.query_sql_text,    
+    rs.total_duration,    
+    rs.avg_duration,    
+    rs.min_duration,    
+    rs.max_duration,    
+    rs.stdev_duration,    
+    rs.total_cpu_time,    
+    rs.avg_cpu_time,    
+    rs.min_cpu_time,    
+    rs.max_cpu_time,    
+    rs.stdev_cpu_time,    
+    rs.total_logical_reads_kb,    
+    rs.avg_logical_reads_kb,    
+    rs.min_logical_reads_kb,    
+    rs.max_logical_reads_kb,    
+    rs.stdev_logical_reads_kb,    
+    rs.total_logical_writes_kb,    
+    rs.avg_logical_writes_kb,    
+    rs.min_logical_writes_kb,    
+    rs.max_logical_writes_kb,    
+    rs.stdev_logical_writes_kb,    
+    rs.total_physical_reads_kb,    
+    rs.avg_physical_reads_kb,    
+    rs.min_physical_reads_kb,    
+    rs.max_physical_reads_kb,    
+    rs.stdev_physical_reads_kb,    
+    rs.total_clr_time,    
+    rs.avg_clr_time,    
+    rs.min_clr_time,    
+    rs.max_clr_time,    
+    rs.stdev_clr_time,    
+    rs.total_dop,    
+    rs.avg_dop,    
+    rs.min_dop,    
+    rs.max_dop,    
+    rs.stdev_dop,    
+    rs.total_memory_consumption_kb,    
+    rs.avg_memory_consumption_kb,    
+    rs.min_memory_consumption_kb,    
+    rs.max_memory_consumption_kb,    
+    rs.stdev_memory_consumption_kb,    
+    rs.total_row_count,    
+    rs.avg_row_count,    
+    rs.min_row_count,    
+    rs.max_row_count,    
+    rs.stdev_row_count,    
+    rs.total_log_memory_used_kb,    
+    rs.avg_log_memory_used_kb,    
+    rs.min_log_memory_used_kb,    
+    rs.max_log_memory_used_kb,    
+    rs.stdev_log_memory_used_kb,    
+    rs.total_temp_db_memory_used_kb,    
+    rs.avg_temp_db_memory_used_kb,    
+    rs.min_temp_db_memory_used_kb,    
+    rs.max_temp_db_memory_used_kb,    
+    rs.stdev_temp_db_memory_used_kb,    
+    rs.count_executions,  
+ rs.plan_count,  
+    CONCAT(rs.plan_count, '' (plan_id: '', rs.plan_ids, '')'') AS num_plans    
+FROM runtime_stats rs    
+    WHERE 1=1  ' + @WhereClause + '   
+ORDER BY ' + @OrderBy + '    
+OPTION (RECOMPILE);';    
+    
+    EXEC sp_executesql @SQL,     
+        N'@StartTime DATETIME, @EndTime DATETIME',     
+        @StartTime, @EndTime;    
+END; 
