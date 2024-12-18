@@ -1,7 +1,7 @@
 CREATE  OR ALTER PROCEDURE #usp_QueryStoreStatistics    
 (      
     @SPOrQuery NVARCHAR(128) = '',  -- Specify a stored procedure name or ad hoc query to filter results      
-    @TimeRange NVARCHAR(10) = '60Mi',  -- Specify the time range for the data (default is past 15 minutes)      
+    @TimeRange NVARCHAR(10) = '90Mi',  -- Specify the time range for the data (default is past 15 minutes)      
     @MaxResults INT = 50,  -- Specify the maximum number of results to return (default is 50)      
     @OrderBy NVARCHAR(50) = 'avg_duration',  -- Specify the column to order by (default is TotalDuration)      
     @StartTime DATETIME = NULL, -- Specify the start time for the custom time frame       
@@ -196,7 +196,32 @@ SELECT  top 100
         WHEN @OrderBy = 'count_executions' THEN count_executions
 		ELSE total_duration
     END  desc
+
+
+IF EXISTS (SELECT 1 FROM sys.procedures WHERE name like @SPOrQuery)
+BEGIN
+SELECT 
+    p.name AS [SP Name], 
+    qs.execution_count AS [Execution Count],
+    ISNULL(qs.execution_count / DATEDIFF(Minute, qs.cached_time, GETDATE()), 0) AS [Calls/Minute],
+    qs.total_elapsed_time / qs.execution_count AS [Avg Elapsed Time],
+    qs.total_worker_time / qs.execution_count AS [Avg Worker Time],    
+    qs.total_logical_reads / qs.execution_count AS [Avg Logical Reads],
+    CONVERT(NVARCHAR(25), qs.last_execution_time, 20) AS [Last Execution Time],
+    CONVERT(NVARCHAR(25), qs.cached_time, 20) AS [Plan Cached Time],
+    qp.query_plan AS [Query Plan],
+	ao.create_date,
+	ao.modify_date
+FROM 
+    sys.procedures AS p WITH (NOLOCK)
+    INNER JOIN sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
+        ON p.[object_id] = qs.[object_id]
+    CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
+	LEFT JOIN sys.all_objects ao ON p.object_id = ao.object_id
+WHERE 
+    qs.database_id = DB_ID()
+    AND p.name = @SPOrQuery
+END
 END
 GO
 EXEC #usp_QueryStoreStatistics
-
