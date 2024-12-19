@@ -3,9 +3,11 @@ GO
 CREATE OR ALTER PROCEDURE usp_AgentJobReport
 (@jStatus varchar(128) = 'enabled' --Enabled, Disabled, ALL
 , @jIsScheduled varchar(128) = 'ALL' --Yes, No, ALL
-,@ShowOnlyFailedJobsInPast24Hours bit = 0)
+,@ShowOnlyFailedJobsInPast24Hours bit = 0,
+@jobname varchar(128) = NULL)
 AS
-
+IF @jobname IS NULL
+SET @jobname = '%'
 if @jStatus not in ('Enabled', 'Disabled')
 set @jStatus = '%'
 if @jIsScheduled not in ('Yes','No')
@@ -561,11 +563,15 @@ FROM #finalschedule     a
         ON a.jobname = b.JobName
 WHERE A.Status LIKE @jStatus
 AND A.IsScheduled LIKE @jIsScheduled
+AND A.JobName like @jobname 
 ORDER BY FailurePercentageInPast24Hours DESC
 end
-
+IF LEN( @jobname) > 1
+SELECT *FROM #temp1
+WHERE job_name LIKE @jobname
 DROP TABLE #schedules;
 DROP TABLE #temp1;
 DROP TABLE #finalschedule
 DROP TABLE #JobStats
 GO
+EXEC usp_AgentJobReport
