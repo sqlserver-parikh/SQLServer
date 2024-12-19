@@ -1,3 +1,5 @@
+USE tempdb
+GO
 CREATE OR ALTER PROCEDURE usp_DiskDBSpaceReport
 AS
 SET NOCOUNT ON;
@@ -311,4 +313,4 @@ BEGIN
     DROP TABLE #DBSpaceUseInfo;
 END;
 GO
-usp_DiskDBSpaceReport
+EXEC usp_DiskDBSpaceReport
