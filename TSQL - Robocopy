@@ -1,109 +1,132 @@
 USE [master]
 GO
-/****** Object:  StoredProcedure [dbo].[spRoboCopy]    Script Date: 6/30/2022 8:53:57 AM ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
-ALTER   PROCEDURE [dbo].[spRoboCopy]
-    @Source varchar(max) = '\\myserver.com\BACKUPS\'
-  , @Destination varchar(max) = 'U:\Backup\'
-  , @Destination2 varchar(max) = 'V:\Backup\' --This will copy multiple files alternatively to U and V drive sorted by size asc
-  , @FileName varchar(max) = '%.bak'
-  , @MAXAge int = 8
-  , @PrintOnly bit = 0
-AS
-DECLARE @Command   varchar(1000)
-      , @StartTime datetime
-	  , @ErrorLog varchar(1024);
-SET @ErrorLog = CONVERT(VARCHAR(1024),SERVERPROPERTY('ErrorLogFileName'))
-SET @ErrorLog = LEFT(@ErrorLog, LEN(@ErrorLog)-8)
-SET @Destination2 = isnull(@Destination2, @Destination)
-IF EXISTS
-(
-    SELECT *
-    FROM tempdb.sys.objects
-    WHERE object_id = OBJECT_ID(N'[tempdb].[dbo].[Files]')
-          AND type in ( N'U' ) --and create_date < DATEADD(dd,-2,getdate())
-)
-begin
-    TRUNCATE TABLE tempdb..Files
-	INSERT INTO tempdb..Files
-	select *
-    from string_split(@Source, ',')a
-        cross apply sys.dm_os_enumerate_filesystem(a.value, '*')
-    where size_in_bytes <> 0
-          and last_write_time > (DATEADD(dd, -@MAXAge, getdate()))
-          and file_or_directory_name like @FileName
-          and full_filesystem_path not like '%recycle%'
-order by size_in_bytes
-END
-ELSE
-BEGIN
 
-    select *
-    Into tempdb..Files
-    from string_split(@Source, ',')a
-        cross apply sys.dm_os_enumerate_filesystem(a.value, '*')
-    where size_in_bytes <> 0
-          and last_write_time > (DATEADD(dd, -@MAXAge, getdate()))
-          and file_or_directory_name like @FileName
-          and full_filesystem_path not like '%recycle%'
-order by size_in_bytes
-end
-;with cte
-as (select *
-         , ROW_NUMBER() over (order by size_in_bytes) Ranks
-    from tempdb..files with (nolock)
-    WHERE file_or_directory_name LIKE @FileName
-          AND file_or_directory_name NOT LIKE '%master%'
-          AND file_or_directory_name NOT LIKE '%msdb%'
-          AND file_or_directory_name NOT LIKE '%zdba%'
-          AND file_or_directory_name NOT LIKE '%model%'
-          AND file_or_directory_name NOT LIKE '%pubs%'
-          AND file_or_directory_name NOT LIKE '%ag_test%'
-          AND file_or_directory_name NOT LIKE '%view_test%'
-   )
-   , cte2
-as (select 'robocopy ' + parent_directory + ' ' + case
-                                                      when ranks % 2 = 1 then
-                                                          @Destination
-                                                      else
-                                                          @Destination2
-                                                  end + ' ' + file_or_directory_name
-           + ' /S /r:3 /w:10 /log:' + @ErrorLog + replace(file_or_directory_name, '.', '_') + '_'
-           + convert(varchar(8), getdate(), 112) + '_' + convert(varchar(4), ranks) + '.txt /XF' Robocopy
-    from cte
-   )
-select *
-into #robocopy
-from cte2
-select *
-from #robocopy
-DECLARE filecopy CURSOR FOR select * from #robocopy
-OPEN filecopy;
-FETCH NEXT FROM filecopy
-INTO @Command;
-WHILE @@FETCH_STATUS = 0
+ALTER PROCEDURE [dbo].[spRoboCopy]
+    @Source varchar(max) = '\\myserver.com\BACKUPS\',
+    @Destination varchar(max) = 'U:\Backup\',
+    @Destination2 varchar(max) = 'V:\Backup\', -- This will copy multiple files alternatively to U and V drive sorted by size asc
+    @FileName varchar(max) = '%.bak',
+    @MAXAge int = 8,
+    @PrintOnly bit = 0
+AS
 BEGIN
-    set @StartTime = getdate()
-    PRINT @Command
-    if @PrintOnly = 0
-        exec xp_cmdshell @Command
-    insert into master..CommandLog
-    (
-        command
-      , CommandType
-      , StartTime
-      , endtime
+    DECLARE @Command varchar(1000),
+            @StartTime datetime,
+            @ErrorLog varchar(1024),
+            @xp_cmdshell_status int,
+            @advanced_options_status int;
+
+    -- Check the current status of advanced options
+    SELECT @advanced_options_status = value_in_use
+    FROM sys.configurations
+    WHERE name = 'show advanced options';
+
+    -- Enable advanced options if they are disabled
+    IF @advanced_options_status = 0
+    BEGIN
+        EXEC sp_configure 'show advanced options', 1;
+        RECONFIGURE;
+    END
+
+    -- Check the current status of xp_cmdshell
+    SELECT @xp_cmdshell_status = value_in_use
+    FROM sys.configurations
+    WHERE name = 'xp_cmdshell';
+
+    -- Enable xp_cmdshell if it is disabled
+    IF @xp_cmdshell_status = 0
+    BEGIN
+        EXEC sp_configure 'xp_cmdshell', 1;
+        RECONFIGURE;
+    END
+
+    SET @ErrorLog = CONVERT(VARCHAR(1024), SERVERPROPERTY('ErrorLogFileName'));
+    SET @ErrorLog = LEFT(@ErrorLog, LEN(@ErrorLog) - 8);
+    SET @Destination2 = ISNULL(@Destination2, @Destination);
+
+    IF EXISTS (SELECT * FROM tempdb.sys.objects WHERE object_id = OBJECT_ID(N'[tempdb].[dbo].[Files]') AND type in (N'U'))
+    BEGIN
+        TRUNCATE TABLE tempdb..Files;
+        INSERT INTO tempdb..Files
+        SELECT * FROM string_split(@Source, ',') a
+        CROSS APPLY sys.dm_os_enumerate_filesystem(a.value, '*')
+        WHERE size_in_bytes <> 0
+              AND last_write_time > (DATEADD(dd, -@MAXAge, GETDATE()))
+              AND file_or_directory_name LIKE @FileName
+              AND full_filesystem_path NOT LIKE '%recycle%'
+        ORDER BY size_in_bytes;
+    END
+    ELSE
+    BEGIN
+        SELECT * INTO tempdb..Files
+        FROM string_split(@Source, ',') a
+        CROSS APPLY sys.dm_os_enumerate_filesystem(a.value, '*')
+        WHERE size_in_bytes <> 0
+              AND last_write_time > (DATEADD(dd, -@MAXAge, GETDATE()))
+              AND file_or_directory_name LIKE @FileName
+              AND full_filesystem_path NOT LIKE '%recycle%'
+        ORDER BY size_in_bytes;
+    END
+
+    ;WITH cte AS (
+        SELECT *,
+               ROW_NUMBER() OVER (ORDER BY size_in_bytes) AS Ranks
+        FROM tempdb..Files WITH (NOLOCK)
+        WHERE file_or_directory_name LIKE @FileName
+              AND file_or_directory_name NOT LIKE '%master%'
+              AND file_or_directory_name NOT LIKE '%msdb%'
+              AND file_or_directory_name NOT LIKE '%zdba%'
+              AND file_or_directory_name NOT LIKE '%model%'
+              AND file_or_directory_name NOT LIKE '%pubs%'
+              AND file_or_directory_name NOT LIKE '%ag_test%'
+              AND file_or_directory_name NOT LIKE '%view_test%'
+    ),
+    cte2 AS (
+        SELECT 'robocopy ' + parent_directory + ' ' + CASE
+                                                          WHEN Ranks % 2 = 1 THEN @Destination
+                                                          ELSE @Destination2
+                                                      END + ' ' + file_or_directory_name
+               + ' /S /r:3 /w:10 /log:' + @ErrorLog + REPLACE(file_or_directory_name, '.', '_') + '_'
+               + CONVERT(VARCHAR(8), GETDATE(), 112) + '_' + CONVERT(VARCHAR(4), Ranks) + '.txt /XF' AS Robocopy
+        FROM cte
     )
-    select @Command
-         , 'ROBOCOPY'
-         , @StartTime
-         , getdate()
-    FETCH NEXT FROM filecopy
-    INTO @Command;
-end
-CLOSE filecopy;
-DEALLOCATE filecopy;
-drop table #robocopy
+    SELECT * INTO #robocopy FROM cte2;
+
+    DECLARE filecopy CURSOR FOR SELECT * FROM #robocopy;
+    OPEN filecopy;
+    FETCH NEXT FROM filecopy INTO @Command;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @StartTime = GETDATE();
+        PRINT @Command;
+        IF @PrintOnly = 0
+            EXEC xp_cmdshell @Command;
+        INSERT INTO master..CommandLog (command, CommandType, StartTime, endtime)
+        VALUES (@Command, 'ROBOCOPY', @StartTime, GETDATE());
+        FETCH NEXT FROM filecopy INTO @Command;
+    END
+
+    CLOSE filecopy;
+    DEALLOCATE filecopy;
+    DROP TABLE #robocopy;
+
+    -- Restore the original status of xp_cmdshell
+    IF @xp_cmdshell_status = 0
+    BEGIN
+        EXEC sp_configure 'xp_cmdshell', 0;
+        RECONFIGURE;
+    END
+
+    -- Restore the original status of advanced options
+    IF @advanced_options_status = 0
+    BEGIN
+        EXEC sp_configure 'show advanced options', 0;
+        RECONFIGURE;
+    END
+END
+GO
