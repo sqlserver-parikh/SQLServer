@@ -1,0 +1,98 @@
+USE tempdb 
+GO
+CREATE OR ALTER PROCEDURE dbo.usp_CleanupAdHocQueryStore
+    @TimeFrame NVARCHAR(10) = '7D', -- Default to 7 days
+    @DBName NVARCHAR(MAX) = NULL -- Database names, comma-separated
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @TimeUnit CHAR(1) = RIGHT(@TimeFrame, 1);
+    DECLARE @TimeValue INT = LEFT(@TimeFrame, LEN(@TimeFrame) - 1);
+
+    -- Validate the time unit and set default if invalid
+    IF @TimeUnit NOT IN ('m', 'H', 'D')
+    BEGIN
+        SET @TimeUnit = 'D';
+        SET @TimeValue = 7;
+    END
+
+    DECLARE @CutoffDateTime DATETIME;
+
+    -- Calculate the cutoff datetime based on the time unit
+    IF @TimeUnit = 'm'
+        SET @CutoffDateTime = DATEADD(MINUTE, -@TimeValue, GETUTCDATE());
+    ELSE IF @TimeUnit = 'H'
+        SET @CutoffDateTime = DATEADD(HOUR, -@TimeValue, GETUTCDATE());
+    ELSE IF @TimeUnit = 'D'
+        SET @CutoffDateTime = DATEADD(DAY, -@TimeValue, GETUTCDATE());
+
+    -- Split the @DBName parameter into a table
+    DECLARE @DBNames TABLE (DBName NVARCHAR(128));
+    IF @DBName IS NOT NULL
+    BEGIN
+        INSERT INTO @DBNames (DBName)
+        SELECT TRIM(value) FROM STRING_SPLIT(@DBName, ',');
+    END
+
+    -- Cursor to iterate over databases
+    DECLARE @CurrentDB NVARCHAR(128);
+    DECLARE db_cursor CURSOR FOR
+    SELECT d.name
+    FROM sys.databases d
+    WHERE d.state_desc = 'ONLINE'
+      AND d.user_access_desc = 'MULTI_USER'
+      AND d.is_query_store_on = 1 -- Query Store enabled
+      AND (@DBName IS NULL OR d.name IN (SELECT DBName FROM @DBNames));
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @CurrentDB;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            -- Construct the dynamic SQL for each database
+            DECLARE @SQL NVARCHAR(MAX) = '
+            USE ' + QUOTENAME(@CurrentDB) + ';
+            DECLARE @id INT;
+            DECLARE adhoc_queries_cursor CURSOR FOR
+                SELECT q.query_id
+                FROM sys.query_store_query_text AS qt
+                JOIN sys.query_store_query AS q
+                ON q.query_text_id = qt.query_text_id
+                JOIN sys.query_store_plan AS p
+                ON p.query_id = q.query_id
+                JOIN sys.query_store_runtime_stats AS rs
+                ON rs.plan_id = p.plan_id
+                WHERE q.is_internal_query = 1
+                   OR q.object_id = 0
+                GROUP BY q.query_id
+                HAVING MAX(rs.last_execution_time) < ''' + CONVERT(NVARCHAR, @CutoffDateTime, 126) + '''
+                ORDER BY q.query_id;
+
+            OPEN adhoc_queries_cursor;
+            FETCH NEXT FROM adhoc_queries_cursor INTO @id;
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                PRINT ''EXEC sp_query_store_remove_query '' + STR(@id);
+                EXEC sp_query_store_remove_query @id;
+                FETCH NEXT FROM adhoc_queries_cursor INTO @id;
+            END
+            CLOSE adhoc_queries_cursor;
+            DEALLOCATE adhoc_queries_cursor;
+            ';
+			PRINT @SQL;
+            -- Execute the dynamic SQL
+            EXEC sp_executesql @SQL;
+        END TRY
+        BEGIN CATCH
+            PRINT 'Error processing database: ' + @CurrentDB + '. ' + ERROR_MESSAGE();
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @CurrentDB;
+    END
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END;
+GO
+-- Execute the procedure for tempdb by default
+EXEC dbo.usp_CleanupAdHocQueryStore @TimeFrame = '7D', @DBName = NULL;
