@@ -1,20 +1,18 @@
-GO
-SET ANSI_NULLS ON
-GO
-
-SET QUOTED_IDENTIFIER ON
+USE tempdb
 GO
 
 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[usp_KillSpid]') AND type in (N'P', N'PC'))
 BEGIN
-EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[usp_KillSpid] AS' 
+    EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[usp_KillSpid] AS' 
 END
 GO
+
 ALTER PROCEDURE [dbo].usp_KillSpid  
-    @status NVARCHAR(50) = 'sleeping',  
-    @loginTimeThreshold INT = 1,
-	@loginname varchar(200) = '%',
-	@printonly bit = 0
+    @status NVARCHAR(50) = NULL,  
+    @loginTimeThreshold INT = NULL,
+    @loginnames varchar(4000) = '%',
+    @printonly bit = 1,
+    @KillAll bit = 1
 AS  
 BEGIN  
     SET NOCOUNT ON;  
@@ -22,43 +20,244 @@ BEGIN
     DECLARE @spid INT;  
     DECLARE @thresholdTime DATETIME;  
     DECLARE @sql NVARCHAR(MAX);  
+    DECLARE @whoIsActiveExists BIT = 0;
+    DECLARE @schema NVARCHAR(MAX);
+    DECLARE @whoIsActiveLocation sysname;
+    DECLARE @destination_table VARCHAR(MAX) = '#WhoIsActiveOutput';
+    DECLARE @spids VARCHAR(MAX);
+    DECLARE @killCount int;
+    DECLARE @errorMessage NVARCHAR(4000);
+
+    -- First create the WhoIsActive output table structure
+    CREATE TABLE #WhoIsActiveOutput 
+    (
+        [dd hh:mm:ss.mss] varchar(8000) NULL,
+        [session_id] smallint NOT NULL,
+        [sql_text] xml NULL,
+        [sql_command] xml NULL,
+        [login_name] nvarchar(128) NOT NULL,
+        [wait_info] nvarchar(4000) NULL,
+        [tran_log_writes] nvarchar(4000) NULL,
+        [CPU] varchar(30) NULL,
+        [tempdb_allocations] varchar(30) NULL,
+        [tempdb_current] varchar(30) NULL,
+        [blocking_session_id] smallint NULL,
+        [blocked_session_count] varchar(30) NULL,
+        [reads] varchar(30) NULL,
+        [writes] varchar(30) NULL,
+        [physical_reads] varchar(30) NULL,
+        [query_plan] xml NULL,
+        [used_memory] varchar(30) NULL,
+        [status] varchar(30) NOT NULL,
+        [tran_start_time] datetime NULL,
+        [implicit_tran] nvarchar(3) NULL,
+        [open_tran_count] varchar(30) NULL,
+        [percent_complete] varchar(30) NULL,
+        [host_name] nvarchar(128) NULL,
+        [database_name] nvarchar(128) NULL,
+        [program_name] nvarchar(128) NULL,
+        [start_time] datetime NOT NULL,
+        [login_time] datetime NULL,
+        [request_id] int NULL,
+        [collection_time] datetime NOT NULL
+    );
+
+    SELECT @whoIsActiveExists = 1,
+        @whoIsActiveLocation = CASE 
+            WHEN OBJECT_ID('dbo.sp_WhoIsActive') IS NOT NULL THEN 'dbo.sp_WhoIsActive'
+            WHEN OBJECT_ID('master.dbo.sp_WhoIsActive') IS NOT NULL THEN 'master.dbo.sp_WhoIsActive'
+            ELSE NULL
+        END;
+
+    SET @whoIsActiveExists = CASE WHEN @whoIsActiveLocation IS NOT NULL THEN 1 ELSE 0 END;
+
+    -- Create table for split login names
+    CREATE TABLE #LoginNames (LoginName varchar(200));
+    
+    -- Create table to store killed SPIDs with their basic details
+    CREATE TABLE #KilledSPIDs 
+    (
+        SPID INT,
+        LoginName varchar(200),
+        LoginTime datetime,
+        Status varchar(50),
+        HostName varchar(200),
+        ProgramName varchar(200)
+    );
+
+    -- Create table to store sp_who2 output as fallback
+    CREATE TABLE #Who2Output
+    (
+        SPID INT,
+        Status VARCHAR(255),
+        Login VARCHAR(255),
+        HostName VARCHAR(255),
+        BlkBy VARCHAR(255),
+        DBName VARCHAR(255),
+        Command VARCHAR(255),
+        CPUTime BIGINT,
+        DiskIO BIGINT,
+        LastBatch VARCHAR(255),
+        ProgramName VARCHAR(255),
+        SPID2 INT,
+        RequestID INT
+    );
+
+    -- Split comma-separated login names if not null using XML method
+    IF @loginnames IS NOT NULL
+    BEGIN
+        DECLARE @pos INT = 1;
+        DECLARE @nextPos INT;
+        DECLARE @value VARCHAR(200);
+        
+        -- Handle comma-separated list with domain names
+        WHILE @pos <= LEN(@loginnames)
+        BEGIN
+            SET @nextPos = CHARINDEX(',', @loginnames, @pos);
+            IF @nextPos = 0 
+                SET @nextPos = LEN(@loginnames) + 1;
+            
+            SET @value = LTRIM(RTRIM(SUBSTRING(@loginnames, @pos, @nextPos - @pos)));
+            
+            IF @value <> ''
+                INSERT INTO #LoginNames (LoginName) VALUES (@value);
+            
+            SET @pos = @nextPos + 1;
+        END;
+    END
+	SELECT * FROM #LoginNames
   
-    -- Calculate the threshold time by subtracting the specified hours from the current time  
-    SET @thresholdTime = DATEADD(HOUR, -@loginTimeThreshold, GETDATE());  
+    -- Calculate the threshold time only if parameter is not null  
+    IF @loginTimeThreshold IS NOT NULL
+        SET @thresholdTime = DATEADD(HOUR, -@loginTimeThreshold, GETDATE());  
   
     -- Create a temporary table to store the SPIDs  
     CREATE TABLE #MatchingSPIDs (SPID INT);  
   
-    -- Insert the SPIDs of transactions matching the provided status and login_time threshold into the temporary table  
+    -- Insert the SPIDs for killing
     INSERT INTO #MatchingSPIDs (SPID)  
-    SELECT spid  
-    FROM sys.sysprocesses  
-    WHERE spid > 50  
-        AND login_time < @thresholdTime  
-  AND loginame LIKE @loginname
-        AND status = @status;  
-  
-    -- Loop through the SPIDs and kill the corresponding transactions  
-    DECLARE MatchingSPIDs CURSOR LOCAL FAST_FORWARD FOR  
-    SELECT SPID FROM #MatchingSPIDs;  
-  
-    OPEN MatchingSPIDs;  
-    FETCH NEXT FROM MatchingSPIDs INTO @spid;  
-  
-    WHILE @@FETCH_STATUS = 0  
-    BEGIN  
-        SET @sql = 'KILL ' + CAST(@spid AS NVARCHAR(10));  
-		IF @printonly = 0
-        EXEC sp_executesql @sql; 
-		ELSE PRINT @SQL
-  
-        FETCH NEXT FROM MatchingSPIDs INTO @spid;  
-    END;  
-  
-    CLOSE MatchingSPIDs;  
-    DEALLOCATE MatchingSPIDs;  
-  
-    -- Drop the temporary table  
-    DROP TABLE #MatchingSPIDs;  
-END;  
-GO
+SELECT DISTINCT sp.spid  
+    FROM sys.sysprocesses sp
+    WHERE sp.spid >= 50  
+    AND (@loginTimeThreshold IS NULL OR sp.login_time < @thresholdTime)  
+    AND (@loginnames IS NULL OR EXISTS (
+        SELECT 1 FROM #LoginNames ln 
+        WHERE sp.loginame = ln.LoginName
+        OR (ln.LoginName LIKE '%[%]%' AND sp.loginame LIKE ln.LoginName)  -- Handle wildcards if explicitly specified
+        OR (ln.LoginName = '%' AND @KillAll = 1)  -- Handle default wildcard only if KillAll is enabled
+    ))
+    AND (@status IS NULL OR sp.status = @status);
+
+    -- Get count of affected sessions
+    SET @killCount = @@ROWCOUNT;
+
+    IF @killCount > 0
+    BEGIN
+        -- Store the initial state of sessions that will be killed
+        INSERT INTO #KilledSPIDs (SPID, LoginName, LoginTime, Status, HostName, ProgramName)
+        SELECT sp.spid, sp.loginame, sp.login_time, sp.status, sp.hostname, sp.program_name
+        FROM sys.sysprocesses sp
+        INNER JOIN #MatchingSPIDs m ON sp.spid = m.SPID;
+
+        -- Convert SPIDs to comma-separated string for sp_WhoIsActive filter
+        SELECT @spids = STUFF((
+            SELECT ',' + CAST(SPID AS VARCHAR(10))
+            FROM #MatchingSPIDs
+            FOR XML PATH('')), 1, 1, '');
+
+        -- Capture detailed session information before killing
+        IF @whoIsActiveExists = 1
+        BEGIN
+            BEGIN TRY
+                EXEC sp_WhoIsActive 
+                    @get_transaction_info = 1,
+                    @get_plans = 1,
+                    @get_full_inner_text = 1,
+                    @get_outer_command = 1,
+					@destination_table = @destination_table,
+                    @find_block_leaders = 1,
+                    @show_sleeping_spids = 2;
+            END TRY
+            BEGIN CATCH
+                SET @errorMessage = ERROR_MESSAGE();
+                PRINT 'Error capturing sp_WhoIsActive data: ' + @errorMessage;
+                SET @whoIsActiveExists = 0; -- Fallback to sp_who2
+            END CATCH
+        END
+
+        IF @whoIsActiveExists = 0
+        BEGIN
+            -- Fallback to sp_who2
+            INSERT INTO #Who2Output
+            EXEC sp_who2;
+        END
+
+        -- Kill the sessions if not print only mode
+        IF @printonly = 0
+        BEGIN
+            DECLARE MatchingSPIDs CURSOR LOCAL FAST_FORWARD FOR  
+            SELECT SPID FROM #MatchingSPIDs;  
+        
+            OPEN MatchingSPIDs;  
+            FETCH NEXT FROM MatchingSPIDs INTO @spid;  
+        
+            WHILE @@FETCH_STATUS = 0  
+            BEGIN  
+                BEGIN TRY
+                    SET @sql = 'KILL ' + CAST(@spid AS NVARCHAR(10));  
+                    EXEC sp_executesql @sql; 
+                END TRY
+                BEGIN CATCH
+                    PRINT 'Error killing SPID ' + CAST(@spid AS VARCHAR(10)) + ': ' + ERROR_MESSAGE();
+                END CATCH
+                FETCH NEXT FROM MatchingSPIDs INTO @spid;  
+            END;  
+        
+            CLOSE MatchingSPIDs;  
+            DEALLOCATE MatchingSPIDs;  
+        END
+
+        -- Show results based on execution mode
+        IF @printonly = 1
+        BEGIN
+            SELECT 'The following ' + CAST(@killCount AS VARCHAR(10)) + ' SPIDs would be killed:' AS PrintOnly;
+            SELECT 'KILL ' + CAST(SPID AS VARCHAR(6)) SessionsToKill FROM #MatchingSPIDs ORDER BY SPID;
+        END
+        ELSE
+        BEGIN
+            SELECT 'Sessions Affected: ' + CAST(@killCount AS VARCHAR(10)) AS KillSummary;
+            
+            SELECT 'Killed Sessions Summary' AS Summary;
+            SELECT k.SPID, k.LoginName, k.LoginTime, k.Status, k.HostName, k.ProgramName
+            FROM #KilledSPIDs k
+            ORDER BY k.SPID;
+        END;
+
+        -- Always show detailed session information
+        IF @whoIsActiveExists = 1
+        BEGIN
+            SELECT 'Detailed Session Information from sp_WhoIsActive' AS DetailedInfo;
+            SELECT * FROM #WhoIsActiveOutput
+            WHERE session_id IN (SELECT SPID FROM #KilledSPIDs)
+            ORDER BY session_id;
+        END
+        ELSE
+        BEGIN
+            SELECT 'Detailed Session Information from sp_who2' AS DetailedInfo;
+            SELECT * FROM #Who2Output 
+            WHERE SPID IN (SELECT SPID FROM #KilledSPIDs)
+            ORDER BY SPID;
+        END
+    END
+    ELSE
+    BEGIN
+        PRINT 'No sessions match the specified criteria.';
+    END
+
+    -- Drop all temporary tables  
+    IF OBJECT_ID('tempdb..#MatchingSPIDs') IS NOT NULL DROP TABLE #MatchingSPIDs;
+    IF OBJECT_ID('tempdb..#LoginNames') IS NOT NULL DROP TABLE #LoginNames;
+    IF OBJECT_ID('tempdb..#KilledSPIDs') IS NOT NULL DROP TABLE #KilledSPIDs;
+    IF OBJECT_ID('tempdb..#WhoIsActiveOutput') IS NOT NULL DROP TABLE #WhoIsActiveOutput;
+    IF OBJECT_ID('tempdb..#Who2Output') IS NOT NULL DROP TABLE #Who2Output;
+END
