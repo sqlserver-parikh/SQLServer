@@ -1,49 +1,99 @@
-CREATE OR ALTER procedure [usp_CleanupTable]
-    @tablename nvarchar(256) = 'incident',
-    @entiretable bit = 0,
-    @filtercolumnName nvarchar(256) = 'createat',
-    @retentiondatepart varchar(9) = 'dd',
-    @retentionNumber int = '365',
-    @retentiontill datetime = '',
-    @batchsize int = 50000,
-    @maxbatchcount int = 2,
-    @disablecontraint bit = 0
+/*
+Description: This stored procedure performs cleanup operations on specified tables by deleting records 
+based on retention criteria. It supports batch processing and constraint management.
+*/
+
+CREATE OR ALTER PROCEDURE [usp_CleanupTable]
+    -- Input Parameters with descriptions
+    @TableName NVARCHAR(256) = 'incident',          -- Name of the table to clean up
+    @EntireTable BIT = 0,                          -- Flag to clean entire table (1) or apply retention filter (0)
+    @FilterColumnName NVARCHAR(256) = 'createat',   -- Column name used for date filtering
+    @RetentionDatePart VARCHAR(9) = 'dd',          -- Date part for retention calculation (dd, mm, yy, etc.)
+    @RetentionNumber INT = '365',                  -- Number of retention units to keep
+    @RetentionTill DATETIME = '',                  -- Cut-off date for retention (defaults to current date if empty)
+    @BatchSize INT = 50000,                        -- Number of records to delete in each batch
+    @MaxBatchCount INT = 2,                        -- Maximum number of batches to process
+    @DisableConstraint BIT = 0                     -- Flag to disable constraints during deletion (1) or not (0)
 AS
-SET NOCOUNT ON;
-DECLARE @executesql nvarchar(max),
-        @clean nvarchar(5)
-IF @retentiontill = ''
-    set @retentiontill = getdate()
-IF @entiretable = 1
 BEGIN
-    SET @clean = '--'
-    SET @maxbatchcount = 2147483646
-END
-ELSE
-    SET @clean = ''
-IF @disablecontraint = 1
-BEGIN
-    SET @executesql = 'ALTER TABLE ' + QUOTENAME(@tablename) + ' NOCHECK CONSTRAINT ALL;'
-    EXEC sp_executesql @executesql
-    PRINT @executesql;
-END
-SET @executesql
-    = 'DECLARE @batchcount INT =' + CONVERT(varchar(19), @maxbatchcount) + char(13) + 'WHILE (@batchcount >'
-      + CONVERT(varchar(10), 0) + ')' + char(13) + 'BEGIN 
-DELETE TOP ('     + CONVERT(VARCHAR(9), @batchsize) + ')
- FROM '           + @tablename + char(13) + @clean + ' WHERE ' + @filtercolumnName + ' < DATEADD(' + @retentiondatepart
-      + ', -' + convert(varchar(9), @retentionNumber) + ', ''' + convert(varchar(8), @retentiontill, 112) + ''''
-      + ');
- IF @@rowcount < ' + CONVERT(VARCHAR(9), @batchsize) + char(13) + ' BREAK; 
- SET @batchcount = @batchcount -1 ; ' + char(13) + 'END;'
+    SET NOCOUNT ON;
 
-EXECUTE sp_executesql @executesql
---PRINT @executesql
+    -- Declare local variables
+    DECLARE @ExecuteSQL NVARCHAR(MAX),             -- Stores dynamic SQL for execution
+            @Clean NVARCHAR(5)                     -- Controls WHERE clause commenting
 
-IF @disablecontraint = 1
-BEGIN
-    SET @executesql = 'ALTER TABLE ' + QUOTENAME(@tablename) + ' CHECK CONSTRAINT ALL;'
-    EXEC sp_executesql @executesql
-    PRINT @executesql
+    -- Set default retention date if not provided
+    IF @RetentionTill = ''
+        SET @RetentionTill = GETDATE()
+
+    -- Handle entire table cleanup scenario
+    IF @EntireTable = 1
+    BEGIN
+        SET @Clean = '--'                          -- Comment out WHERE clause
+        SET @MaxBatchCount = 2147483646            -- Set to max INT value for complete cleanup
+    END
+    ELSE
+        SET @Clean = ''                            -- Enable WHERE clause for filtered cleanup
+
+    -- Disable table constraints if requested
+    IF @DisableConstraint = 1
+    BEGIN
+        SET @ExecuteSQL = 'ALTER TABLE ' + QUOTENAME(@TableName) + ' NOCHECK CONSTRAINT ALL;'
+        EXEC sp_executesql @ExecuteSQL
+        PRINT 'Constraints disabled for table: ' + @TableName
+        PRINT @ExecuteSQL
+    END
+
+    -- Construct batch deletion query
+    SET @ExecuteSQL = 'DECLARE @BatchCount INT = ' + CONVERT(VARCHAR(19), @MaxBatchCount) + CHAR(13) + 
+        'WHILE (@BatchCount > ' + CONVERT(VARCHAR(10), 0) + ')' + CHAR(13) + 
+        'BEGIN' + CHAR(13) + 
+        '    DELETE TOP (' + CONVERT(VARCHAR(9), @BatchSize) + ')' + CHAR(13) + 
+        '    FROM ' + @TableName + CHAR(13) + 
+        @Clean + '    WHERE ' + @FilterColumnName + ' < DATEADD(' + @RetentionDatePart + 
+        ', -' + CONVERT(VARCHAR(9), @RetentionNumber) + 
+        ', ''' + CONVERT(VARCHAR(8), @RetentionTill, 112) + '''' + ');' + CHAR(13) + 
+        '    IF @@ROWCOUNT < ' + CONVERT(VARCHAR(9), @BatchSize) + CHAR(13) + 
+        '        BREAK;' + CHAR(13) + 
+        '    SET @BatchCount = @BatchCount - 1;' + CHAR(13) + 
+        'END;'
+
+    -- Execute the batch deletion
+    EXECUTE sp_executesql @ExecuteSQL
+    -- PRINT @ExecuteSQL -- Uncomment for debugging
+
+    -- Re-enable table constraints if they were disabled
+    IF @DisableConstraint = 1
+    BEGIN
+        SET @ExecuteSQL = 'ALTER TABLE ' + QUOTENAME(@TableName) + ' CHECK CONSTRAINT ALL;'
+        EXEC sp_executesql @ExecuteSQL
+        PRINT 'Constraints re-enabled for table: ' + @TableName
+        PRINT @ExecuteSQL
+    END
 END
 GO
+
+-- Sample Usage Examples:
+
+-- Example 1: Clean up records older than 365 days from 'incident' table
+EXEC usp_CleanupTable 
+    @TableName = 'incident',
+    @FilterColumnName = 'createat',
+    @RetentionNumber = 365,
+    @BatchSize = 50000;
+
+-- Example 2: Clean entire table with disabled constraints
+EXEC usp_CleanupTable 
+    @TableName = 'incident',
+    @EntireTable = 1,
+    @DisableConstraint = 1;
+
+-- Example 3: Clean up records older than 6 months with custom retention date
+EXEC usp_CleanupTable 
+    @TableName = 'incident',
+    @FilterColumnName = 'createat',
+    @RetentionDatePart = 'mm',
+    @RetentionNumber = 6,
+    @RetentionTill = '2025-01-01',
+    @BatchSize = 10000,
+    @MaxBatchCount = 5;
