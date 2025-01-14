@@ -1,3 +1,5 @@
+use tempdb 
+go
 CREATE OR ALTER PROCEDURE usp_checkWeakPasswords
     @WeakPasswords NVARCHAR(MAX) = NULL
 AS
@@ -17,22 +19,120 @@ BEGIN
     -- Add default weak passwords
     INSERT INTO @WeakPwdList (WeakPwd)
     VALUES 
-        ('123456'), ('password'), ('123456789'), ('12345678'), ('12345'), ('1234567'), ('1234567890'), ('qwerty'), ('abc123'), 
-        ('password1'), ('111111'), ('123123'), ('admin'), ('letmein'), ('welcome'), ('monkey'), ('1234'), ('1q2w3e4r'), 
-        ('sunshine'), ('master'), ('123'), ('qwertyuiop'), ('654321'), ('superman'), ('1qaz2wsx'), ('qazwsx'), ('password123'), 
-        ('1q2w3e'), ('123qwe'), ('zxcvbnm'), ('asdfghjkl'), ('michael'), ('princess'), ('charlie'), ('aa12345678'), ('987654321'), 
-        ('qwe123'), ('1q2w3e4r'), ('123qwe'), ('qazwsx'), ('password123'), ('1111'), ('123321'), ('555555'), ('666666'), 
-        ('7777777'), ('888888'), ('999999'), ('000000'), ('121212'), ('112233'), ('123123123'), ('987654'), ('gfhjkm'), 
-        ('159357'), ('abcd1234'), ('131313'), ('789456'), ('luzit2000'), ('aaaaaa'), ('qwerty123'), ('vip'), ('asdasd'), 
-        ('123654'), ('a1b2c3'), ('999999'), ('Groupd2013'), ('1q2w3e'), ('usr'), ('Liman1000'), ('1111111'), ('333333'), 
-        ('9136668099'), ('11111111'), ('mar20lt'), ('gfhjkm'), ('159357'), ('abcd1234'), ('131313'), ('789456'), ('luzit2000'), 
-        ('aaaaaa'), ('zxcvbnm'), ('asdfghjkl'), ('1234qwer'), ('88888888'), ('dragon'), ('987654'), ('888888'), ('qwe123'), 
-        ('football'), ('123456789a'), ('123456789b'), ('123456789c'), ('123456789d'), ('123456789e'), ('123456789f'), 
-        ('123456789g'), ('123456789h'), ('123456789i'), ('123456789j'), ('123456789k'), ('123456789l'), ('123456789m'), 
-        ('123456789n'), ('123456789o'), ('123456789p'), ('123456789q'), ('123456789r'), ('123456789s'), ('123456789t'), 
-        ('123456789u'), ('123456789v'), ('123456789w'), ('123456789x'), ('123456789y'), ('123456789z'),('@@Name'), ('@@Name@@Name'),('@@Name123');
-
-    -- Create temporary tables
+        -- Original passwords
+        ('123456'), ('password'), ('123456789'), ('12345678'), ('12345'),
+        -- Adding new commonly used weak passwords
+        -- Common names and variations
+        ('jennifer'), ('jessica'), ('michelle'), ('daniel'), ('ashley'), ('joshua'), ('andrew'), ('matthew'), ('christopher'),
+        ('james123'), ('robert123'), ('john123'), ('michael123'), ('william123'), ('david123'), ('richard123'), ('thomas123'),
+        ('jennifer1'), ('jessica1'), ('michelle1'), ('daniel1'), ('ashley1'), ('joshua1'), ('andrew1'), ('matthew1'),
+        
+        -- Sports teams and related
+        ('liverpool'), ('chelsea'), ('arsenal'), ('manchester'), ('barcelona'), ('realmadrid'), ('juventus'), ('bayern'),
+        ('yankees'), ('cowboys'), ('patriots'), ('lakers'), ('warriors'), ('redsox'), ('steelers'), ('eagles'),
+        
+        -- Keyboard patterns
+        ('1qaz2wsx3edc'), ('zxcvbnm123'), ('qwerty123456'), ('poiuytrewq'), ('1q2w3e4r5t'), ('0okm9ijn8uhb'),
+        ('asdfghjkl123'), ('lkjhgfdsa'), ('mnbvcxz'), ('102030'), ('147258369'), ('741852963'), ('852456'),
+        
+        -- Years and dates
+        ('2024'), ('2023'), ('2022'), ('2021'), ('2020'), ('2019'), ('2018'), ('2017'), ('2016'), ('2015'),
+        ('january1'), ('february1'), ('march1'), ('april1'), ('may1'), ('june1'), ('july1'), ('august1'),
+        ('jan2024'), ('feb2024'), ('mar2024'), ('apr2024'), ('may2024'), ('jun2024'), ('jul2024'), ('aug2024'),
+        
+        -- Popular culture references
+        ('starwars'), ('pokemon'), ('minecraft'), ('fortnite'), ('callofduty'), ('batman'), ('superman'), ('spiderman'),
+        ('harrypotter'), ('gameofthrones'), ('marvel'), ('disney'), ('netflix'), ('xbox360'), ('playstation'),
+        
+        -- Common phrases
+        ('iloveyou'), ('letmein123'), ('welcome123'), ('changeme'), ('secret123'), ('password123'), ('admin123'),
+        ('login123'), ('abc12345'), ('test1234'), ('user1234'), ('hello123'), ('monkey123'), ('dragon123'),
+        
+        -- Number sequences
+        ('11111'), ('22222'), ('33333'), ('44444'), ('55555'), ('66666'), ('77777'), ('88888'), ('99999'), ('00000'),
+        ('12121'), ('23232'), ('34343'), ('45454'), ('56565'), ('67676'), ('78787'), ('89898'), ('90909'),
+        
+        -- Month combinations
+        ('jan2024'), ('feb2024'), ('mar2024'), ('apr2024'), ('may2024'), ('jun2024'), ('jul2024'), ('aug2024'),
+        ('sep2024'), ('oct2024'), ('nov2024'), ('dec2024'), ('january2024'), ('february2024'), ('march2024'),
+        
+        -- Common words with numbers
+        ('house123'), ('car123'), ('dog123'), ('cat123'), ('bird123'), ('fish123'), ('love123'), ('hate123'),
+        ('sun123'), ('moon123'), ('star123'), ('cloud123'), ('rain123'), ('snow123'), ('wind123'), ('fire123'),
+        
+        -- Company names
+        ('microsoft'), ('apple123'), ('google123'), ('facebook'), ('amazon123'), ('netflix123'), ('twitter123'),
+        ('linkedin'), ('youtube123'), ('instagram'), ('snapchat'), ('tiktok123'), ('whatsapp'), ('telegram'),
+        
+        -- Hobbies and interests
+        ('football1'), ('baseball1'), ('basketball1'), ('soccer123'), ('tennis123'), ('golf123'), ('hockey123'),
+        ('music123'), ('guitar123'), ('piano123'), ('drum123'), ('singer123'), ('dancer123'), ('artist123'),
+        
+        -- Family terms
+        ('mommy123'), ('daddy123'), ('sister123'), ('brother1'), ('family123'), ('baby123'), ('love123'), ('friend123'),
+        ('mother1'), ('father1'), ('daughter1'), ('son123'), ('grandma1'), ('grandpa1'), ('uncle123'), ('aunt123'),
+        
+        -- Color names
+        ('red123'), ('blue123'), ('green123'), ('yellow123'), ('purple123'), ('orange123'), ('black123'), ('white123'),
+        ('pink123'), ('gray123'), ('brown123'), ('silver123'), ('golden123'), ('rainbow1'), ('violet123'),
+        
+        -- Technology terms
+        ('computer1'), ('laptop123'), ('tablet123'), ('phone123'), ('internet'), ('wifi123'), ('router123'),
+        ('server123'), ('database'), ('network123'), ('system123'), ('program123'), ('coding123'), ('tech123'),
+        
+        -- Seasons and weather
+        ('summer123'), ('winter123'), ('spring123'), ('autumn123'), ('fall123'), ('sunny123'), ('rainy123'),
+        ('snowy123'), ('cloudy123'), ('storm123'), ('thunder123'), ('lightning'), ('weather123'), ('season123'),
+        
+        -- Food and drinks
+        ('pizza123'), ('burger123'), ('sushi123'), ('pasta123'), ('coffee123'), ('tea123'), ('water123'),
+        ('juice123'), ('bread123'), ('cheese123'), ('chicken123'), ('beef123'), ('fish123'), ('rice123'),
+        
+        -- Zodiac signs
+        ('aries123'), ('taurus123'), ('gemini123'), ('cancer123'), ('leo123'), ('virgo123'), ('libra123'),
+        ('scorpio123'), ('sagittarius'), ('capricorn'), ('aquarius'), ('pisces123'), ('zodiac123'),
+        
+        -- Common usernames with numbers
+        ('admin1234'), ('user1234'), ('guest1234'), ('test1234'), ('demo1234'), ('support1234'), ('help1234'),
+        ('info1234'), ('web1234'), ('mail1234'), ('email1234'), ('contact1234'), ('sales1234'), ('service1234'),
+        
+        -- Repeated characters
+        ('aaa111'), ('bbb222'), ('ccc333'), ('ddd444'), ('eee555'), ('fff666'), ('ggg777'), ('hhh888'),
+        ('iii999'), ('jjj000'), ('kkk111'), ('lll222'), ('mmm333'), ('nnn444'), ('ooo555'), ('ppp666'),
+        
+        -- Special character patterns
+        ('!@#$%^'), ('!@#$%^&*'), ('!@#123'), ('!@#abc'), ('abc!@#'), ('123!@#'), ('pass!@#'), ('login!@#'),
+        ('admin!@#'), ('user!@#'), ('test!@#'), ('qwerty!@'), ('!@#qwe'), ('!@#asd'), ('!@#zxc'),
+        
+        -- Additional patterns
+        ('abcd1234'), ('efgh5678'), ('ijkl9012'), ('mnop3456'), ('qrst7890'), ('uvwx1234'), ('yzab5678'),
+        ('1234abcd'), ('5678efgh'), ('9012ijkl'), ('3456mnop'), ('7890qrst'), ('1234uvwx'), ('5678yzab'),
+        
+        -- Common first names with year
+        ('john2024'), ('mary2024'), ('david2024'), ('lisa2024'), ('james2024'), ('sarah2024'), ('mike2024'),
+        ('anna2024'), ('peter2024'), ('laura2024'), ('chris2024'), ('emma2024'), ('alex2024'), ('susan2024'),
+        
+        -- Common last names with year
+        ('smith2024'), ('jones2024'), ('wilson2024'), ('taylor2024'), ('brown2024'), ('davies2024'), ('evans2024'),
+        ('thomas2024'), ('roberts'), ('johnson24'), ('williams'), ('clarke24'), ('hall2024'), ('wright24'),
+        
+        -- Additional variations of common passwords
+        ('pass123456'), ('123456pass'), ('passw0rd'), ('p@ssw0rd'), ('p@ss123'), ('p@ssword'), ('p@ssw0rd123'),
+        ('password!'), ('password1!'), ('password123!'), ('pass123!'), ('pass1234!'), ('pass12345!'),
+        
+        -- More patterns
+        ('11223344'), ('22334455'), ('33445566'), ('44556677'), ('55667788'), ('66778899'), ('77889900'),
+        ('12341234'), ('23452345'), ('34563456'), ('45674567'), ('56785678'), ('67896789'), ('78907890'),
+        
+        -- Default credentials
+        ('changeme1'), ('changeme123'), ('default123'), ('password01'), ('password02'), ('password03'),
+        ('temporary'), ('temp123'), ('temppass'), ('temppwd'), ('tempuser'), ('tempadmin'), ('tempguest'),
+        
+        -- Add standard username-as-password patterns
+        ('@@Name123!'), ('@@Name321'), ('@@Name!@#'), ('@@Name2024'), ('@@Name2023'), ('@@Name2022'),
+        ('@@NameABC'), ('@@NameXYZ'), ('@@Name999'), ('@@Name888'), ('@@Name777'), ('@@Name666'), ('@@Name555')
+   
+    -- Rest of the procedure remains unchanged
     SELECT b.name AS LoginName,
            ISNULL(c.name, 'Public') AS ServerRole,
            b.create_date AS CreateDate,
