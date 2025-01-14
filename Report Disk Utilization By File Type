@@ -1,107 +1,150 @@
-DECLARE @drivefolder varchar(max) = 'c:\USERS\'
-SELECT
-file_or_directory_name,
-    (size_in_bytes / (1024 * 1024)) AS SizeMB,
-    (size_in_bytes / (1024 * 1024 * 1024)) AS SizeGB,
-	size_in_bytes,
-    parent_directory, 
-	full_filesystem_path, is_directory, is_read_only, is_system, is_hidden, is_sparse, creation_time, last_access_time, last_write_time
-FROM 
-    String_split(@drivefolder, ',') a
-    CROSS APPLY sys.dm_os_enumerate_filesystem(a.value, '*')
-WHERE 
-	1=1 
---    AND (size_in_bytes / (1024 * 1024)) > 1
-    AND full_filesystem_path NOT LIKE '%recycle%'
-ORDER BY 
-    size_in_bytes DESC
-
-SELECT 
-    RIGHT(file_or_directory_name, 3) AS FileType,
-    SUM(size_in_bytes) / (1024 * 1024) AS TotalSizeMB,
-    SUM(size_in_bytes) / (1024 * 1024 * 1024) AS TotalSizeGB
-FROM 
-    String_split(@drivefolder, ',') a
-    CROSS APPLY sys.dm_os_enumerate_filesystem(a.value, '*')
-WHERE 
-	1=1 
---    AND (size_in_bytes / (1024 * 1024)) > 1
-    AND full_filesystem_path NOT LIKE '%recycle%'
-GROUP BY 
-    RIGHT(file_or_directory_name, 3)
-Having SUM(size_in_bytes) / (1024 * 1024) > 0
-ORDER BY 
-    TotalSizeMB DESC
-
-
-
-
----------------------------------------------------------------------------
-
-
--- Create a stored procedure to calculate the folder size
-CREATE OR ALTER PROCEDURE #usp_foldersize @drivefolder VARCHAR(MAX)
+USE tempdb
+GO
+CREATE OR ALTER PROCEDURE dbo.usp_AnalyzeFileSystem
+    @folderPaths VARCHAR(MAX) = 'E:\',   -- Comma-separated list of folder paths
+    @minSizeMB INT = 0,                  -- Minimum file size in MB (0 for no minimum)
+    @fileExtension VARCHAR(10) = NULL,   -- File extension filter (NULL for all files)
+    @reportType INT = 2                  -- 1: Detailed file list
+                                        -- 2: Extension summary
+                                        -- 3: Folder summary
+                                        -- 4: All reports
 AS
 BEGIN
-    SELECT 
-        @drivefolder AS UserName,
-        SUM(size_in_bytes) / (1024 * 1024) AS TotalSizeMB,
-        SUM(size_in_bytes) / (1024 * 1024 * 1024) AS TotalSizeGB
+    SET NOCOUNT ON;
+
+    -- Input validation
+    IF @folderPaths IS NULL OR LEN(TRIM(@folderPaths)) = 0
+    BEGIN
+        RAISERROR('Folder path(s) must be specified', 16, 1);
+        RETURN;
+    END
+
+    -- Clean up file extension format
+    IF @fileExtension IS NOT NULL
+    BEGIN
+        SET @fileExtension = REPLACE(@fileExtension, '.', '');
+    END
+
+    -- Temporary table for storing folder sizes
+    CREATE TABLE #Results
+    (
+        file_or_directory_name VARCHAR(255),
+        SizeMB DECIMAL(18,2),
+        SizeGB DECIMAL(18,2),
+        size_in_bytes BIGINT,
+        parent_directory VARCHAR(MAX),
+        full_filesystem_path VARCHAR(MAX),
+        is_directory BIT,
+        is_read_only BIT,
+        is_system BIT,
+        is_hidden BIT,
+        is_sparse BIT,
+        creation_time DATETIME,
+        last_access_time DATETIME,
+        last_write_time DATETIME
+    );
+
+    -- Populate the results table
+    INSERT INTO #Results
+    SELECT
+        file_or_directory_name,
+        (size_in_bytes / (1024.0 * 1024.0)) AS SizeMB,
+        (size_in_bytes / (1024.0 * 1024.0 * 1024.0)) AS SizeGB,
+        size_in_bytes,
+        parent_directory,
+        full_filesystem_path,
+        is_directory,
+        is_read_only,
+        is_system,
+        is_hidden,
+        is_sparse,
+        creation_time,
+        last_access_time,
+        last_write_time
     FROM 
-        String_split(@drivefolder, ',') a
-        CROSS APPLY sys.dm_os_enumerate_filesystem(a.value, '*')
+        String_split(@folderPaths, ',') a
+        CROSS APPLY sys.dm_os_enumerate_filesystem(TRIM(a.value), '*')
     WHERE 
         full_filesystem_path NOT LIKE '%recycle%'
-    HAVING 
-        SUM(size_in_bytes) / (1024 * 1024) > 0
-END
+        AND (size_in_bytes / (1024.0 * 1024.0)) >= @minSizeMB
+        AND (@fileExtension IS NULL 
+             OR RIGHT(file_or_directory_name, LEN(@fileExtension)) = @fileExtension);
+
+    -- Report 1: Detailed file list
+    IF @reportType IN (1, 4)
+    BEGIN
+        SELECT 
+            file_or_directory_name,
+            SizeMB,
+            SizeGB,
+            size_in_bytes,
+            parent_directory,
+            full_filesystem_path,
+            is_directory,
+            is_read_only,
+            is_system,
+            is_hidden,
+            is_sparse,
+            creation_time,
+            last_access_time,
+            last_write_time
+        FROM #Results
+        ORDER BY size_in_bytes DESC;
+    END
+
+    -- Report 2: Extension summary
+    IF @reportType IN (2, 4)
+    BEGIN
+        SELECT 
+            RIGHT(file_or_directory_name, 3) AS FileType,
+            SUM(SizeMB) AS TotalSizeMB,
+            SUM(SizeGB) AS TotalSizeGB,
+            COUNT(*) AS FileCount
+        FROM #Results
+        WHERE is_directory = 0
+        GROUP BY RIGHT(file_or_directory_name, 3)
+        HAVING SUM(SizeMB) > 0
+        ORDER BY TotalSizeMB DESC;
+    END
+
+    -- Report 3: Folder summary
+    IF @reportType IN (3, 4)
+    BEGIN
+        -- Calculate folder sizes directly from the results
+        WITH FolderSizes AS (
+            SELECT 
+                parent_directory,
+                SUM(SizeMB) AS TotalSizeMB,
+                SUM(SizeGB) AS TotalSizeGB,
+                COUNT(*) AS TotalFiles
+            FROM #Results
+            WHERE is_directory = 0  -- Count only files, not directories
+            GROUP BY parent_directory
+        ),
+        TopLevelFolders AS (
+            SELECT DISTINCT
+                CASE 
+                    WHEN CHARINDEX('\', SUBSTRING(parent_directory, LEN(TRIM(value)) + 2, LEN(parent_directory))) > 0 
+                    THEN LEFT(parent_directory, CHARINDEX('\', SUBSTRING(parent_directory, LEN(TRIM(value)) + 2, LEN(parent_directory))) + LEN(TRIM(value)))
+                    ELSE parent_directory
+                END AS TopFolder
+            FROM String_split(@folderPaths, ',') 
+            CROSS JOIN #Results
+            WHERE parent_directory LIKE TRIM(value) + '%'
+        )
+        SELECT 
+            t.TopFolder,
+            SUM(f.TotalSizeMB) AS TotalSizeMB,
+            SUM(f.TotalSizeGB) AS TotalSizeGB,
+            SUM(f.TotalFiles) AS TotalFiles
+        FROM TopLevelFolders t
+        LEFT JOIN FolderSizes f ON f.parent_directory LIKE t.TopFolder + '%'
+        GROUP BY t.TopFolder
+        HAVING SUM(f.TotalSizeMB) > 0
+        ORDER BY TotalSizeMB DESC;
+    END
+
+    DROP TABLE #Results;
+END;
 GO
-
--- Create a temporary table to store the subdirectories
-CREATE TABLE #UserDirectories (
-    Subdirectory VARCHAR(MAX)
-)
-
-DECLARE @parentfolder NVARCHAR(MAX), @sql NVARCHAR(MAX)
-SET @parentfolder = 'C:\Users\'
-
--- Prepare the dynamic SQL command
-SET @sql = 'INSERT INTO #UserDirectories (Subdirectory) EXEC master..xp_subdirs ''' + @parentfolder + ''''
-
--- Execute the dynamic SQL command
-EXEC sp_executesql @sql
-
--- Create a temporary table to store the folder sizes
-CREATE TABLE #FolderSizes (
-    UserName VARCHAR(255),
-    TotalSizeMB DECIMAL(18, 2),
-    TotalSizeGB DECIMAL(18, 2)
-)
--- Iterate over each subdirectory and get the folder size
-DECLARE directory_cursor CURSOR FOR 
-SELECT  @parentfolder + Subdirectory + '\' FROM #UserDirectories
-
-DECLARE @CurrentDirectory VARCHAR(MAX)
-
-OPEN directory_cursor
-FETCH NEXT FROM directory_cursor INTO @CurrentDirectory
-
-WHILE @@FETCH_STATUS = 0
-BEGIN
-	PRINT @CurrentDirectory
-    -- Call the stored procedure for each subdirectory
-	INSERT INTO #FolderSizes
-    EXEC #usp_foldersize  @CurrentDirectory
-    FETCH NEXT FROM directory_cursor INTO @CurrentDirectory
-END
-
-CLOSE directory_cursor
-DEALLOCATE directory_cursor
-
--- Select the final report with folder sizes
-SELECT * FROM #FolderSizes
-GO
--- Clean up
-DROP TABLE #UserDirectories
-DROP TABLE #FolderSizes
-DROP PROCEDURE #usp_foldersize
+usp_AnalyzeFileSystem
