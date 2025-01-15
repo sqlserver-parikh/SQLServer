@@ -1,6 +1,5 @@
 USE tempdb
 GO
-
 CREATE OR ALTER PROCEDURE dbo.usp_CleanupInvalidUsers
     @TargetAdminLogin SYSNAME = NULL,  -- Optional parameter for target admin login
     @PrintOnly BIT = 0               -- 1 for print only mode, 0 for execute and print
@@ -114,8 +113,8 @@ BEGIN
             END
             ELSE
             BEGIN
-                SET @SQL = N'ALTER AUTHORIZATION ON ENDPOINT::[' + @name + '] TO [sa]';
-                SET @Message = 'Changing endpoint ownership for: ' + @name + ' to sa (target admin not eligible)';
+                SET @SQL = N'ALTER AUTHORIZATION ON ENDPOINT::[' + @name + '] TO ' + QUOTENAME(@AdminLoginName);
+                SET @Message = 'Changing endpoint ownership for: ' + @name + ' to ' + @AdminLoginName;
             END;
             
             EXEC #ExecuteOrPrint @SQL, @Message;
@@ -149,7 +148,7 @@ BEGIN
         -- 3. Database ownership
         DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
             SELECT name FROM sys.databases
-            WHERE owner_sid IN (SELECT sid FROM #tblValidateLogins);
+            WHERE owner_sid IN (SELECT sid FROM #tblValidateLogins) and is_read_only = 0 and user_access = 0 and state = 0
         
         OPEN db_cursor;
         FETCH NEXT FROM db_cursor INTO @name;
