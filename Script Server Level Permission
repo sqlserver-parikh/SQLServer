@@ -1,28 +1,72 @@
-SET NOCOUNT ON;
-IF OBJECT_ID(N'tempdb..#ServerLevelRoles') IS NOT NULL
-    DROP TABLE #ServerLevelRoles;
-CREATE TABLE #ServerLevelRoles(ScriptToRun VARCHAR(1000));
-INSERT INTO #ServerLevelRoles
-       SELECT 'EXEC sp_addsrvrolemember ''' + m.name + ''',' + p.name + ';'
-       FROM sys.server_role_members rm
-            JOIN sys.server_principals p ON rm.role_principal_id = p.principal_id
-            JOIN sys.server_principals m ON rm.member_principal_id = m.principal_id
-       WHERE m.name NOT IN('sa', 'dbo', 'entity owner', 'information_schema', 'sys', 'public');
-INSERT INTO #ServerLevelRoles
-       SELECT CASE
-                  WHEN sp.state_desc = 'GRANT_WITH_GRANT_OPTION'
-                  THEN SUBSTRING(state_desc, 0, 6) + ' ' + permission_name + ' to ' + QUOTENAME(SPs.name) + 'WITH GRANT OPTION;'
-                  ELSE state_desc + ' ' + permission_name + ' to ' + QUOTENAME(SPs.name) + ';'
-              END
-       FROM sys.server_permissions SP
-            JOIN sys.server_principals SPs ON sp.grantee_principal_id = SPs.principal_id
-       WHERE SPs.name NOT LIKE '%##%' --and SPs.name not like '%nt %'
-             AND SPs.name NOT IN('sa', 'dbo', 'entity owner', 'information_schema', 'sys')
-            AND sp.type NOT IN('COSQ', 'CO');
-SELECT ScriptToRun
-FROM #ServerLevelRoles
-WHERE ScriptToRun IS NOT NULL
-      AND ScriptToRun NOT LIKE '%nt Service%'
-      AND ScriptToRun NOT LIKE '%nt autho%';
-DROP TABLE #ServerLevelRoles;
+USE tempdb
 GO
+CREATE OR ALTER PROCEDURE sp_ScriptServerPermissions
+    @LoginName NVARCHAR(128) = NULL,
+    @Permission NVARCHAR(128) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF OBJECT_ID(N'tempdb..#ServerLevelRoles') IS NOT NULL
+        DROP TABLE #ServerLevelRoles;
+
+    CREATE TABLE #ServerLevelRoles(
+        ScriptToRun VARCHAR(1000),
+        PermissionType VARCHAR(100)  -- Added to help with filtering
+    );
+
+    -- Server Role Memberships
+    INSERT INTO #ServerLevelRoles
+    SELECT 
+        'EXEC sp_addsrvrolemember ''' + m.name + ''',' + p.name + ';',
+        p.name as PermissionType
+    FROM sys.server_role_members rm
+    JOIN sys.server_principals p ON rm.role_principal_id = p.principal_id
+    JOIN sys.server_principals m ON rm.member_principal_id = m.principal_id
+    WHERE m.name NOT IN('sa', 'dbo', 'entity owner', 'information_schema', 'sys', 'public')
+    AND (@LoginName IS NULL OR m.name = @LoginName);
+
+    -- Server Permissions
+    INSERT INTO #ServerLevelRoles
+    SELECT 
+        CASE
+            WHEN sp.state_desc = 'GRANT_WITH_GRANT_OPTION'
+            THEN SUBSTRING(state_desc, 0, 6) + ' ' + permission_name + ' to ' + QUOTENAME(SPs.name) + ' WITH GRANT OPTION;'
+            ELSE state_desc + ' ' + permission_name + ' to ' + QUOTENAME(SPs.name) + ';'
+        END,
+        sp.permission_name as PermissionType
+    FROM sys.server_permissions SP
+    JOIN sys.server_principals SPs ON sp.grantee_principal_id = SPs.principal_id
+    WHERE SPs.name NOT LIKE '%##%'
+    AND SPs.name NOT IN('sa', 'dbo', 'entity owner', 'information_schema', 'sys')
+    AND sp.type NOT IN('COSQ', 'CO')
+    AND (@LoginName IS NULL OR SPs.name = @LoginName);
+
+    -- Output Results with Permission Filter
+    SELECT ScriptToRun
+    FROM #ServerLevelRoles
+    WHERE ScriptToRun IS NOT NULL
+    AND ScriptToRun NOT LIKE '%nt Service%'
+    AND ScriptToRun NOT LIKE '%nt autho%'
+    AND (@Permission IS NULL 
+        OR PermissionType LIKE '%' + @Permission + '%' 
+        OR ScriptToRun LIKE '%' + @Permission + '%')
+    ORDER BY ScriptToRun;
+
+    -- Cleanup
+    DROP TABLE #ServerLevelRoles;
+END;
+GO
+
+-- Example usage:
+-- For all logins and permissions:
+-- EXEC sp_ScriptServerPermissions;
+
+-- For specific login:
+-- EXEC sp_ScriptServerPermissions @LoginName = 'YourLoginName';
+
+-- For specific permission pattern:
+-- EXEC sp_ScriptServerPermissions @Permission = 'admin';
+
+-- For specific login and permission:
+-- EXEC sp_ScriptServerPermissions @LoginName = 'YourLoginName', @Permission = 'sysad';
