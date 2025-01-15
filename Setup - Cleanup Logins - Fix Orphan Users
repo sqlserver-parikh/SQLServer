@@ -2,7 +2,7 @@ USE tempdb
 GO
 CREATE OR ALTER PROCEDURE dbo.usp_CleanupInvalidUsers
     @TargetAdminLogin SYSNAME = NULL,  -- Optional parameter for target admin login
-    @PrintOnly BIT = 0               -- 1 for print only mode, 0 for execute and print
+    @PrintOnly BIT = 1             -- 1 for print only mode, 0 for execute and print
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -197,13 +197,28 @@ BEGIN
         BEGIN
             -- Drop database users
             SET @SQL = N'EXEC sp_MSforeachdb ''USE [?]; 
+
+			              IF EXISTS (
+                    SELECT 1 FROM sys.databases 
+                    WHERE name = DB_NAME() 
+                    AND state_desc = ''''ONLINE''''
+                    AND is_read_only = 0
+                )
+                BEGIN
+				IF EXISTS (select * from sys.schemas WHERE name =  N''''' + REPLACE(@name, '''', '''''') + ''''')
+				BEGIN
+					DROP SCHEMA  ' + QUOTENAME(@name) + ';
+				END
+
                 IF EXISTS (SELECT * FROM sys.database_principals 
                           WHERE name = N''''' + REPLACE(@name, '''', '''''') + ''''' 
                           AND type IN (''''S'''', ''''U'''', ''''G''''))
                 BEGIN 
                     DROP USER ' + QUOTENAME(@name) + ';
                     PRINT ''''Dropped user ' + REPLACE(@name, '''', '''''') + ' from database [?]''''
-                END''';
+                END
+				
+				END''';
             SET @Message = 'Dropping user ' + @name + ' from all databases';
             EXEC #ExecuteOrPrint @SQL, @Message;
 
