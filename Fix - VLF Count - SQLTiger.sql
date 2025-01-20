@@ -4,7 +4,7 @@ CREATE OR ALTER PROCEDURE usp_FixVLFIssues
     @DBName NVARCHAR(255) = NULL,
     @PerformLogBackup BIT = 0,
     @OnlySetGrowth BIT = 0,
-    @MinVLF INT = 1000,
+    @MinVLF INT = 250,
     @Execute BIT = 0
 AS
 BEGIN
