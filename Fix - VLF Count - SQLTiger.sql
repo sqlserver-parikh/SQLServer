@@ -4,7 +4,8 @@ CREATE OR ALTER PROCEDURE usp_FixVLFIssues
     @DBName NVARCHAR(255) = NULL,
     @PerformLogBackup BIT = 0,
     @Print BIT = 1,
-    @OnlySetGrowth BIT = 0
+    @OnlySetGrowth BIT = 0,
+	@MinVLF INT = 100
 AS
 BEGIN
 --majority code is taken from SQLTiger team
@@ -136,7 +137,7 @@ BEGIN
     DECLARE shrink_cursor CURSOR FAST_FORWARD FOR 
     SELECT dbname, num_of_rows 
     FROM #loginfo 
-    WHERE num_of_rows >= 50
+    WHERE num_of_rows >= @MinVLF
     ORDER BY dbname;
 
     OPEN shrink_cursor;
