@@ -5,7 +5,7 @@ CREATE OR ALTER PROCEDURE usp_FixVLFIssues
     @PerformLogBackup BIT = 0,
     @Print BIT = 1,
     @OnlySetGrowth BIT = 0,
-	@MinVLF INT = 100
+    @MinVLF INT = 500
 AS
 BEGIN
 --majority code is taken from SQLTiger team
@@ -393,8 +393,11 @@ BEGIN
         Potential_VLFs, 
         Growth_iterations, 
         Log_Initial_size_MB, 
-        File_autogrow_MB
-    FROM @tblvlf
+        File_autogrow_MB,
+		B.log_reuse_wait_desc LogReuseWaitDesc
+    FROM @tblvlf A
+			INNER JOIN sys.databases B ON A.dbname = B.name
+
     ORDER BY Database_Name;
 
     -- Cleanup
