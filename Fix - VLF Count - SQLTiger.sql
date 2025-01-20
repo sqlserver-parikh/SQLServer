@@ -9,11 +9,11 @@ CREATE OR ALTER PROCEDURE usp_FixVLFIssues
 AS
 BEGIN
 --majority code is taken from SQLTiger team
-	DECLARE @PRINT BIT
+    DECLARE @PRINT BIT
     SET NOCOUNT ON;
-	IF @Execute = 1
-	SET @PRINT = 0
-	ELSE SET @PRINT = 1;
+    IF @Execute = 1
+    SET @PRINT = 0
+    ELSE SET @PRINT = 1;
     DECLARE @query VARCHAR(1000), @dbname_loop VARCHAR(255), @count int, @usedlogsize bigint, @logsize bigint;
     DECLARE @sqlcmd NVARCHAR(1000), @sqlparam NVARCHAR(100), @filename VARCHAR(255), @i int, @recmodel NVARCHAR(128);
     DECLARE @potsize int, @n_iter int, @n_iter_final int, @initgrow int, @n_init_iter int, @bckpath NVARCHAR(255);
