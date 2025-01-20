@@ -16,6 +16,20 @@ BEGIN
         EXEC sp_executesql @sql, N'@WeakPwdList TABLE (WeakPwd NVARCHAR(255)), @WeakPasswords NVARCHAR(MAX)', @WeakPwdList = @WeakPwdList OUTPUT, @WeakPasswords = @WeakPasswords;
     END
 
+	INSERT INTO @WeakPwdList
+	SELECT '@@Name123'
+       UNION
+       SELECT '@@Name'
+       UNION
+       SELECT '@@Name@@Name'
+       UNION
+       SELECT 'admin'
+       UNION
+       SELECT 'Password'
+       UNION
+       SELECT '12345'
+       UNION
+       SELECT 'Welcome#1';
     -- Add default weak passwords
     INSERT INTO @WeakPwdList (WeakPwd)
     VALUES 
