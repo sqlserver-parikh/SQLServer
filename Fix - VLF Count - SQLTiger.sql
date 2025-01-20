@@ -3,14 +3,17 @@ GO
 CREATE OR ALTER PROCEDURE usp_FixVLFIssues
     @DBName NVARCHAR(255) = NULL,
     @PerformLogBackup BIT = 0,
-    @Print BIT = 1,
     @OnlySetGrowth BIT = 0,
-    @MinVLF INT = 500
+    @MinVLF INT = 1000,
+    @Execute BIT = 0
 AS
 BEGIN
 --majority code is taken from SQLTiger team
+	DECLARE @PRINT BIT
     SET NOCOUNT ON;
-
+	IF @Execute = 1
+	SET @PRINT = 0
+	ELSE SET @PRINT = 1;
     DECLARE @query VARCHAR(1000), @dbname_loop VARCHAR(255), @count int, @usedlogsize bigint, @logsize bigint;
     DECLARE @sqlcmd NVARCHAR(1000), @sqlparam NVARCHAR(100), @filename VARCHAR(255), @i int, @recmodel NVARCHAR(128);
     DECLARE @potsize int, @n_iter int, @n_iter_final int, @initgrow int, @n_init_iter int, @bckpath NVARCHAR(255);
@@ -394,7 +397,8 @@ BEGIN
         Growth_iterations, 
         Log_Initial_size_MB, 
         File_autogrow_MB,
-		B.log_reuse_wait_desc LogReuseWaitDesc
+		B.log_reuse_wait_desc LogReuseWaitDesc,
+		GETUTCDATE() RunTimeUTC
     FROM @tblvlf A
 			INNER JOIN sys.databases B ON A.dbname = B.name
 
