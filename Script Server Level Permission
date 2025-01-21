@@ -1,6 +1,6 @@
 USE tempdb
 GO
-CREATE OR ALTER PROCEDURE sp_ScriptServerPermissions
+CREATE OR ALTER PROCEDURE usp_ScriptServerPermissions
     @LoginName NVARCHAR(128) = NULL,
     @Permission NVARCHAR(128) = NULL
 AS
@@ -60,13 +60,13 @@ GO
 
 -- Example usage:
 -- For all logins and permissions:
--- EXEC sp_ScriptServerPermissions;
+-- EXEC usp_ScriptServerPermissions;
 
 -- For specific login:
--- EXEC sp_ScriptServerPermissions @LoginName = 'YourLoginName';
+-- EXEC usp_ScriptServerPermissions @LoginName = 'YourLoginName';
 
 -- For specific permission pattern:
--- EXEC sp_ScriptServerPermissions @Permission = 'admin';
+-- EXEC usp_ScriptServerPermissions @Permission = 'admin';
 
 -- For specific login and permission:
--- EXEC sp_ScriptServerPermissions @LoginName = 'YourLoginName', @Permission = 'sysad';
+-- EXEC usp_ScriptServerPermissions @LoginName = 'YourLoginName', @Permission = 'sysad';
