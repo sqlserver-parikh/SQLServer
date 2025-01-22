@@ -1,89 +1,202 @@
-# Define source and destination server and database information
-$sourceServer = "S1SQL"
-$sourceDatabase = "Pubs"
-$destinationServer = "D1SQL" 
-$destinationDatabase = "Pubs"
-$tableName = "PSTest"
+# Configuration parameters
+$sourceServer = "sourceserver.domain.com"
+$sourceDatabase = "test1"
+$destinationServer = "Destnation.domain.com\instance" 
+$destinationDatabase = "tempdb"
+# Format: For different names use "SourceTable1:DestTable1", for same names just "Table1,Table2"
+$tableMapping = "table1,table2:desttable2,table3,table4,table4:desttable"
+$truncateIfExists = $true
+$enableIdentityInsert = $true
 
 
+function Copy-TableSchema {
+    param (
+        $sourceConn,
+        $destConn,
+        $sourceTableName,
+        $destTableName
+    )
 
-$sourceConnectionString = "Server=$sourceServer;Database=$sourceDatabase;Integrated Security=True"
-$destinationConnectionString = "Server=$destinationServer;Database=$destinationDatabase;Integrated Security=True"
+    $tableExists = $false
+    $command = $destConn.CreateCommand()
+    $command.CommandText = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$destTableName'"
+    $reader = $command.ExecuteReader()
+    if ($reader.Read()) {
+        $tableExists = $true
+    }
+    $reader.Close()
 
-$sourceConnection = New-Object System.Data.SqlClient.SqlConnection
-$sourceConnection.ConnectionString = $sourceConnectionString
-$sourceConnection.Open()
+    if ($tableExists) {
+        if ($truncateIfExists) {
+            $truncateCommand = $destConn.CreateCommand()
+            $truncateCommand.CommandText = "TRUNCATE TABLE [$destTableName]"
+            $truncateCommand.ExecuteNonQuery()
+            Write-Host "Table $destTableName truncated."
+        }
+        return $true
+    }
 
-$destinationConnection = New-Object System.Data.SqlClient.SqlConnection
-$destinationConnection.ConnectionString = $destinationConnectionString
-$destinationConnection.Open()
-
-# Check if the table exists in the destination database
-$tableExists = $false
-$command = $destinationConnection.CreateCommand()
-$command.CommandText = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$tableName'"
-$reader = $command.ExecuteReader()
-if ($reader.Read()) {
-    $tableExists = $true
-}
-$reader.Close()
-
-# If the table exists, truncate it and insert new data
-if ($tableExists) {
-    $truncateCommand = $destinationConnection.CreateCommand()
-    $truncateCommand.CommandText = "TRUNCATE TABLE [$tableName]"
-    $truncateCommand.ExecuteNonQuery()
-    
-    Write-Host "Table $tableName truncated in $destinationDatabase on $destinationServer."
-} else {
-    # Retrieve the table schema from the source database
-    $command = $sourceConnection.CreateCommand()
-    $command.CommandText = "SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$tableName'"
+    $command = $sourceConn.CreateCommand()
+    $command.CommandText = @"
+    SELECT 
+        c.name AS COLUMN_NAME,
+        t.name AS DATA_TYPE,
+        c.max_length AS CHARACTER_MAXIMUM_LENGTH,
+        c.is_nullable AS IS_NULLABLE,
+        c.is_identity AS IS_IDENTITY,
+        c.is_computed AS IS_COMPUTED,
+        CASE WHEN t.name = 'timestamp' THEN 1 ELSE 0 END AS IS_TIMESTAMP
+    FROM sys.columns c
+    JOIN sys.types t ON c.user_type_id = t.user_type_id
+    WHERE OBJECT_NAME(c.object_id) = '$sourceTableName'
+    ORDER BY c.column_id
+"@
     $reader = $command.ExecuteReader()
 
-    # Create a script to recreate the table in the destination database
     $createTableScript = @()
     $createTableScript += "USE [$destinationDatabase]"
-    $createTableScript += "CREATE TABLE [$tableName] ("
+    $createTableScript += "CREATE TABLE [$destTableName] ("
 
     while ($reader.Read()) {
         $columnName = $reader["COLUMN_NAME"]
         $dataType = $reader["DATA_TYPE"]
         $maxLength = $reader["CHARACTER_MAXIMUM_LENGTH"]
         $isNullable = $reader["IS_NULLABLE"]
+        $isIdentity = $reader["IS_IDENTITY"]
+        $isTimestamp = $reader["IS_TIMESTAMP"]
+
+        if ($isTimestamp -eq 1) { continue }
 
         $columnDefinition = "[$columnName] $dataType"
-
-        if ($maxLength -ne [DBNull]::Value) {
+        if ($maxLength -ne -1 -and $maxLength -ne [DBNull]::Value -and $dataType -notin @('int', 'bigint', 'smallint', 'tinyint', 'bit', 'decimal', 'numeric', 'money', 'smallmoney', 'float', 'real')) {
             $columnDefinition += "($maxLength)"
         }
-
-        if ($isNullable -eq "NO") {
+        if ($isIdentity -eq 1) {
+            $columnDefinition += " IDENTITY(1,1)"
+        }
+        if ($isNullable -eq 0) {
             $columnDefinition += " NOT NULL"
         }
-
         $createTableScript += $columnDefinition + ","
     }
+    $reader.Close()
 
     $createTableScript[-1] = $createTableScript[-1].TrimEnd(',')
     $createTableScript += ")"
 
-    # Execute the script on the destination database
-    $command = $destinationConnection.CreateCommand()
+    $command = $destConn.CreateCommand()
     $command.CommandText = $createTableScript -join "`r`n"
     $command.ExecuteNonQuery()
-    
-    Write-Host "Table $tableName created in $destinationDatabase on $destinationServer."
+    Write-Host "Table $destTableName created."
+    return $true
 }
 
-# Close the database connections
-$sourceConnection.Close()
-$destinationConnection.Close()
+function Copy-TableData {
+    param (
+        $sourceConn,
+        $destConn,
+        $sourceTableName,
+        $destTableName
+    )
 
+    $columnCommand = $sourceConn.CreateCommand()
+    $columnCommand.CommandText = @"
+    SELECT 
+        c.name,
+        c.is_identity
+    FROM sys.columns c
+    JOIN sys.types t ON c.user_type_id = t.user_type_id
+    WHERE OBJECT_NAME(c.object_id) = '$sourceTableName'
+    AND t.name != 'timestamp'
+    ORDER BY c.column_id
+"@
 
-Write-Host "Schema of $tableName copied from $sourceDatabase on $sourceServer to $destinationDatabase on $destinationServer."
+    $columnReader = $columnCommand.ExecuteReader()
+    $columns = @()
+    $hasIdentity = $false
+    while ($columnReader.Read()) {
+        $columns += $columnReader["name"]
+        if ($columnReader["is_identity"] -eq 1) {
+            $hasIdentity = $true
+        }
+    }
+    $columnReader.Close()
 
-# Create a connection to the source and destination databases
+    $columnList = ($columns | ForEach-Object { "[$_]" }) -join ', '
+
+    if ($hasIdentity -and $enableIdentityInsert -and $lastIdentityTable -ne $null) {
+        $identityOffCommand = $destConn.CreateCommand()
+        $identityOffCommand.CommandText = "SET IDENTITY_INSERT [$lastIdentityTable] OFF"
+        $identityOffCommand.ExecuteNonQuery()
+        Write-Host "Identity insert disabled for table $lastIdentityTable"
+        $script:lastIdentityTable = $null
+    }
+
+    if ($hasIdentity -and $enableIdentityInsert) {
+        $identityCommand = $destConn.CreateCommand()
+        $identityCommand.CommandText = "SET IDENTITY_INSERT [$destTableName] ON"
+        $identityCommand.ExecuteNonQuery()
+        Write-Host "Identity insert enabled for table $destTableName"
+        $script:lastIdentityTable = $destTableName
+    }
+
+    $rowCount = 0
+    if ($hasIdentity -and $enableIdentityInsert -and $sourceTableName -ne $destTableName) {
+        $sourceCommand = $sourceConn.CreateCommand()
+        $sourceCommand.CommandText = "SELECT $columnList FROM [$sourceTableName]"
+        $reader = $sourceCommand.ExecuteReader()
+
+        try {
+            while ($reader.Read()) {
+                $values = @()
+                foreach ($column in $columns) {
+                    $value = if ($reader[$column] -is [DBNull]) { "NULL" } 
+                            elseif ($reader[$column] -is [string]) { "'$($reader[$column].Replace("'", "''"))'" }
+                            else { $reader[$column] }
+                    $values += $value
+                }
+                
+                $insertCommand = $destConn.CreateCommand()
+                $insertCommand.CommandText = "INSERT INTO [$destTableName] ($columnList) VALUES ($($values -join ','))"
+                $insertCommand.ExecuteNonQuery()
+                $rowCount++
+            }
+        }
+        finally {
+            $reader.Close()
+        }
+    }
+    else {
+        try {
+            $bulkCopy = New-Object Data.SqlClient.SqlBulkCopy($destConn, [System.Data.SqlClient.SqlBulkCopyOptions]::KeepIdentity, $null)
+            $bulkCopy.DestinationTableName = "[$destTableName]"
+            
+            foreach ($column in $columns) {
+                $bulkCopy.ColumnMappings.Add($column, $column) | Out-Null
+            }
+            
+            $sourceCommand = $sourceConn.CreateCommand()
+            $sourceCommand.CommandText = "SELECT $columnList FROM [$sourceTableName]"
+            $sourceAdapter = New-Object Data.SqlClient.SqlDataAdapter($sourceCommand)
+            $sourceDataSet = New-Object Data.DataSet
+            $sourceAdapter.Fill($sourceDataSet)
+            
+            $rowCount = $sourceDataSet.Tables[0].Rows.Count
+            $bulkCopy.WriteToServer($sourceDataSet.Tables[0])
+            $bulkCopy.Close()
+        }
+        catch {
+            Write-Host "Error during copy: $_"
+            return 0
+        }
+    }
+
+    Write-Host "Copied $rowCount rows"
+    return $rowCount
+}
+}
+
+# Main execution
 $sourceConnectionString = "Server=$sourceServer;Database=$sourceDatabase;Integrated Security=True"
 $destinationConnectionString = "Server=$destinationServer;Database=$destinationDatabase;Integrated Security=True"
 
@@ -95,25 +208,35 @@ $destinationConnection = New-Object System.Data.SqlClient.SqlConnection
 $destinationConnection.ConnectionString = $destinationConnectionString
 $destinationConnection.Open()
 
-# Create a SQL Bulk Copy object for data transfer
-$bulkCopy = New-Object Data.SqlClient.SqlBulkCopy($destinationConnection)
-$bulkCopy.DestinationTableName = $tableName
+foreach ($mapping in $tableMapping.Split(',').Trim()) {
+    $sourceTable = $mapping
+    $destTable = $mapping
+    
+    if ($mapping.Contains(':')) {
+        $tables = $mapping.Split(':').Trim()
+        $sourceTable = $tables[0]
+        $destTable = $tables[1]
+    }
+    
+    # Process copy and return single row count
+    Write-Host "`nProcessing mapping: $sourceTable -> $destTable"
+    
+    if (Copy-TableSchema -sourceConn $sourceConnection -destConn $destinationConnection -sourceTableName $sourceTable -destTableName $destTable) {
+        $rowCount = Copy-TableData -sourceConn $sourceConnection -destConn $destinationConnection -sourceTableName $sourceTable -destTableName $destTable
+        if ($rowCount -gt 0) {
+            Write-Host "Copied $rowCount rows successfully"
+        }
+    }
+}
 
-# Retrieve data from the source table
-$sourceCommand = $sourceConnection.CreateCommand()
-$sourceCommand.CommandText = "SELECT * FROM $tableName"
-$sourceAdapter = New-Object Data.SqlClient.SqlDataAdapter $sourceCommand
-$sourceDataSet = New-Object Data.DataSet
-$sourceAdapter.Fill($sourceDataSet)
+if ($lastIdentityTable -ne $null) {
+    $identityOffCommand = $destinationConnection.CreateCommand()
+    $identityOffCommand.CommandText = "SET IDENTITY_INSERT [$lastIdentityTable] OFF"
+    $identityOffCommand.ExecuteNonQuery()
+    Write-Host "Identity insert disabled for table $lastIdentityTable"
+}
 
-# Get the number of rows to be copied
-$rowCount = $sourceDataSet.Tables[0].Rows.Count
-
-# Use SqlBulkCopy to copy data to the destination table
-$bulkCopy.WriteToServer($sourceDataSet.Tables[0])
-
-# Clean up
 $sourceConnection.Close()
 $destinationConnection.Close()
 
-Write-Host "Copied $rowCount rows in table $tableName from $sourceDatabase ($sourceServer) to $destinationDatabase ($destinationServer)."
+Write-Host "`nTable copy process completed."
