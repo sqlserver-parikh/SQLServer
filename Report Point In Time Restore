@@ -7,11 +7,6 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    -- Drop temp tables if they exist
-    DROP TABLE IF EXISTS #AGInfo;
-    DROP TABLE IF EXISTS #BackupSetIDs;
-    DROP TABLE IF EXISTS #BackupDetails;
-
     -- Create backup history tracking
     CREATE TABLE #BackupSetIDs (
         DBName NVARCHAR(128),
@@ -264,7 +259,7 @@ BEGIN
         );
     -- Return results with AG details if available
     SELECT 
-		@@SERVERNAME ServerName,
+	@@SERVERNAME ServerName,
         bd.DBName,
         bd.BackupFileLocation,
         bd.BackupStartDate,
@@ -283,11 +278,6 @@ BEGIN
     FROM #BackupDetails bd
     LEFT JOIN #AGInfo ag ON @IsHadrEnabled = 1 AND bd.AGName = ag.AGName AND bd.DBName = ag.DatabaseName
     ORDER BY bd.DBName, bd.EndDate DESC;
-
-    -- Cleanup
-    DROP TABLE IF EXISTS #AGInfo;
-    DROP TABLE IF EXISTS #BackupSetIDs;
-    DROP TABLE IF EXISTS #BackupDetails;
 END;
 GO
 EXEC usp_PointInTimeRestore
