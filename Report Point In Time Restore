@@ -1,18 +1,23 @@
-USE tempdb
-GO
 CREATE OR ALTER PROCEDURE usp_PointInTimeRestore
-    @DBName NVARCHAR(128) = NULL,
-    @PointInTime DATETIME = '2025-01-21 09:00:00'
+    @DBName NVARCHAR(128) = '', --If NULL or Blank than all database.
+    @PointInTime DATETIME = '2025-01-21 09:00:00',
+    @GenerateRestoreScript BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
+	IF @DBName = ''
+	SET @DBName = NULL
+    DROP TABLE IF EXISTS #AGInfo;
+    DROP TABLE IF EXISTS #BackupSetIDs;
+    DROP TABLE IF EXISTS #BackupDetails;
 
     -- Create backup history tracking
     CREATE TABLE #BackupSetIDs (
         DBName NVARCHAR(128),
         LastFullBackupID INT,
         LastDifferentialBackupID INT,
-        BackupServer NVARCHAR(128)
+        BackupServer NVARCHAR(128),
+        IsInRestorePlan BIT DEFAULT 1
     );
 
     -- Create backup details table
@@ -24,17 +29,20 @@ BEGIN
         BackupType NVARCHAR(50),
         BackupSizeMB FLOAT,
         BackupServer NVARCHAR(128),
+        BackupSetId INT,
+        MediaSetId INT,
+        FileNumber INT,
         AGName NVARCHAR(128) NULL,
         IsPrimaryBackup BIT NULL,
         BackupPreference NVARCHAR(60) NULL,
         AvailabilityMode NVARCHAR(60) NULL,
-        RestoreWarning NVARCHAR(MAX) NULL
+        RestoreWarning NVARCHAR(MAX) NULL,
+        IsInRestorePlan BIT DEFAULT 1
     );
     
-    -- Track AG status
     DECLARE @IsHadrEnabled bit = CONVERT(bit, SERVERPROPERTY('IsHadrEnabled'));
+    DECLARE @ServerName NVARCHAR(128) = CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128));
 
-    -- Create and populate AG info if enabled
         CREATE TABLE #AGInfo (
             AGName NVARCHAR(128),
             ListenerName NVARCHAR(63),
@@ -77,21 +85,29 @@ BEGIN
         JOIN sys.availability_groups ag ON agi.AGName = ag.name
         JOIN sys.dm_hadr_availability_group_states ags ON ag.group_id = ags.group_id;
 
-    -- Get latest full backup
+    -- Get latest full backup before point in time
     INSERT INTO #BackupSetIDs (DBName, LastFullBackupID, BackupServer)
     SELECT 
         d.name,
-        MAX(bs.backup_set_id),
-        MAX(bs.server_name)
+        bs.backup_set_id,
+        bs.server_name
     FROM msdb.dbo.backupset bs
     JOIN sys.databases d ON bs.database_name = d.name
     WHERE bs.type = 'D' 
         AND bs.backup_finish_date <= @PointInTime
         AND (@DBName IS NULL OR d.name = @DBName)
         AND d.database_id > 4
-    GROUP BY d.name;
+        AND bs.is_copy_only = 0
+        AND bs.backup_start_date = (
+            SELECT MAX(backup_start_date)
+            FROM msdb.dbo.backupset bs2
+            WHERE bs2.database_name = bs.database_name
+                AND bs2.type = 'D'
+                AND bs2.backup_finish_date <= @PointInTime
+                AND bs2.is_copy_only = 0
+        );
 
-    -- Get latest differential
+    -- Get latest differential since full backup
     UPDATE bsi
     SET LastDifferentialBackupID = (
         SELECT TOP 1 bs.backup_set_id
@@ -100,6 +116,7 @@ BEGIN
             AND bs.backup_finish_date <= @PointInTime
             AND bs.backup_set_id > bsi.LastFullBackupID
             AND bs.database_name = bsi.DBName
+            AND bs.is_copy_only = 0
         ORDER BY bs.backup_finish_date DESC
     )
     FROM #BackupSetIDs bsi;
@@ -114,6 +131,9 @@ BEGIN
         'Full',
         bs.backup_size / 1024.0 / 1024.0,
         bs.server_name,
+        bs.backup_set_id,
+        bmf.media_set_id,
+        bmf.family_sequence_number,
         CASE WHEN @IsHadrEnabled = 1 THEN ag.AGName ELSE NULL END,
         CASE WHEN @IsHadrEnabled = 1 THEN 
             CASE WHEN ag.PrimaryReplicaServer = bs.server_name THEN 1 ELSE 0 END 
@@ -124,7 +144,8 @@ BEGIN
             WHEN @IsHadrEnabled = 1 AND ag.AGName IS NOT NULL AND bs.server_name <> ag.PrimaryReplicaServer 
             THEN 'Full backup taken from secondary: ' + bs.server_name
             ELSE NULL
-        END
+        END,
+        1
     FROM msdb.dbo.backupset bs
     JOIN msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
     JOIN sys.databases d ON bs.database_name = d.name
@@ -142,6 +163,9 @@ BEGIN
         'Differential',
         bs.backup_size / 1024.0 / 1024.0,
         bs.server_name,
+        bs.backup_set_id,
+        bmf.media_set_id,
+        bmf.family_sequence_number,
         CASE WHEN @IsHadrEnabled = 1 THEN ag.AGName ELSE NULL END,
         CASE WHEN @IsHadrEnabled = 1 THEN 
             CASE WHEN ag.PrimaryReplicaServer = bs.server_name THEN 1 ELSE 0 END 
@@ -152,7 +176,8 @@ BEGIN
             WHEN @IsHadrEnabled = 1 AND ag.AGName IS NOT NULL AND bs.server_name <> ag.PrimaryReplicaServer 
             THEN 'Differential backup from secondary: ' + bs.server_name
             ELSE NULL
-        END
+        END,
+        1
     FROM msdb.dbo.backupset bs
     JOIN msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
     JOIN sys.databases d ON bs.database_name = d.name
@@ -170,6 +195,9 @@ BEGIN
         'Log',
         bs.backup_size / 1024.0 / 1024.0,
         bs.server_name,
+        bs.backup_set_id,
+        bmf.media_set_id,
+        bmf.family_sequence_number,
         CASE WHEN @IsHadrEnabled = 1 THEN ag.AGName ELSE NULL END,
         CASE WHEN @IsHadrEnabled = 1 THEN 
             CASE WHEN ag.PrimaryReplicaServer = bs.server_name THEN 1 ELSE 0 END 
@@ -180,7 +208,8 @@ BEGIN
             WHEN @IsHadrEnabled = 1 AND ag.AGName IS NOT NULL AND bs.server_name <> ag.PrimaryReplicaServer 
             THEN 'Log backup from secondary: ' + bs.server_name
             ELSE NULL
-        END
+        END,
+        1
     FROM msdb.dbo.backupset bs
     JOIN msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
     JOIN sys.databases d ON bs.database_name = d.name
@@ -190,37 +219,7 @@ BEGIN
         AND bs.backup_finish_date <= @PointInTime
         AND bs.backup_set_id > ISNULL(bsi.LastDifferentialBackupID, bsi.LastFullBackupID);
 
-    -- Get one log backup after point in time
-    INSERT INTO #BackupDetails
-    SELECT TOP 1
-        d.name,
-        bmf.physical_device_name,
-        bs.backup_start_date,
-        bs.backup_finish_date,
-        'Log (After Point-In-Time)',
-        bs.backup_size / 1024.0 / 1024.0,
-        bs.server_name,
-        CASE WHEN @IsHadrEnabled = 1 THEN ag.AGName ELSE NULL END,
-        CASE WHEN @IsHadrEnabled = 1 THEN 
-            CASE WHEN ag.PrimaryReplicaServer = bs.server_name THEN 1 ELSE 0 END 
-        ELSE NULL END,
-        CASE WHEN @IsHadrEnabled = 1 THEN ag.BackupPreference ELSE NULL END,
-        CASE WHEN @IsHadrEnabled = 1 THEN ag.AvailabilityMode ELSE NULL END,
-        CASE 
-            WHEN @IsHadrEnabled = 1 AND ag.AGName IS NOT NULL AND bs.server_name <> ag.PrimaryReplicaServer 
-            THEN 'Final log backup from secondary: ' + bs.server_name
-            ELSE NULL
-        END
-    FROM msdb.dbo.backupset bs
-    JOIN msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
-    JOIN sys.databases d ON bs.database_name = d.name
-    LEFT JOIN #AGInfo ag ON @IsHadrEnabled = 1 AND d.name = ag.DatabaseName
-    WHERE bs.type = 'L'
-        AND bs.backup_finish_date > @PointInTime
-        AND (@DBName IS NULL OR d.name = @DBName)
-        AND d.database_id > 4
-    ORDER BY bs.backup_finish_date ASC;
-	-- Get one log backup after point in time
+    -- Get log backup after point in time
     INSERT INTO #BackupDetails
     SELECT 
         d.name,
@@ -230,6 +229,9 @@ BEGIN
         'Log (After Point-In-Time)',
         bs.backup_size / 1024.0 / 1024.0,
         bs.server_name,
+        bs.backup_set_id,
+        bmf.media_set_id,
+        bmf.family_sequence_number,
         CASE WHEN @IsHadrEnabled = 1 THEN ag.AGName ELSE NULL END,
         CASE WHEN @IsHadrEnabled = 1 THEN 
             CASE WHEN ag.PrimaryReplicaServer = bs.server_name THEN 1 ELSE 0 END 
@@ -240,7 +242,8 @@ BEGIN
             WHEN @IsHadrEnabled = 1 AND ag.AGName IS NOT NULL AND bs.server_name <> ag.PrimaryReplicaServer 
             THEN 'Final log backup from secondary: ' + bs.server_name
             ELSE NULL
-        END
+        END,
+        1
     FROM msdb.dbo.backupset bs
     JOIN msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
     JOIN sys.databases d ON bs.database_name = d.name
@@ -257,29 +260,105 @@ BEGIN
                 AND bs2.database_name = d.name
             ORDER BY bs2.backup_finish_date ASC
         );
-    -- Return results with AG details if available
-    SELECT 
-	@@SERVERNAME ServerName,
-        bd.DBName,
-        bd.BackupFileLocation,
-        bd.BackupStartDate,
-        bd.EndDate,
-        bd.BackupType,
-        bd.BackupSizeMB,
-        bd.BackupServer,
-        bd.AGName,
-        CASE WHEN @IsHadrEnabled = 1 THEN ag.ListenerName END as ListenerName,
-        CASE WHEN @IsHadrEnabled = 1 THEN ag.PrimaryReplicaServer END as CurrentPrimary,
-        bd.IsPrimaryBackup,
-        bd.BackupPreference,
-        bd.AvailabilityMode,
-        CASE WHEN @IsHadrEnabled = 1 THEN ag.ReadableSecondary END as ReadableSecondary,
-        bd.RestoreWarning
-    FROM #BackupDetails bd
-    LEFT JOIN #AGInfo ag ON @IsHadrEnabled = 1 AND bd.AGName = ag.AGName AND bd.DBName = ag.DatabaseName
-    ORDER BY bd.DBName, bd.EndDate DESC;
+
+    -- Return results based on @GenerateRestoreScript parameter
+    IF @GenerateRestoreScript = 1
+    BEGIN
+        -- Return restore commands
+        SELECT 
+            ROW_NUMBER() OVER (ORDER BY BackupStartDate) as StepNumber,
+			DBNAME,
+            CASE BackupType
+                WHEN 'Full' THEN 
+                    'RESTORE DATABASE [' + DBName + '] FROM DISK = N''' + BackupFileLocation + 
+                    ''' WITH FILE = ' + CAST(FileNumber AS VARCHAR(10)) + ', NORECOVERY;'
+                WHEN 'Differential' THEN 
+                    'RESTORE DATABASE [' + DBName + '] FROM DISK = N''' + BackupFileLocation + 
+                    ''' WITH FILE = ' + CAST(FileNumber AS VARCHAR(10)) + ', NORECOVERY;'
+                WHEN 'Log' THEN 
+                    'RESTORE LOG [' + DBName + '] FROM DISK = N''' + BackupFileLocation + 
+                    ''' WITH FILE = ' + CAST(FileNumber AS VARCHAR(10)) + ', NORECOVERY;'
+                WHEN 'Log (After Point-In-Time)' THEN 
+                    'RESTORE LOG [' + DBName + '] FROM DISK = N''' + BackupFileLocation + 
+                    ''' WITH FILE = ' + CAST(FileNumber AS VARCHAR(10)) + 
+                    ', STOPAT = ''' + CONVERT(VARCHAR(23), @PointInTime, 121) + ''', NORECOVERY;'
+            END AS RestoreCommand,
+            BackupType,
+            BackupStartDate,
+            EndDate,
+            BackupSizeMB,
+            ISNULL(RestoreWarning, '') + 
+            CASE 
+                WHEN @IsHadrEnabled = 1 AND ag.AGName IS NOT NULL AND 
+                     BackupServer <> PrimaryReplicaServer THEN 
+                    CASE 
+                        WHEN ag.BackupPreference = 'SECONDARY_ONLY' AND IsPrimaryBackup = 1 
+                            THEN ' Warning: Backup from primary when preference is secondary only'
+                        ELSE ' Warning: Backup from different replica server'
+                    END
+                ELSE ''
+            END as RestoreWarnings
+        FROM #BackupDetails bd
+        LEFT JOIN #AGInfo ag ON @IsHadrEnabled = 1 
+            AND bd.AGName = ag.AGName 
+            AND bd.DBName = ag.DatabaseName
+        WHERE bd.IsInRestorePlan = 1
+        
+        UNION ALL
+        
+        SELECT 
+            99999,
+			@DBName,
+            'RESTORE DATABASE [' + @DBName + '] WITH RECOVERY;',
+            'Recovery',
+            NULL,
+            NULL,
+            NULL,
+            NULL
+        ORDER BY StepNumber;
+    END
+    ELSE
+    BEGIN
+        -- Return backup details with AG info
+        SELECT 
+            bd.DBName,
+            bd.BackupFileLocation,
+            bd.BackupStartDate,
+            bd.EndDate,
+            bd.BackupType,
+            bd.BackupSizeMB,
+            bd.BackupServer,
+            bd.AGName,
+            CASE WHEN @IsHadrEnabled = 1 THEN ag.ListenerName END as ListenerName,
+            CASE WHEN @IsHadrEnabled = 1 THEN ag.PrimaryReplicaServer END as CurrentPrimary,
+            bd.IsPrimaryBackup,
+            bd.BackupPreference,
+            bd.AvailabilityMode,
+            CASE WHEN @IsHadrEnabled = 1 THEN ag.ReadableSecondary END as ReadableSecondary,
+            bd.RestoreWarning,
+            bd.FileNumber,
+            CASE 
+                WHEN @IsHadrEnabled = 1 AND ag.AGName IS NOT NULL THEN
+                    CASE 
+                        WHEN bd.BackupServer <> ag.PrimaryReplicaServer THEN 
+                            'Backup from secondary replica: ' + bd.BackupServer
+                        WHEN ag.BackupPreference = 'SECONDARY_ONLY' AND bd.BackupServer = ag.PrimaryReplicaServer 
+                            THEN 'Warning: Backup from primary when preference is secondary only'
+                        ELSE NULL
+                    END
+                ELSE NULL
+            END as AGWarning
+        FROM #BackupDetails bd
+        LEFT JOIN #AGInfo ag ON @IsHadrEnabled = 1 
+            AND bd.AGName = ag.AGName 
+            AND bd.DBName = ag.DatabaseName
+        WHERE bd.IsInRestorePlan = 1
+        ORDER BY bd.DBName, bd.BackupStartDate;
+    END
+
+    -- Cleanup
+    DROP TABLE IF EXISTS #AGInfo;
+    DROP TABLE IF EXISTS #BackupSetIDs;
+    DROP TABLE IF EXISTS #BackupDetails;
 END;
 GO
-EXEC usp_PointInTimeRestore
-GO
-DROP PROCEDURE usp_PointInTimeRestore
