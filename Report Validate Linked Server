@@ -31,10 +31,7 @@ BEGIN
             WHEN s.provider = 'SQLNCLI' OR s.provider = 'SQLOLEDB' THEN 'SQL Server'
             ELSE s.product
         END,
-        CASE 
-            WHEN s.provider = 'SQLNCLI' OR s.provider = 'SQLOLEDB' THEN s.data_source
-            ELSE s.catalog
-        END,
+        ISNULL(s.data_source,'') + ' ' + ISNULL(s.catalog,''),
         CASE 
             WHEN s.provider = 'SQLNCLI' THEN 'SQL Server Native Client'
             WHEN s.provider = 'SQLOLEDB' THEN 'SQL Server OLE DB Provider'
