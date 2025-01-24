@@ -1,0 +1,148 @@
+USE tempdb
+GO
+CREATE OR ALTER PROCEDURE usp_ValidateLinkedServers
+    @DropFailedServers BIT = 0
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF OBJECT_ID('tempdb..#LinkedServerStatus') IS NOT NULL
+        DROP TABLE #LinkedServerStatus;
+
+    CREATE TABLE #LinkedServerStatus (
+        LinkedServerName NVARCHAR(128),
+        ServerType NVARCHAR(128),
+        TargetServer NVARCHAR(128),
+        Provider NVARCHAR(128),
+        LocalLogin sysname NULL,
+        RemoteLogin sysname NULL,
+        Status VARCHAR(20),
+        ErrorMessage NVARCHAR(4000),
+        LastChecked DATETIME DEFAULT GETDATE(),
+        DropScript NVARCHAR(MAX)
+    );
+
+    INSERT INTO #LinkedServerStatus (
+        LinkedServerName, ServerType, TargetServer, Provider, LocalLogin, RemoteLogin, DropScript
+    )
+    SELECT 
+        s.name,
+        CASE 
+            WHEN s.provider = 'SQLNCLI' OR s.provider = 'SQLOLEDB' THEN 'SQL Server'
+            ELSE s.product
+        END,
+        CASE 
+            WHEN s.provider = 'SQLNCLI' OR s.provider = 'SQLOLEDB' THEN s.data_source
+            ELSE s.catalog
+        END,
+        CASE 
+            WHEN s.provider = 'SQLNCLI' THEN 'SQL Server Native Client'
+            WHEN s.provider = 'SQLOLEDB' THEN 'SQL Server OLE DB Provider'
+            ELSE s.provider 
+        END,
+        l.remote_name,
+        SUSER_NAME(),
+        'EXEC master.dbo.sp_dropserver ''' + s.name + ''''
+    FROM sys.servers s
+    LEFT JOIN sys.linked_logins l ON s.server_id = l.server_id
+    WHERE s.is_linked = 1;
+
+    DECLARE @ServerName NVARCHAR(128);
+    DECLARE @SQL NVARCHAR(MAX);
+    DECLARE @DropScript NVARCHAR(MAX);
+    DECLARE @PrintScript NVARCHAR(MAX);
+
+    DECLARE ServerCursor CURSOR FOR
+    SELECT LinkedServerName, DropScript FROM #LinkedServerStatus;
+
+    OPEN ServerCursor;
+    FETCH NEXT FROM ServerCursor INTO @ServerName, @DropScript;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            IF OBJECT_ID('tempdb..#TempResults') IS NOT NULL
+                DROP TABLE #TempResults;
+
+            CREATE TABLE #TempResults (
+                Status NVARCHAR(10),
+                LoginUsed NVARCHAR(128)
+            );
+
+            SET @SQL = N'SELECT ''Online'' AS Status, SYSTEM_USER AS LoginUsed 
+                        FROM OPENQUERY([' + @ServerName + '], ''SELECT SYSTEM_USER AS LoginName'')';
+            
+            INSERT INTO #TempResults
+            EXEC sp_executesql @SQL;
+
+            UPDATE #LinkedServerStatus 
+            SET Status = t.Status,
+                RemoteLogin = t.LoginUsed,
+                ErrorMessage = NULL
+            FROM #LinkedServerStatus ls
+            CROSS APPLY (SELECT TOP 1 * FROM #TempResults) t
+            WHERE LinkedServerName = @ServerName;
+
+            DROP TABLE #TempResults;
+        END TRY
+        BEGIN CATCH
+            UPDATE #LinkedServerStatus 
+            SET Status = 'Offline',
+                ErrorMessage = ERROR_MESSAGE()
+            WHERE LinkedServerName = @ServerName;
+
+            SET @PrintScript = '-- Failed Linked Server: ' + @ServerName + CHAR(13) + CHAR(10) + 
+                             '-- Error: ' + ERROR_MESSAGE() + CHAR(13) + CHAR(10) +
+                             '-- Drop Script:' + CHAR(13) + CHAR(10) + @DropScript;
+            
+            PRINT @PrintScript;
+
+            IF @DropFailedServers = 1
+            BEGIN
+                BEGIN TRY
+                    EXEC sp_executesql @DropScript;
+                    PRINT '-- Successfully dropped linked server: ' + @ServerName;
+                END TRY
+                BEGIN CATCH
+                    PRINT '-- Failed to drop linked server: ' + @ServerName + 
+                          ' Error: ' + ERROR_MESSAGE();
+                END CATCH
+            END
+
+            IF OBJECT_ID('tempdb..#TempResults') IS NOT NULL
+                DROP TABLE #TempResults;
+        END CATCH
+
+        FETCH NEXT FROM ServerCursor INTO @ServerName, @DropScript;
+    END
+
+    CLOSE ServerCursor;
+    DEALLOCATE ServerCursor;
+
+-- Modify the final SELECT to include drop script
+SELECT 
+    LinkedServerName,
+    ServerType,
+    TargetServer,
+    Provider,
+    LocalLogin AS ConfiguredLogin,
+    RemoteLogin AS ActualLoginUsed,
+    Status,
+    ErrorMessage,
+    LastChecked,
+    CASE 
+        WHEN Status = 'Offline' 
+        THEN '-- Drop Script for ' + LinkedServerName + CHAR(13) + CHAR(10) +
+             DropScript + CHAR(13) + CHAR(10) +
+             '-- Error Message: ' + ISNULL(ErrorMessage, 'None')
+        ELSE NULL 
+    END AS DropScript
+FROM #LinkedServerStatus
+ORDER BY LinkedServerName;
+    IF OBJECT_ID('tempdb..#LinkedServerStatus') IS NOT NULL
+        DROP TABLE #LinkedServerStatus;
+END;
+GO
+EXECUTE usp_ValidateLinkedServers
+GO
+DROP PROCEDURE usp_ValidateLinkedServers
