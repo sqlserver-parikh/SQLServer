@@ -1,0 +1,156 @@
+USE tempdb;
+GO
+
+CREATE PROCEDURE usp_PointInTimeRestore
+    @DBName NVARCHAR(128) = NULL,
+    @PointInTime DATETIME = '2025-01-21 09:00:00'
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Table variable to store the last full and differential backup set IDs for each database
+    DECLARE @BackupSetIDs TABLE (
+        DBName NVARCHAR(128),
+        LastFullBackupID INT,
+        LastDifferentialBackupID INT
+    );
+
+    -- Insert the last full backup set ID for each database
+    INSERT INTO @BackupSetIDs (DBName, LastFullBackupID)
+    SELECT 
+        d.name AS DBName,
+        MAX(bs.backup_set_id) AS LastFullBackupID
+    FROM 
+        msdb.dbo.backupset bs
+    INNER JOIN 
+        sys.databases d ON bs.database_name = d.name
+    WHERE 
+        bs.type = 'D' AND bs.backup_finish_date <= @PointInTime
+        AND (@DBName IS NULL OR d.name = @DBName)
+        AND d.database_id > 4 -- Exclude system databases
+    GROUP BY d.name;
+
+    -- Update the table variable with the last differential backup set ID for each database
+    UPDATE @BackupSetIDs
+    SET LastDifferentialBackupID = (
+        SELECT TOP 1 bs.backup_set_id
+        FROM msdb.dbo.backupset bs
+        WHERE bs.type = 'I' AND bs.backup_finish_date <= @PointInTime
+        AND bs.backup_set_id > LastFullBackupID
+        AND bs.database_name = DBName
+        ORDER BY bs.backup_finish_date DESC
+    );
+
+    -- Temporary table to store backup details
+    CREATE TABLE #BackupDetails (
+        DBName NVARCHAR(128),
+        BackupFileLocation NVARCHAR(260),
+        BackupStartDate DATETIME,
+        EndDate DATETIME,
+        BackupType NVARCHAR(50),
+        BackupSizeMB FLOAT
+    );
+
+    -- Insert the last full backup details into the temporary table
+    INSERT INTO #BackupDetails
+    SELECT 
+        d.name AS DBName,
+        bmf.physical_device_name AS BackupFileLocation,
+        bs.backup_start_date AS BackupStartDate,
+        bs.backup_finish_date AS EndDate,
+        'Full' AS BackupType,
+        bs.backup_size / 1024.0 / 1024.0 AS BackupSizeMB
+    FROM 
+        msdb.dbo.backupset bs
+    INNER JOIN 
+        msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
+    INNER JOIN 
+        sys.databases d ON bs.database_name = d.name
+    INNER JOIN 
+        @BackupSetIDs bsi ON d.name = bsi.DBName
+    WHERE 
+        bs.backup_set_id = bsi.LastFullBackupID;
+
+    -- Insert the last differential backup details into the temporary table
+    INSERT INTO #BackupDetails
+    SELECT 
+        d.name AS DBName,
+        bmf.physical_device_name AS BackupFileLocation,
+        bs.backup_start_date AS BackupStartDate,
+        bs.backup_finish_date AS EndDate,
+        'Differential' AS BackupType,
+        bs.backup_size / 1024.0 / 1024.0 AS BackupSizeMB
+    FROM 
+        msdb.dbo.backupset bs
+    INNER JOIN 
+        msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
+    INNER JOIN 
+        sys.databases d ON bs.database_name = d.name
+    INNER JOIN 
+        @BackupSetIDs bsi ON d.name = bsi.DBName
+    WHERE 
+        bs.backup_set_id = bsi.LastDifferentialBackupID;
+
+    -- Insert all log backup details before the specified point in time into the temporary table
+    INSERT INTO #BackupDetails
+    SELECT 
+        d.name AS DBName,
+        bmf.physical_device_name AS BackupFileLocation,
+        bs.backup_start_date AS BackupStartDate,
+        bs.backup_finish_date AS EndDate,
+        'Log' AS BackupType,
+        bs.backup_size / 1024.0 / 1024.0 AS BackupSizeMB
+    FROM 
+        msdb.dbo.backupset bs
+    INNER JOIN 
+        msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
+    INNER JOIN 
+        sys.databases d ON bs.database_name = d.name
+    INNER JOIN 
+        @BackupSetIDs bsi ON d.name = bsi.DBName
+    WHERE 
+        bs.type = 'L' AND bs.backup_finish_date <= @PointInTime
+        AND bs.backup_set_id > ISNULL(bsi.LastDifferentialBackupID, bsi.LastFullBackupID);
+
+    -- Insert one log backup after the specified point in time for each database into the temporary table
+    INSERT INTO #BackupDetails
+    SELECT 
+        d.name AS DBName,
+        bmf.physical_device_name AS BackupFileLocation,
+        bs.backup_start_date AS BackupStartDate,
+        bs.backup_finish_date AS EndDate,
+        'Log' AS BackupType,
+        bs.backup_size / 1024.0 / 1024.0 AS BackupSizeMB
+    FROM 
+        msdb.dbo.backupset bs
+    INNER JOIN 
+        msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
+    INNER JOIN 
+        sys.databases d ON bs.database_name = d.name
+    WHERE 
+        bs.type = 'L' AND bs.backup_finish_date > @PointInTime
+        AND (@DBName IS NULL OR d.name = @DBName)
+        AND d.database_id > 4 -- Exclude system databases
+        AND bs.backup_set_id = (
+            SELECT TOP 1 bs2.backup_set_id
+            FROM msdb.dbo.backupset bs2
+            WHERE bs2.type = 'L' AND bs2.backup_finish_date > @PointInTime
+            AND bs2.database_name = d.name
+            ORDER BY bs2.backup_finish_date ASC
+        );
+
+    -- Select the results
+    SELECT * FROM #BackupDetails
+	ORDER BY DBName, EndDate DESC
+
+    -- Clean up
+    DROP TABLE #BackupDetails;
+END;
+GO
+
+-- Execute the procedure
+EXEC usp_PointInTimeRestore;
+GO
+
+-- Drop the procedure
+DROP PROCEDURE usp_PointInTimeRestore;
