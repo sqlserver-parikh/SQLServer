@@ -1,0 +1,183 @@
+[CmdletBinding()]
+param (
+    [Parameter(
+        Position = 0,
+        Mandatory = $false,
+        HelpMessage = "Optional: Tenant ID (will prompt if not provided)"
+    )]
+    [string]$TenantId,
+
+    [Parameter(
+        Position = 1,
+        Mandatory = $false,
+        HelpMessage = "Optional: Subscription ID (will prompt if not provided)"
+    )]
+    [string]$SubscriptionId,
+
+    [Parameter(
+        Position = 2,
+        Mandatory = $false,
+        HelpMessage = "Optional: Resource Group name (will prompt if not provided)"
+    )]
+    [string]$ResourceGroupName
+)
+
+# Clear the screen for better visibility
+Clear-Host
+
+# Function to prompt for input with validation
+function Get-ValidatedInput {
+    param (
+        [string]$Prompt,
+        [string]$DefaultValue,
+        [switch]$AllowEmpty
+    )
+    
+    do {
+        if ($DefaultValue) {
+            Write-Host "$Prompt [Default: $DefaultValue]: " -NoNewline
+        } else {
+            Write-Host "$Prompt : " -NoNewline
+        }
+        
+        $input = Read-Host
+        
+        if ([string]::IsNullOrWhiteSpace($input) -and $DefaultValue) {
+            return $DefaultValue
+        }
+        
+        if ([string]::IsNullOrWhiteSpace($input) -and -not $AllowEmpty) {
+            Write-Host "Value cannot be empty. Please try again." -ForegroundColor Yellow
+            continue
+        }
+        
+        return $input
+    } while ($true)
+}
+
+# Welcome message
+Write-Host "=== Azure KeyVault Password Search Tool ===" -ForegroundColor Cyan
+Write-Host "This tool will help you search for secrets across Azure KeyVaults.`n"
+
+# Get Azure configuration details if not provided as parameters
+if (-not $TenantId) {
+    $TenantId = Get-ValidatedInput -Prompt "Enter Azure Tenant ID"
+}
+
+if (-not $SubscriptionId) {
+    $SubscriptionId = Get-ValidatedInput -Prompt "Enter Azure Subscription ID"
+}
+
+if (-not $ResourceGroupName) {
+    $ResourceGroupName = Get-ValidatedInput -Prompt "Enter Resource Group name"
+}
+
+# Prompt for account search details
+Write-Host "`nWhat account password are you looking for?"
+Write-Host "Examples:" -ForegroundColor Yellow
+Write-Host "- SQL Server account (e.g., SQLDBA, SQLAdmin)"
+Write-Host "- Service account (e.g., SVC_Account)"
+Write-Host "- Application account (e.g., APP_User)`n"
+
+$SearchPattern = Get-ValidatedInput -Prompt "Enter account name to search" -DefaultValue "SQLDBA"
+
+# Format search pattern with wildcards
+$SearchPattern = "*$SearchPattern*"
+
+# Connect to Azure
+try {
+    Write-Verbose "Connecting to Azure..."
+    Write-Host "`nConnecting to Azure with the following details:" -ForegroundColor Cyan
+    Write-Host "Tenant ID: $TenantId"
+    Write-Host "Subscription: $SubscriptionId"
+    Write-Host "Resource Group: $ResourceGroupName`n"
+    
+    $confirmation = Get-ValidatedInput -Prompt "Are these details correct? (Y/N)" -DefaultValue "Y"
+    if ($confirmation.ToUpper() -ne "Y") {
+        Write-Host "Operation cancelled by user." -ForegroundColor Yellow
+        exit 0
+    }
+    
+    # Try to connect using current context first
+    try {
+        $context = Get-AzContext
+        if ($context -and $context.Tenant.Id -eq $TenantId -and $context.Subscription.Id -eq $SubscriptionId) {
+            Write-Host "Using existing Azure connection" -ForegroundColor Green
+        } else {
+            throw "Need to establish new connection"
+        }
+    } catch {
+        Write-Host "Connecting to Azure..." -ForegroundColor Yellow
+        Connect-AzAccount -UseDeviceAuthentication -TenantId $TenantId -Subscription $SubscriptionId -ErrorAction Stop | Out-Null
+    }
+}
+catch {
+    Write-Error "Failed to connect to Azure: $_"
+    exit 1
+}
+
+# Display search information
+Write-Host "`nSearching for pattern: $SearchPattern" -BackgroundColor Yellow -ForegroundColor Black
+Write-Host "`n"
+
+# Get all KeyVaults in the resource group
+try {
+    $KeyVaults = Get-AzKeyVault -ResourceGroupName $ResourceGroupName
+    if (-not $KeyVaults) {
+        Write-Warning "No KeyVaults found in resource group: $ResourceGroupName"
+        exit 0
+    }
+}
+catch {
+    Write-Error "Failed to retrieve KeyVaults: $_"
+    exit 1
+}
+
+# Search through each KeyVault
+foreach ($Vault in $KeyVaults) {
+    Write-Host "Checking vault: $($Vault.VaultName)"
+    
+    try {
+        # Get matching secrets based on name or tags
+        $Secrets = Get-AzKeyVaultSecret -VaultName $Vault.VaultName -ErrorAction Stop | 
+            Where-Object { ($_.Name -like $SearchPattern) -or ($_.Tags.Values -like $SearchPattern) }
+        
+        if ($Secrets) {
+            Write-Host 'Found matches ->' -BackgroundColor Red
+            
+            foreach ($Secret in $Secrets) {
+                # Display secret information
+                Write-Host "`n$($Secret.Name)" -BackgroundColor Cyan -ForegroundColor Black
+                
+                # Display tags if they exist
+                if ($Secret.Tags.Count -gt 0) {
+                    Write-Host "Tags:"
+                    $Secret.Tags | Format-Table -AutoSize
+                }
+                
+                # Prompt before showing secret value
+                $showSecret = Get-ValidatedInput -Prompt "Do you want to view the secret value? (Y/N)" -DefaultValue "Y"
+                if ($showSecret.ToUpper() -eq "Y") {
+                    try {
+                        $SecretValue = Get-AzKeyVaultSecret -VaultName $Vault.VaultName -Name $Secret.Name -AsPlainText
+                        Write-Host "Secret Value:"
+                        Write-Host $SecretValue
+                    }
+                    catch {
+                        Write-Warning "Unable to retrieve secret value for $($Secret.Name): $_"
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning "Error accessing vault $($Vault.VaultName): $_"
+        continue
+    }
+}
+
+Write-Host "`nSearch complete!" -ForegroundColor Green
+
+#.\Search-KeyVaultSecrets.ps1 -TenantId "your-tenant-id" -SubscriptionId "your-subscription-id" -ResourceGroupName "your-rg"
+#.\Search-KeyVaultSecrets.ps1
+#.\Search-KeyVaultSecrets.ps1 -TenantId "your-tenant-id" -SubscriptionId "your-subscription-id"
