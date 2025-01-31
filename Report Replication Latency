@@ -1,78 +1,182 @@
-IF (OBJECT_ID('tempdb..#AgentHealth')) IS NOT NULL
-    DROP TABLE #AgentHealth
+USE tempdb;
+GO
 
-CREATE TABLE #AgentHealth (
-    Agent_id INT NOT NULL,
-    DistributorAgentName SYSNAME NOT NULL,
-    RunStatus VARCHAR(20) NULL,
-    Publisher SYSNAME NOT NULL,
-    PublisherDB SYSNAME NOT NULL,
-    Publication SYSNAME NOT NULL,
-    Subscriber SYSNAME NOT NULL,
-    SubscribingDB SYSNAME NOT NULL,
-    LatencyInMinute INT NOT NULL,
-    CmdsDeliveredPerSec INT NULL,
-    Health CHAR(10) NOT NULL,
-    LastTransactionTime DATETIME NULL,
-    Comments NVARCHAR(4000) NULL
-)
+-- Drop procedure if it exists
+IF OBJECT_ID('dbo.sp_MonitorReplicationHealth', 'P') IS NOT NULL
+    DROP PROCEDURE dbo.sp_MonitorReplicationHealth;
+GO
 
-SELECT
-    Agent.agent_id,
-    Agent.AgentName,
-    CASE Agent.runstatus
-        WHEN 1 THEN 'Start'
-        WHEN 2 THEN 'Succeed'
-        WHEN 3 THEN 'In Progress'
-        WHEN 4 THEN 'Idle'
-        WHEN 5 THEN 'Retry'
-        ELSE 'Fail'
-    END AS RunStatus,
-    Agent.publisher,
-    Agent.publisher_db,
-    Agent.publication,
-    Agent.Subscriber,
-    Agent.subscriber_db,
-    DATEDIFF(MINUTE, T.entry_time, GETDATE()) AS 'LatencyInMinutes',
-    CONVERT(INT, Agent.delivery_rate) AS CmdsDeliveredPerSec,
-    CASE
-        WHEN (DATEDIFF(MINUTE, T.entry_time, GETDATE()) < 11 AND RunStatus NOT IN (5, 6)) THEN 'Excellent'
-        WHEN (DATEDIFF(MINUTE, T.entry_time, GETDATE()) BETWEEN 11 AND 30 AND RunStatus NOT IN (5, 6)) THEN 'Good'
-        WHEN (DATEDIFF(MINUTE, T.entry_time, GETDATE()) BETWEEN 31 AND 60 AND RunStatus NOT IN (5, 6)) THEN 'Caution'
-        ELSE 'Critical'
-    END AS Health,
-    T.entry_time,
-    Agent.comments
-FROM (
-    SELECT
-        H.agent_id,
-        A.name AS AgentName,
-        H.xact_seqno,
-        H.runstatus,
-        A.publisher_database_id,
-        S1.srvname AS publisher,
-        A.publisher_id,
-        A.publisher_db,
-        S.srvname AS Subscriber,
-        A.subscriber_id,
-        A.subscriber_db,
-        A.publication,
-        delivery_rate,
-        H.comments,
-        H.start_time,
-        H.time
-    FROM msdistribution_history H WITH (NOLOCK)
-    INNER JOIN (
+CREATE PROCEDURE dbo.sp_MonitorReplicationHealth
+    @Publisher SYSNAME = NULL,              -- Optional: Filter by publisher
+    @PublisherDB SYSNAME = NULL,           -- Optional: Filter by publisher database
+    @Subscriber SYSNAME = NULL,            -- Optional: Filter by subscriber
+    @SubscriberDB SYSNAME = NULL,          -- Optional: Filter by subscriber database
+    @Publication SYSNAME = NULL,           -- Optional: Filter by publication
+    @HealthThreshold VARCHAR(10) = NULL,   -- Optional: Filter by health status (Excellent, Good, Caution, Critical)
+    @MinLatencyMinutes INT = NULL,         -- Optional: Minimum latency in minutes
+    @MaxLatencyMinutes INT = NULL,         -- Optional: Maximum latency in minutes
+    @RunStatus VARCHAR(20) = NULL,         -- Optional: Filter by run status
+    @IncludeComments BIT = 1,              -- Optional: Include comments column
+    @Debug BIT = 0                         -- Optional: Show debug information
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        -- Temporary table to store results
+        IF OBJECT_ID('tempdb..#AgentHealth') IS NOT NULL
+            DROP TABLE #AgentHealth;
+
+        CREATE TABLE #AgentHealth (
+            Agent_id INT NOT NULL,
+            DistributorAgentName SYSNAME NOT NULL,
+            RunStatus VARCHAR(20) NULL,
+            Publisher SYSNAME NOT NULL,
+            PublisherDB SYSNAME NOT NULL,
+            Publication SYSNAME NOT NULL,
+            Subscriber SYSNAME NOT NULL,
+            SubscribingDB SYSNAME NOT NULL,
+            LatencyInMinute INT NOT NULL,
+            CmdsDeliveredPerSec INT NULL,
+            Health CHAR(10) NOT NULL,
+            LastTransactionTime DATETIME NULL,
+            Comments NVARCHAR(4000) NULL
+        );
+
+        -- Main query
+        INSERT INTO #AgentHealth
         SELECT
-            agent_id,
-            MAX(time) AS time
-        FROM msdistribution_history WITH (NOLOCK)
-        GROUP BY agent_id
-    ) AS Active
-    ON H.agent_id = Active.agent_id AND H.time = Active.time
-    INNER JOIN MSdistribution_agents A WITH (NOLOCK) ON H.agent_id = A.id
-    INNER JOIN master..sysservers S WITH (NOLOCK) ON A.subscriber_id = S.srvid
-    INNER JOIN master..sysservers S1 WITH (NOLOCK) ON A.publisher_id = S1.srvid
-) AS Agent
-INNER JOIN MSrepl_transactions T WITH (NOLOCK) ON Agent.publisher_database_id = T.publisher_database_id AND Agent.xact_seqno = T.xact_seqno
-ORDER BY LatencyInMinutes DESC, Agent.Subscriber, Agent.publication;
+            Agent.agent_id,
+            Agent.AgentName,
+            CASE Agent.runstatus
+                WHEN 1 THEN 'Start'
+                WHEN 2 THEN 'Succeed'
+                WHEN 3 THEN 'In Progress'
+                WHEN 4 THEN 'Idle'
+                WHEN 5 THEN 'Retry'
+                ELSE 'Fail'
+            END AS RunStatus,
+            Agent.publisher,
+            Agent.publisher_db,
+            Agent.publication,
+            Agent.Subscriber,
+            Agent.subscriber_db,
+            DATEDIFF(MINUTE, T.entry_time, GETDATE()) AS 'LatencyInMinutes',
+            CONVERT(INT, Agent.delivery_rate) AS CmdsDeliveredPerSec,
+            CASE
+                WHEN (DATEDIFF(MINUTE, T.entry_time, GETDATE()) < 11 AND RunStatus NOT IN (5, 6)) THEN 'Excellent'
+                WHEN (DATEDIFF(MINUTE, T.entry_time, GETDATE()) BETWEEN 11 AND 30 AND RunStatus NOT IN (5, 6)) THEN 'Good'
+                WHEN (DATEDIFF(MINUTE, T.entry_time, GETDATE()) BETWEEN 31 AND 60 AND RunStatus NOT IN (5, 6)) THEN 'Caution'
+                ELSE 'Critical'
+            END AS Health,
+            T.entry_time,
+            CASE WHEN @IncludeComments = 1 THEN Agent.comments ELSE NULL END
+        FROM (
+            SELECT
+                H.agent_id,
+                A.name AS AgentName,
+                H.xact_seqno,
+                H.runstatus,
+                A.publisher_database_id,
+                S1.srvname AS publisher,
+                A.publisher_id,
+                A.publisher_db,
+                S.srvname AS Subscriber,
+                A.subscriber_id,
+                A.subscriber_db,
+                A.publication,
+                delivery_rate,
+                H.comments,
+                H.start_time,
+                H.time
+            FROM distribution.dbo.msdistribution_history H WITH (NOLOCK)
+            INNER JOIN (
+                SELECT
+                    agent_id,
+                    MAX(time) AS time
+                FROM distribution.dbo.msdistribution_history WITH (NOLOCK)
+                GROUP BY agent_id
+            ) AS Active
+            ON H.agent_id = Active.agent_id AND H.time = Active.time
+            INNER JOIN distribution.dbo.MSdistribution_agents A WITH (NOLOCK) ON H.agent_id = A.id
+            INNER JOIN master.dbo.sysservers S WITH (NOLOCK) ON A.subscriber_id = S.srvid
+            INNER JOIN master.dbo.sysservers S1 WITH (NOLOCK) ON A.publisher_id = S1.srvid
+            WHERE 1=1
+                AND (@Publisher IS NULL OR S1.srvname = @Publisher)
+                AND (@PublisherDB IS NULL OR A.publisher_db = @PublisherDB)
+                AND (@Subscriber IS NULL OR S.srvname = @Subscriber)
+                AND (@SubscriberDB IS NULL OR A.subscriber_db = @SubscriberDB)
+                AND (@Publication IS NULL OR A.publication = @Publication)
+        ) AS Agent
+        INNER JOIN distribution.dbo.MSrepl_transactions T WITH (NOLOCK) 
+        ON Agent.publisher_database_id = T.publisher_database_id 
+        AND Agent.xact_seqno = T.xact_seqno;
+
+        -- Apply additional filters and return results
+        SELECT 
+            Agent_id,
+            DistributorAgentName,
+            RunStatus,
+            Publisher,
+            PublisherDB,
+            Publication,
+            Subscriber,
+            SubscribingDB,
+            LatencyInMinute,
+            CmdsDeliveredPerSec,
+            Health,
+            LastTransactionTime,
+            CASE WHEN @IncludeComments = 1 THEN Comments ELSE NULL END AS Comments
+        FROM #AgentHealth
+        WHERE 1=1
+            AND (@HealthThreshold IS NULL OR Health = @HealthThreshold)
+            AND (@MinLatencyMinutes IS NULL OR LatencyInMinute >= @MinLatencyMinutes)
+            AND (@MaxLatencyMinutes IS NULL OR LatencyInMinute <= @MaxLatencyMinutes)
+            AND (@RunStatus IS NULL OR RunStatus = @RunStatus)
+        ORDER BY 
+            LatencyInMinute DESC,
+            Subscriber,
+            Publication;
+
+        -- Debug information
+        IF @Debug = 1
+        BEGIN
+            SELECT 
+                '@Publisher' = @Publisher,
+                '@PublisherDB' = @PublisherDB,
+                '@Subscriber' = @Subscriber,
+                '@SubscriberDB' = @SubscriberDB,
+                '@Publication' = @Publication,
+                '@HealthThreshold' = @HealthThreshold,
+                '@MinLatencyMinutes' = @MinLatencyMinutes,
+                '@MaxLatencyMinutes' = @MaxLatencyMinutes,
+                '@RunStatus' = @RunStatus,
+                '@IncludeComments' = @IncludeComments;
+        END
+
+    END TRY
+    BEGIN CATCH
+        SELECT
+            ERROR_NUMBER() AS ErrorNumber,
+            ERROR_SEVERITY() AS ErrorSeverity,
+            ERROR_STATE() AS ErrorState,
+            ERROR_PROCEDURE() AS ErrorProcedure,
+            ERROR_LINE() AS ErrorLine,
+            ERROR_MESSAGE() AS ErrorMessage;
+    END CATCH
+
+    -- Cleanup
+    IF OBJECT_ID('tempdb..#AgentHealth') IS NOT NULL
+        DROP TABLE #AgentHealth;
+END;
+GO
+
+-- Sample executions
+EXEC tempdb.dbo.sp_MonitorReplicationHealth;
+--EXEC tempdb.dbo.sp_MonitorReplicationHealth @HealthThreshold = 'Critical';
+--EXEC tempdb.dbo.sp_MonitorReplicationHealth @MinLatencyMinutes = 30;
+
+-- Cleanup - Drop the procedure
+IF OBJECT_ID('tempdb.dbo.sp_MonitorReplicationHealth', 'P') IS NOT NULL
+    DROP PROCEDURE dbo.sp_MonitorReplicationHealth;
+GO
