@@ -1,247 +1,195 @@
-
-USE [master]
+USE tempdb 
 GO
---============================================
--- Author:      Pavel Pawlowski
--- Created:     2010/04/16
--- Description: Copies rights of old user to new user
---==================================================
-CREATE OR ALTER PROCEDURE #sp_CloneRights
+CREATE OR ALTER PROCEDURE dbo.sp_CloneUserRights
 (
-    @oldUser sysname,             --Old user from which to copy right
-    @newUser sysname,             --New user to which copy rights
-    @NewLoginName sysname = null, --When a NewLogin name is provided also a creation of user is part of the final script
-    @printOnly bit = 1,           --When 1 then only script is printed on screen, when 0 then also script is executed, when NULL, script is only executed and not printed
-    @ServerLevel bit = 0
+    @DatabaseName NVARCHAR(128) = 'UserDB',
+    @OldUser NVARCHAR(128) = 'OldUser',
+    @NewUser NVARCHAR(128) = 'NewUser',
+    @NewLoginName NVARCHAR(128) = '',
+    @PrintOnly BIT = 1,
+    @ServerLevel BIT = 1
 )
 AS
 BEGIN
-    SET NOCOUNT ON
-    CREATE TABLE #output (command nvarchar(4000))
-    DECLARE @command nvarchar(4000),
-            @sql nvarchar(max),
-            @dbName nvarchar(128),
-            @msg nvarchar(max)
-    SELECT @sql = N'',
-           @dbName = QUOTENAME(DB_NAME())
     SET NOCOUNT ON;
-    IF OBJECT_ID(N'tempdb..#ServerLevelRoles') IS NOT NULL
-        DROP TABLE #ServerLevelRoles;
-    CREATE TABLE #ServerLevelRoles (ScriptToRun VARCHAR(1000));
-    INSERT INTO #ServerLevelRoles
-    SELECT 'EXEC sp_addsrvrolemember ''' + @newUser + ''',' + p.name + ';'
-    FROM sys.server_role_members rm
-        JOIN sys.server_principals p
-            ON rm.role_principal_id = p.principal_id
-        JOIN sys.server_principals m
-            ON rm.member_principal_id = m.principal_id
-    WHERE m.name = @oldUser;
-    INSERT INTO #ServerLevelRoles
-    SELECT CASE
-               WHEN sp.state_desc = 'GRANT_WITH_GRANT_OPTION' THEN
-                   SUBSTRING(state_desc, 0, 6) + ' ' + permission_name + ' to ' + QUOTENAME(@newUser)
-                   + 'WITH GRANT OPTION;'
-               ELSE
-                   state_desc + ' ' + permission_name + ' to ' + QUOTENAME(SPs.name) + ';'
-           END
-    FROM sys.server_permissions SP
-        JOIN sys.server_principals SPs
-            ON sp.grantee_principal_id = SPs.principal_id
-    WHERE SPs.name NOT LIKE '%##%' --and SPs.name not like '%nt %'
-          AND SPs.name = @oldUser
-          AND sp.type NOT IN ( 'COSQ', 'CO' );
-    declare @permission varchar(1048)
-    DECLARE SRoles CURSOR FOR
-    SELECT ScriptToRun
-    FROM #ServerLevelRoles
-    WHERE ScriptToRun IS NOT NULL
-          AND ScriptToRun NOT LIKE '%nt Service%'
-          AND ScriptToRun NOT LIKE '%nt autho%';
-    OPEN SRoles;
-    FETCH NEXT FROM SRoles
-    INTO @permission;
-    WHILE @@FETCH_STATUS = 0
+    
+    IF @OldUser IS NULL OR @NewUser IS NULL
     BEGIN
-        if @ServerLevel = 1
-        begin
-            print @permission;
-        end
-        FETCH NEXT FROM SRoles
-        INTO @permission;
+        RAISERROR('User parameters cannot be NULL', 16, 1);
+        RETURN;
     END
-    CLOSE SRoles;
-    DEALLOCATE SRoles;
-    DROP TABLE #ServerLevelRoles;
-    IF (NOT EXISTS
-    (
-        SELECT 1
-        FROM sys.database_principals
-        where name = @oldUser
-    )
-       )
-    BEGIN
-        SET @msg = '--Source user ' + QUOTENAME(@oldUser) + ' doesn''t exists in database ' + @dbName
-        -- RAISERROR(@msg, 11, 1)
-        PRINT @MSG
-        RETURN
-    END
-    INSERT INTO #output
-    (
-        command
-    )
-    SELECT '--Database Context' AS command
-    UNION ALL
-    SELECT 'USE' + SPACE(1) + @dbName
-    UNION ALL
-    SELECT 'SET XACT_ABORT ON'
-    IF (ISNULL(@NewLoginName, '') <> '')
-    BEGIN
-        SET @sql
-            = N'USE ' + @dbName
-              + N';
-            INSERT INTO #output(command)
-            SELECT ''--Create user'' AS command
-			            INSERT INTO #output(command)
 
-			SELECT ''IF NOT EXISTS (SELECT 1 FROM sys.database_principals where name = '' + QUOTENAME(@NewUser, '''''''')  + '' )''
-            INSERT INTO #output(command)
-            SELECT
-                ''CREATE USER '' + QUOTENAME(@NewUser) + '' FOR LOGIN '' + QUOTENAME(@NewLoginName) +
-                    CASE WHEN ISNULL(default_schema_name, '''') <> '''' THEN '' WITH DEFAULT_SCHEMA = '' + QUOTENAME(dp.default_schema_name)
-                        ELSE ''''
-                    END AS Command
-            FROM sys.database_principals dp
-            INNER JOIN sys.server_principals sp ON dp.sid = sp.sid
-            WHERE dp.name = @OldUser
-        '
-        EXEC sp_executesql @sql,
-                           N'@OldUser sysname, @NewUser sysname, @NewLoginName sysname',
-                           @OldUser = @OldUser,
-                           @NewUser = @NewUser,
-                           @NewLoginName = @NewLoginName
-    END
-    INSERT INTO #output
-    (
-        command
-    )
-    SELECT '--Cloning permissions from' + SPACE(1) + QUOTENAME(@OldUser) + SPACE(1) + 'to' + SPACE(1)
-           + QUOTENAME(@NewUser)
-    INSERT INTO #output
-    (
-        command
-    )
-    SELECT '--Role Memberships' AS command
-    SET @sql
-        = N'USE ' + @dbName
-          + N';
-    INSERT INTO #output(command)
-    SELECT ''EXEC sp_addrolemember @rolename =''
-        + SPACE(1) + QUOTENAME(USER_NAME(rm.role_principal_id), '''''''') + '', @membername ='' + SPACE(1) + QUOTENAME(@NewUser, '''''''') AS command
-    FROM    sys.database_role_members AS rm
-    WHERE    USER_NAME(rm.member_principal_id) = @OldUser
-    ORDER BY rm.role_principal_id ASC'
-    EXEC sp_executesql @sql,
-                       N'@OldUser sysname, @NewUser sysname',
-                       @OldUser = @OldUser,
-                       @NewUser = @NewUser
-    INSERT INTO #output
-    (
-        command
-    )
-    SELECT '--Object Level Permissions'
-    SET @sql
-        = N'USE ' + @dbName
-          + N';
-    INSERT INTO #output(command)
-    SELECT    CASE WHEN perm.state <> ''W'' THEN perm.state_desc ELSE ''GRANT'' END
-        + SPACE(1) + perm.permission_name + SPACE(1) + ''ON '' + QUOTENAME(SCHEMA_NAME(obj.schema_id)) + ''.'' + QUOTENAME(obj.name)
-        + CASE WHEN cl.column_id IS NULL THEN SPACE(0) ELSE ''('' + QUOTENAME(cl.name) + '')'' END
-        + SPACE(1) + ''TO'' + SPACE(1) + QUOTENAME(@NewUser) COLLATE database_default
-        + CASE WHEN perm.state <> ''W'' THEN SPACE(0) ELSE SPACE(1) + ''WITH GRANT OPTION'' END
-    FROM    sys.database_permissions AS perm
-        INNER JOIN
-        sys.objects AS obj
-        ON perm.major_id = obj.[object_id]
-        INNER JOIN
-        sys.database_principals AS usr
-        ON perm.grantee_principal_id = usr.principal_id
-        LEFT JOIN
-        sys.columns AS cl
-        ON cl.column_id = perm.minor_id AND cl.[object_id] = perm.major_id
-    WHERE    usr.name = @OldUser
-    ORDER BY perm.permission_name ASC, perm.state_desc ASC'
-    EXEC sp_executesql @sql,
-                       N'@OldUser sysname, @NewUser sysname',
-                       @OldUser = @OldUser,
-                       @NewUser = @NewUser
-    INSERT INTO #output
-    (
-        command
-    )
-    SELECT N'--Database Level Permissions'
-    SET @sql
-        = N'USE ' + @dbName
-          + N';
-    INSERT INTO #output(command)
-    SELECT    CASE WHEN perm.state <> ''W'' THEN perm.state_desc ELSE ''GRANT'' END
-        + SPACE(1) + perm.permission_name + SPACE(1)
-        + SPACE(1) + ''TO'' + SPACE(1) + QUOTENAME(@NewUser) COLLATE database_default
-        + CASE WHEN perm.state <> ''W'' THEN SPACE(0) ELSE SPACE(1) + ''WITH GRANT OPTION'' END
-    FROM    sys.database_permissions AS perm
-        INNER JOIN
-        sys.database_principals AS usr
-        ON perm.grantee_principal_id = usr.principal_id
-    WHERE    usr.name = @OldUser
-    AND    perm.major_id = 0
-    ORDER BY perm.permission_name ASC, perm.state_desc ASC'
-    EXEC sp_executesql @sql,
-                       N'@OldUser sysname, @NewUser sysname',
-                       @OldUser = @OldUser,
-                       @NewUser = @NewUser
-    DECLARE cr CURSOR FOR SELECT command FROM #output
-    OPEN cr
-    FETCH NEXT FROM cr
-    INTO @command
-    SET @sql = ''
+    DECLARE @DbCursor CURSOR;
+    DECLARE @CurrentDb NVARCHAR(128);
+    
+    SET @DbCursor = CURSOR FOR
+        SELECT name
+        FROM sys.databases
+        WHERE (@DatabaseName IS NULL OR name = @DatabaseName)
+        AND HAS_DBACCESS(name) = 1 
+        AND state_desc = 'ONLINE'
+        AND database_id > 4;
+
+    OPEN @DbCursor;
+    FETCH NEXT FROM @DbCursor INTO @CurrentDb;
+
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        IF (@printOnly IS NOT NULL)
-            PRINT @command
-        SET @sql = @sql + @command + CHAR(13) + CHAR(10)
-        FETCH NEXT FROM cr
-        INTO @command
+
+    DECLARE @CreateTempProc NVARCHAR(MAX) = N'
+    CREATE OR ALTER PROCEDURE #sp_CloneRightsInternal
+    (
+        @oldUser sysname,
+        @newUser sysname,
+        @NewLoginName sysname = null,
+        @printOnly bit = 1,
+        @ServerLevel bit = 0
+    )
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+        
+        CREATE TABLE #output (command nvarchar(4000));
+        
+        IF @ServerLevel = 1
+        BEGIN
+            CREATE TABLE #ServerLevelRoles (ScriptToRun VARCHAR(1000));
+            
+            INSERT INTO #ServerLevelRoles
+            SELECT ''EXEC sp_addsrvrolemember '''''' + @newUser + '''''','''''' + p.name + '''''';''
+            FROM sys.server_role_members rm
+            JOIN sys.server_principals p ON rm.role_principal_id = p.principal_id
+            JOIN sys.server_principals m ON rm.member_principal_id = m.principal_id
+            WHERE m.name = @oldUser;
+
+            INSERT INTO #ServerLevelRoles
+            SELECT CASE 
+                WHEN sp.state_desc = ''GRANT_WITH_GRANT_OPTION'' 
+                THEN ''GRANT '' + permission_name + '' TO '' + QUOTENAME(@newUser) + '' WITH GRANT OPTION;''
+                ELSE state_desc + '' '' + permission_name + '' TO '' + QUOTENAME(@newUser) + '';''
+            END
+            FROM sys.server_permissions sp
+            JOIN sys.server_principals sps ON sp.grantee_principal_id = sps.principal_id
+            WHERE sps.name = @oldUser
+            AND sp.type NOT IN (''COSQ'', ''CO'');
+
+            DECLARE @permission varchar(1000);
+            DECLARE srv_cursor CURSOR FOR 
+            SELECT ScriptToRun FROM #ServerLevelRoles
+            WHERE ScriptToRun IS NOT NULL;
+
+            OPEN srv_cursor;
+            FETCH NEXT FROM srv_cursor INTO @permission;
+            
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                IF @printOnly = 1 PRINT @permission;
+                FETCH NEXT FROM srv_cursor INTO @permission;
+            END
+
+            CLOSE srv_cursor;
+            DEALLOCATE srv_cursor;
+            DROP TABLE #ServerLevelRoles;
+        END
+
+        IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @oldUser)
+        BEGIN
+            DECLARE @dbName NVARCHAR(128) = QUOTENAME(DB_NAME());
+            RAISERROR(''Source user %s does not exist in database %s'', 11, 1, @oldUser, @dbName);
+            RETURN;
+        END
+
+        INSERT INTO #output(command)
+        VALUES(''USE '' + QUOTENAME(DB_NAME()));
+
+        IF @NewLoginName IS NOT NULL
+        BEGIN
+            INSERT INTO #output(command)
+            SELECT 
+                ''IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '' + 
+                QUOTENAME(@newUser, '''''''') + '')'' + CHAR(13) + CHAR(10) +
+                ''CREATE USER '' + QUOTENAME(@newUser) + '' FOR LOGIN '' + 
+                QUOTENAME(@NewLoginName) + 
+                COALESCE('' WITH DEFAULT_SCHEMA = '' + QUOTENAME(dp.default_schema_name), '''')
+            FROM sys.database_principals dp
+            JOIN sys.server_principals sp ON dp.sid = sp.sid
+            WHERE dp.name = @oldUser;
+        END
+
+        INSERT INTO #output(command)
+        SELECT ''EXEC sp_addrolemember @rolename = '' + 
+               QUOTENAME(USER_NAME(rm.role_principal_id), '''''''') + 
+               '', @membername = '' + QUOTENAME(@newUser, '''''''')
+        FROM sys.database_role_members rm
+        WHERE USER_NAME(rm.member_principal_id) = @oldUser;
+
+        INSERT INTO #output(command)
+        SELECT 
+            CASE WHEN perm.state <> ''W'' THEN perm.state_desc ELSE ''GRANT'' END +
+            '' '' + perm.permission_name + '' ON '' + 
+            QUOTENAME(SCHEMA_NAME(obj.schema_id)) + ''.'' + QUOTENAME(obj.name) +
+            COALESCE(''('' + QUOTENAME(col.name) + '')'', '''') +
+            '' TO '' + QUOTENAME(@newUser) +
+            CASE WHEN perm.state = ''W'' THEN '' WITH GRANT OPTION'' ELSE '''' END
+        FROM sys.database_permissions perm
+        JOIN sys.objects obj ON perm.major_id = obj.object_id
+        JOIN sys.database_principals usr ON perm.grantee_principal_id = usr.principal_id
+        LEFT JOIN sys.columns col ON col.object_id = perm.major_id AND col.column_id = perm.minor_id
+        WHERE usr.name = @oldUser;
+
+        INSERT INTO #output(command)
+        SELECT 
+            CASE WHEN perm.state <> ''W'' THEN perm.state_desc ELSE ''GRANT'' END +
+            '' '' + perm.permission_name + '' TO '' + QUOTENAME(@newUser) +
+            CASE WHEN perm.state = ''W'' THEN '' WITH GRANT OPTION'' ELSE '''' END
+        FROM sys.database_permissions perm
+        JOIN sys.database_principals usr ON perm.grantee_principal_id = usr.principal_id
+        WHERE usr.name = @oldUser AND perm.major_id = 0;
+
+        DECLARE @sql NVARCHAR(MAX) = '''';
+        DECLARE @command NVARCHAR(4000);
+        
+        DECLARE cmd_cursor CURSOR FOR 
+        SELECT command FROM #output;
+
+        OPEN cmd_cursor;
+        FETCH NEXT FROM cmd_cursor INTO @command;
+        
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            IF @printOnly = 1 PRINT @command;
+            SET @sql = @sql + @command + CHAR(13) + CHAR(10);
+            FETCH NEXT FROM cmd_cursor INTO @command;
+        END
+
+        CLOSE cmd_cursor;
+        DEALLOCATE cmd_cursor;
+
+        IF @printOnly = 0 
+        BEGIN
+            EXEC(@sql);
+        END
+
+        DROP TABLE #output;
+    END';
+
+    DECLARE @ExecCmd NVARCHAR(MAX) = N'USE ' + QUOTENAME(@CurrentDb) + N'; 
+    EXEC(''' + REPLACE(@CreateTempProc, '''', '''''') + ''');
+    EXEC #sp_CloneRightsInternal @oldUser = @p1, @newUser = @p2, @NewLoginName = @p3, @printOnly = @p4, @ServerLevel = @p5;';
+    
+    EXEC sp_executesql @ExecCmd, 
+        N'@p1 sysname, @p2 sysname, @p3 sysname, @p4 bit, @p5 bit',
+        @p1 = @OldUser,
+        @p2 = @NewUser,
+        @p3 = @NewLoginName,
+        @p4 = @PrintOnly,
+        @p5 = @ServerLevel;
+        FETCH NEXT FROM @DbCursor INTO @CurrentDb;
+
     END
-    CLOSE cr
-    DEALLOCATE cr
-    IF (@printOnly IS NULL OR @printOnly = 0) EXEC (@sql)
-    DROP TABLE #output
-END
+
+    CLOSE @DbCursor;
+    DEALLOCATE @DbCursor;
+END;
 GO
-GO
-declare @olduser varchar(128) = 'ssrs_usEr'
-declare @newuser varchar(128) = 'ssrs_user'
-declare @dbname varchar(128);
-Declare DBs cursor for
-SELECT sd.[name] AS 'DBName'
-FROM master.sys.databases sd
-WHERE HAS_DBACCESS(sd.[name]) = 1
-      --and sd.name = 'master_old'
-      AND sd.[state_desc] = 'ONLINE'
-      AND sd.[user_access_desc] = 'MULTI_USER'
-      AND sd.[is_in_standby] = 0;
-declare @command Nvarchar(2048);
-OPEN dbs;
-FETCH NEXT FROM dbs
-INTO @dbname;
-WHILE @@FETCH_STATUS = 0
-BEGIN
-    set @command
-        = 'USE ' + QUOTENAME(@DBNAME) + '; EXECUTE #sp_CloneRights ''' + @olduser + '''' + ',''' + @newuser + ''''
-          + ',''' + @newuser + ''''
-    --print @command 
-    EXEC SP_EXECUTESQL @COMMAND
-    FETCH NEXT FROM dbs
-    INTO @dbname;
-END
-CLOSE dbs;
-DEALLOCATE dbs;
+sp_CloneUserRights
