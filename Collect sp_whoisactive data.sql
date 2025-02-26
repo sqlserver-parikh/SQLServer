@@ -1,16 +1,15 @@
 USE tempdb
 GO
-
 CREATE OR ALTER PROCEDURE usp_LogWhoIsActive
 (
     @TargetTableName VARCHAR(4000) = 'tblWhoIsActive',         -- Table to store the logged data
     @RunCount INT = 1,                                        -- Number of logging iterations
     @DelaySeconds INT = 60,                                   -- Delay between runs in seconds
-    @GeneralRetentionDays INT = 10,                           -- General data retention period in days
-    @TempdbSizeThresholdMB INT = 400,                         -- Tempdb size threshold in MB
-    @TempdbBlockingRetentionHours INT = 72,                   -- Retention period for tempdb blocking in hours
+    @GeneralRetentionHours INT = 72,                   -- Retention period for tempdb blocking in hours
     @BlockingRetentionDays INT = 7,                           -- Retention period for blocking sessions in days
-    @EnableLogging BIT = 1                                    -- Flag to enable/disable logging
+    @DeleteAllDays INT = 10,                           -- General data retention period in days
+    @TempdbSizeThresholdMB INT = 400,                         -- Tempdb size threshold in MB
+    @EnableLogging INT = 1                                  -- 0 -- No logging just whoisactive output, 1 -- Logging, 2 -- Logging and who is active output
 )
 AS
 BEGIN
@@ -27,8 +26,18 @@ BEGIN
             @get_outer_command = 1,      -- Include outer command details
             @find_block_leaders = 1      -- Identify blocking leaders
     END
-    ELSE
+    ELSE 
     BEGIN
+		IF @EnableLogging = 2
+		BEGIN
+		   EXEC sp_WhoIsActive
+            @get_transaction_info = 1,    -- Include transaction details
+            @get_plans = 1,              -- Include execution plans
+            @get_full_inner_text = 1,    -- Include full inner text of queries
+            @get_outer_command = 1,      -- Include outer command details
+            @find_block_leaders = 1 
+		END
+			
         -- Validate run count parameter
         IF @RunCount < 1 OR @RunCount >= 100
         BEGIN
@@ -102,7 +111,7 @@ BEGIN
 
         -- Cleanup: Remove old records based on tempdb size and non-blocking conditions
         DELETE FROM tblWhoIsActive
-        WHERE collection_time < DATEADD(HOUR, -@TempdbBlockingRetentionHours, GETDATE())
+        WHERE collection_time < DATEADD(HOUR, -@GeneralRetentionHours, GETDATE())
             AND CONVERT(INT, RTRIM(LTRIM(REPLACE(tempdb_current, ',', '')))) < @TempdbSizeThresholdMB
             AND (blocking_session_id IS NULL AND blocked_session_count = 0);
 
@@ -113,7 +122,7 @@ BEGIN
 
         -- Cleanup: Remove all records older than general retention period
         DELETE FROM tblWhoIsActive
-        WHERE collection_time < DATEADD(DAY, -@GeneralRetentionDays, GETDATE());
+        WHERE collection_time < DATEADD(DAY, -@DeleteAllDays, GETDATE());
     END
 END
 GO
