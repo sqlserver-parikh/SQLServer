@@ -125,7 +125,7 @@ SELECT "?", filegroup_name(data_space_id), file_id, physical_name FROM sys.datab
 
 SELECT 
     db_name(database_id) DbName,
-    CONVERT(DECIMAL(15, 2), SUM(size) / 128.0) DbSizeMb
+	CONVERT(DECIMAL(28, 2), CAST(SUM(CAST(size AS BIGINT)) AS FLOAT) / 128.0) AS DbSizeMb
 INTO #DbSizeInfo
 FROM sys.master_files
 GROUP BY db_name(database_id);
@@ -335,8 +335,30 @@ BEGIN
             CROSS APPLY sys.dm_os_volume_stats(f.database_id, f.file_id) AS s
     )
     ORDER BY 10 DESC;
+IF OBJECT_ID('tempdb..#BackupInfo', 'U') IS NOT NULL
+    DROP TABLE #BackupInfo;
 
+IF OBJECT_ID('tempdb..#DbSizeInfo', 'U') IS NOT NULL
+    DROP TABLE #DbSizeInfo;
+
+IF OBJECT_ID('tempdb..#DbSpaceUseInfo', 'U') IS NOT NULL
     DROP TABLE #DbSpaceUseInfo;
+
+IF OBJECT_ID('tempdb..#FileGroupInfo', 'U') IS NOT NULL
+    DROP TABLE #FileGroupInfo;
+
+IF OBJECT_ID('tempdb..#FixedDriveInfo', 'U') IS NOT NULL
+    DROP TABLE #FixedDriveInfo;
+
+IF OBJECT_ID('tempdb..#LogInfo2008', 'U') IS NOT NULL
+    DROP TABLE #LogInfo2008;
+
+IF OBJECT_ID('tempdb..#LogInfo2012', 'U') IS NOT NULL
+    DROP TABLE #LogInfo2012;
+
+IF OBJECT_ID('tempdb..#VlfInfo', 'U') IS NOT NULL
+    DROP TABLE #VlfInfo;
+
 END;
 GO
 
