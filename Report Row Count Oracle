@@ -1,0 +1,46 @@
+WITH schema_tables AS (
+    SELECT owner, table_name
+    FROM all_tables
+    WHERE owner LIKE 'schema%'
+    AND temporary = 'N'  -- Excluding temporary tables
+)
+SELECT 
+    a.owner AS schema_name,
+    a.table_name,
+    TO_CHAR(
+        TO_NUMBER(
+            EXTRACTVALUE(
+                XMLTYPE(
+                    DBMS_XMLGEN.GETXML('SELECT COUNT(*) c FROM "' || a.owner || '"."' || a.table_name || '"')
+                ),
+                '//text()'
+            )
+        ),
+        '999,999,999,999'
+    ) AS exact_row_count,
+    t.last_analyzed,
+    NVL(
+        ROUND(
+            (SELECT SUM(bytes)/1024/1024 
+             FROM dba_segments 
+             WHERE owner = a.owner 
+             AND segment_name = a.table_name 
+             AND segment_type = 'TABLE'
+            ),
+            2
+        ) || ' MB',
+        ' MB'
+    ) AS table_size,
+    t.partitioned,
+    t.temporary,
+    t.compression,
+    CASE 
+        WHEN t.last_analyzed IS NULL THEN 'Never Analyzed'
+        WHEN t.last_analyzed >= SYSDATE - 1 THEN 'Fresh'
+        ELSE 'Potentially Stale'
+    END AS stats_status
+FROM schema_tables a
+JOIN all_tables t ON (t.owner = a.owner AND t.table_name = a.table_name)
+ORDER BY 
+    a.owner,
+    a.table_name;
