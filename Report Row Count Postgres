@@ -1,0 +1,12 @@
+SELECT 
+    schemaname as schema_name,
+    tablename as table_name,
+    (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint as exact_row_count,
+    pg_size_pretty(pg_total_relation_size(format('%I.%I', schemaname, tablename)::regclass)) as total_size
+FROM pg_tables
+WHERE 
+    schemaname NOT IN ('pg_catalog', 'information_schema')
+    AND schemaname NOT LIKE 'pg_%'
+ORDER BY 
+    schemaname,
+    tablename;
