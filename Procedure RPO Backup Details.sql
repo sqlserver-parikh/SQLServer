@@ -22,7 +22,7 @@ CREATE or alter PROCEDURE usp_RPOWorstCaseMinutes
 (  
     @DbNames NVARCHAR(MAX) = '',           -- NULL: All DBs  
     @LookBackDays INT = 7,                -- Must be > 0  
-    @RetentionDays INT = 60,  
+    @RetentionDays INT = 400,  
     @LogToTable BIT = 0,  
     @RPOBaseLineHoursFull INT = 1,        -- Baseline for online read-write databases  
     @RPOBaseLineSimpleHours INT = 30      -- Baseline for simple recovery databases  
