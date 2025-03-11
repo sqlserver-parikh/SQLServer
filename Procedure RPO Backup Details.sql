@@ -24,13 +24,12 @@ CREATE PROCEDURE usp_RPOWorstCaseMinutes
     @LookBackDays INT = 7,                       -- Number of days to look back for backup history; must be > 0
     @LogRetentionDays INT = 60,                  -- Retention period for log table in days
     @LogToTable BIT = 0,                         -- 1 to log results to tblRPODetails, 0 to return directly
-    @RPOBaselineHoursFull INT = 1,               -- RPO baseline in hours for full recovery model databases
+    @RPOBaselineHoursFull INT = 2,               -- RPO baseline in hours for full recovery model databases
     @RPOBaselineHoursSimple INT = 30             -- RPO baseline in hours for simple recovery model databases
 )
 AS
 BEGIN
     SET NOCOUNT ON;
-
     -- **Parameter Validation**
     IF @LookBackDays <= 0
     BEGIN
@@ -256,6 +255,8 @@ BEGIN
            di.DBStatus,
            lbs.TotalLogBackupSizeMB,
            lbs.LogBackupCount,
+		   FLOOR(@LookBackDays * 24 * 60 / (case  when lbs.LogBackupCount = 0 then 1
+		   else lbs.LogBackupCount end)) LogBackupEveryXMin,
            lbs.AvgBackupSpeedMBps,
            lbs.TotalTimeSpentSeconds AS LogBackupTimeSeconds,
            rpo.RPOWorstCaseFinishTime,
