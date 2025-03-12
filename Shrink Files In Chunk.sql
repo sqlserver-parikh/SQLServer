@@ -1,8 +1,8 @@
 CREATE OR ALTER PROCEDURE dbo.#sp_BatchShrinkFiles
-    @BatchShrinkSize int = 1024,  -- Size in MB for each shrink operation
-    @FreePct int = 15,            -- Percentage of free space to maintain
-    @MaxGBFree int = 50000,       -- Maximum free space in MB (50GB)
-    @FileName varchar(128) = 'ALL', -- Specific filename or 'ALL' for all files
+    @BatchShrinkSize int = 100,  -- Size in MB for each shrink operation
+    @FreePct int = 10,            -- Percentage of free space to maintain
+    @MaxMBFree int = 10240,       -- Maximum free space in MB (Default 10GB)
+    @FileName varchar(128) = '', -- Specific filename, 'ALL' Or Empty '' Or NULL for all files
     @Execute bit = 1              -- 1 = execute commands, 0 = print only
 AS
 BEGIN
@@ -13,9 +13,13 @@ BEGIN
     DECLARE @ShrinkTo DECIMAL(20, 2);
     DECLARE @Sql VARCHAR(2000);
     
-    -- Handle the ALL parameter
-    DECLARE @FilePattern varchar(128) = CASE WHEN UPPER(@FileName) = 'ALL' THEN '%' ELSE @FileName END;
-
+	-- Handle the ALL parameter, including NULL and empty string
+	DECLARE @FilePattern varchar(128) = CASE 
+		WHEN UPPER(@FileName) = 'ALL' THEN '%' 
+		WHEN @FileName IS NULL THEN '%'
+		WHEN @FileName = '' THEN '%'
+		ELSE @FileName 
+	END;
     -- Create temp table with file information
     WITH FileInfo AS (
         SELECT 
@@ -31,8 +35,8 @@ BEGIN
             CurrentSizeMB,
             SpaceUsedMB,
             CASE 
-                WHEN (SpaceUsedMB * (@FreePct / 100.0)) > @MaxGBFree 
-                THEN @MaxGBFree
+                WHEN (SpaceUsedMB * (@FreePct / 100.0)) > @MaxMBFree 
+                THEN @MaxMBFree
                 ELSE (SpaceUsedMB * (@FreePct / 100.0))
             END AS FreeSpaceMB
         FROM FileInfo
@@ -129,8 +133,4 @@ GO
 
 -- Just print the commands without executing
 EXEC dbo.#sp_BatchShrinkFiles 
-    @BatchShrinkSize = 1024,
-    @FreePct = 15,
-    @MaxGBFree = 50000,
-    @FileName = 'ALL',
-    @Execute = 0;
+    @BatchShrinkSize = 100
