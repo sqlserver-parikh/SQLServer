@@ -1,0 +1,139 @@
+USE tempdb
+GO
+CREATE PROCEDURE dbo.usp_QueryAlwaysOnHealth
+AS
+BEGIN
+    DECLARE @FileName NVARCHAR(4000);
+
+    -- Find the current file on the operating system that holds the extended event session data
+    SELECT @FileName = target_data.value('(EventFileTarget/File/@name)[1]', 'nvarchar(4000)')
+    FROM (
+        SELECT CAST(target_data AS XML) target_data
+        FROM sys.dm_xe_sessions s
+        JOIN sys.dm_xe_session_targets t ON s.address = t.event_session_address
+        WHERE s.name = N'AlwaysOn_health'
+    ) ft;
+
+    -- Combine all queries into a single output with explicit column alignment
+    SELECT 
+        event_type,
+        event_timestamp,
+        previous_state,
+        current_state,
+        availability_replica_name,
+        availability_group_name,
+        failover_mode,
+        sql_text,
+        session_id,
+        client_app_name,
+        client_hostname,
+        username,
+        previous_sync_state,
+        current_sync_state,
+        suspend_reason
+    FROM (
+        -- Failover Event
+        SELECT 
+            'Failover Event' AS event_type,
+            XEData.value('(event/@timestamp)[1]', 'datetime2(3)') AS event_timestamp,
+            XEData.value('(event/data[@name="previous_state"]/text)[1]', 'varchar(255)') AS previous_state,
+            XEData.value('(event/data[@name="current_state"]/text)[1]', 'varchar(255)') AS current_state,
+            XEData.value('(event/data[@name="availability_replica_name"]/value)[1]', 'varchar(255)') AS availability_replica_name,
+            XEData.value('(event/data[@name="availability_group_name"]/value)[1]', 'varchar(255)') AS availability_group_name,
+            XEData.value('(event/data[@name="failover_mode"]/text)[1]', 'varchar(255)') AS failover_mode,
+            XEData.value('(event/action[@name="sql_text"]/value)[1]', 'varchar(max)') AS sql_text,
+            XEData.value('(event/action[@name="session_id"]/value)[1]', 'int') AS session_id,
+            XEData.value('(event/action[@name="client_app_name"]/value)[1]', 'varchar(255)') AS client_app_name,
+            XEData.value('(event/action[@name="client_hostname"]/value)[1]', 'varchar(255)') AS client_hostname,
+            XEData.value('(event/action[@name="username"]/value)[1]', 'varchar(255)') AS username,
+            NULL AS previous_sync_state,
+            NULL AS current_sync_state,
+            NULL AS suspend_reason
+        FROM (
+            SELECT CAST(event_data AS XML) XEData
+            FROM sys.fn_xe_file_target_read_file(@FileName, NULL, NULL, NULL)
+            WHERE object_name = 'availability_replica_state_change'
+        ) event_data
+
+        UNION ALL
+
+        -- Sync Mode Change
+        SELECT 
+            'Sync Mode Change' AS event_type,
+            XEData.value('(event/@timestamp)[1]', 'datetime2(3)') AS event_timestamp,
+            NULL AS previous_state,
+            NULL AS current_state,
+            XEData.value('(event/data[@name="availability_replica_name"]/value)[1]', 'varchar(255)') AS availability_replica_name,
+            XEData.value('(event/data[@name="availability_group_name"]/value)[1]', 'varchar(255)') AS availability_group_name,
+            NULL AS failover_mode,
+            XEData.value('(event/action[@name="sql_text"]/value)[1]', 'varchar(max)') AS sql_text,
+            XEData.value('(event/action[@name="session_id"]/value)[1]', 'int') AS session_id,
+            XEData.value('(event/action[@name="client_app_name"]/value)[1]', 'varchar(255)') AS client_app_name,
+            XEData.value('(event/action[@name="client_hostname"]/value)[1]', 'varchar(255)') AS client_hostname,
+            XEData.value('(event/action[@name="username"]/value)[1]', 'varchar(255)') AS username,
+            XEData.value('(event/data[@name="previous_synchronization_state"]/text)[1]', 'varchar(255)') AS previous_sync_state,
+            XEData.value('(event/data[@name="current_synchronization_state"]/text)[1]', 'varchar(255)') AS current_sync_state,
+            NULL AS suspend_reason
+        FROM (
+            SELECT CAST(event_data AS XML) XEData
+            FROM sys.fn_xe_file_target_read_file(@FileName, NULL, NULL, NULL)
+            WHERE object_name = 'availability_replica_state_change'
+        ) event_data
+        WHERE XEData.value('(event/data[@name="current_synchronization_state"]/text)[1]', 'varchar(255)') IN ('SYNCHRONIZED', 'NOT_SYNCHRONIZED')
+
+        UNION ALL
+
+        -- Manual Suspension
+        SELECT 
+            'Manual Suspension' AS event_type,
+            XEData.value('(event/@timestamp)[1]', 'datetime2(3)') AS event_timestamp,
+            NULL AS previous_state,
+            NULL AS current_state,
+            XEData.value('(event/data[@name="availability_replica_name"]/value)[1]', 'varchar(255)') AS availability_replica_name,
+            XEData.value('(event/data[@name="availability_group_name"]/value)[1]', 'varchar(255)') AS availability_group_name,
+            NULL AS failover_mode,
+            XEData.value('(event/action[@name="sql_text"]/value)[1]', 'varchar(max)') AS sql_text,
+            XEData.value('(event/action[@name="session_id"]/value)[1]', 'int') AS session_id,
+            XEData.value('(event/action[@name="client_app_name"]/value)[1]', 'varchar(255)') AS client_app_name,
+            XEData.value('(event/action[@name="client_hostname"]/value)[1]', 'varchar(255)') AS client_hostname,
+            XEData.value('(event/action[@name="username"]/value)[1]', 'varchar(255)') AS username,
+            NULL AS previous_sync_state,
+            NULL AS current_sync_state,
+            XEData.value('(event/data[@name="suspend_reason"]/text)[1]', 'varchar(255)') AS suspend_reason
+        FROM (
+            SELECT CAST(event_data AS XML) XEData
+            FROM sys.fn_xe_file_target_read_file(@FileName, NULL, NULL, NULL)
+            WHERE object_name = 'availability_replica_state_change'
+        ) event_data
+        WHERE XEData.value('(event/data[@name="suspend_reason"]/text)[1]', 'varchar(255)') = 'MANUAL'
+
+        UNION ALL
+
+        -- DDL Executed
+        SELECT 
+            'DDL Executed' AS event_type,
+            XEData.value('(event/@timestamp)[1]', 'datetime2(3)') AS event_timestamp,
+            NULL AS previous_state,
+            NULL AS current_state,
+            NULL AS availability_replica_name,
+            XEData.value('(event/data[@name="availability_group_name"]/value)[1]', 'varchar(255)') AS availability_group_name,
+            NULL AS failover_mode,
+            XEData.value('(event/data[@name="statement"]/value)[1]', 'varchar(max)') AS sql_text,
+            NULL AS session_id,
+            XEData.value('(event/data[@name="client_app_name"]/value)[1]', 'varchar(255)') AS client_app_name,
+            XEData.value('(event/data[@name="client_hostname"]/value)[1]', 'varchar(255)') AS client_hostname,
+            XEData.value('(event/data[@name="nt_username"]/value)[1]', 'varchar(255)') AS username,
+            XEData.value('(event/data[@name="ddl_action"]/text)[1]', 'varchar(255)') AS previous_sync_state,
+            XEData.value('(event/data[@name="ddl_phase"]/text)[1]', 'varchar(255)') AS current_sync_state,
+            NULL AS suspend_reason
+        FROM (
+            SELECT CAST(event_data AS XML) XEData
+            FROM sys.fn_xe_file_target_read_file(@FileName, NULL, NULL, NULL)
+            WHERE object_name = 'alwayson_ddl_executed'
+        ) event_data
+    ) AS combined_results
+
+    ORDER BY event_timestamp DESC;
+END;
+GO
+EXEC usp_QueryAlwaysOnHealth
