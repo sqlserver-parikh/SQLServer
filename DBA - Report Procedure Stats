@@ -3,92 +3,177 @@ GO
 
 CREATE OR ALTER PROCEDURE usp_GetTopCachedSPs 
 (
-    @DBName NVARCHAR(128) = 'DBname', -- Database name to query against. Must be a valid database name
-    @SortColumn INT = 2,   -- Sort column. Possible values: 
-                            -- 1 = 'execution_count', 
+    @DBName NVARCHAR(128) = NULL,     -- NULL, blank, or 'all' for all non-system DBs; specific name for single DB
+    @SortColumn INT = 2,              -- Sort column (1-5)
+							-- 1 = 'execution_count', 
                             -- 2 = 'Calls/Minute'
                             -- 3 = 'Avg Elapsed Time', 
                             -- 4 = 'Avg Worker Time', 
                             -- 5 = 'Avg Logical Reads'
-    @SortOrder NVARCHAR(4) = 'DESC', -- Sort order. Possible values: 'ASC', 'DESC'
-    @TopN INT = 25,       -- Number of rows to return. Must be a positive integer
-    @ShowQueryPlan BIT = 1, -- Show query plan. Possible values: 1 = Yes, 0 = No
-    @SPName NVARCHAR(128) = NULL -- Stored procedure name to filter by. If NULL, show all procedures
+    @SortOrder NVARCHAR(4) = 'DESC',  -- Sort order ('ASC', 'DESC')
+    @TopN INT = 25,                  -- Number of rows to return
+    @ShowQueryPlan BIT = 1,          -- Show query plan (1 = Yes, 0 = No)
+    @SPName NVARCHAR(128) = NULL     -- Stored procedure name filter
 )
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    -- Validation for @DBName
-    IF NOT EXISTS(SELECT * FROM sys.databases WHERE name = @DBName)
-    BEGIN
-        RAISERROR('Invalid database name specified in @DBName. Please provide a valid database name.', 16, 1);
-        RETURN;
-    END
-
-    -- Validation for @SortColumn
-    IF @SortColumn NOT IN (1, 2, 3, 4, 5)
-    BEGIN
-        RAISERROR('Invalid value for @SortColumn. Possible values: 1 = ''execution_count'', 2 = ''Calls/Minute'', 3 = ''Avg Elapsed Time'', 4 = ''Avg Worker Time'', 5 = ''Avg Logical Reads''.', 16, 1);
-        RETURN;
-    END
-
-    -- Validation for @SortOrder
-    IF @SortOrder NOT IN ('ASC', 'DESC')
-    BEGIN
-        RAISERROR('Invalid value for @SortOrder. Possible values: ''ASC'', ''DESC''.', 16, 1);
-        RETURN;
-    END
-
-    -- Validation for @TopN
-    IF @TopN <= 0
-    BEGIN
-        RAISERROR('Invalid value for @TopN. Must be a positive integer.', 16, 1);
-        RETURN;
-    END
+    -- Create temp table to store results
+    CREATE TABLE #Results (
+        DBName NVARCHAR(128),
+        [SP Name] NVARCHAR(128),
+        [Execution Count] BIGINT,
+        [Calls/Minute] BIGINT,
+        [Avg Elapsed Time] BIGINT,
+        [Avg Worker Time] BIGINT,
+        [Avg Logical Reads] BIGINT,
+        [Has Missing Index] BIT,
+        [Last Execution Time] NVARCHAR(25),
+        [Plan Cached Time] NVARCHAR(25),
+        [Query Plan] XML NULL
+    );
 
     DECLARE @Query NVARCHAR(MAX);
-    
-    -- Construct the dynamic SQL query
-    SET @Query = N'SELECT TOP(@TopN) 
-       ''' + (@DBName) + ''' DBName, p.name AS [SP Name], 
-        qs.execution_count AS [Execution Count],
-        ISNULL(qs.execution_count / DATEDIFF(Minute, qs.cached_time, GETDATE()), 0) AS [Calls/Minute],
-        qs.total_elapsed_time / qs.execution_count AS [Avg Elapsed Time],
-        qs.total_worker_time / qs.execution_count AS [Avg Worker Time],    
-        qs.total_logical_reads / qs.execution_count AS [Avg Logical Reads],
-        CASE 
-            WHEN CONVERT(NVARCHAR(MAX), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N''%<MissingIndexes>%'' 
-            THEN 1 ELSE 0 
-        END AS [Has Missing Index],
-        CONVERT(NVARCHAR(25), qs.last_execution_time, 20) AS [Last Execution Time],
-        CONVERT(NVARCHAR(25), qs.cached_time, 20) AS [Plan Cached Time]' 
-        + CASE WHEN @ShowQueryPlan = 1 THEN ', qp.query_plan AS [Query Plan]' ELSE '' END + 
-    N' FROM ' + QUOTENAME(@DBName) + N'.sys.procedures AS p WITH (NOLOCK)
-        INNER JOIN ' + QUOTENAME(@DBName) + N'.sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
-            ON p.[object_id] = qs.[object_id]
-        CROSS APPLY ' + QUOTENAME(@DBName) + N'.sys.dm_exec_query_plan(qs.plan_handle) AS qp
-        WHERE qs.database_id = DB_ID(@DBName)'
-        + CASE WHEN @SPName IS NOT NULL THEN N' AND p.name = @SPName' ELSE '' END + 
-    N' AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0
-ORDER BY 
-        CASE 
-            WHEN @SortColumn = 1 THEN qs.execution_count 
-            WHEN @SortColumn = 2 THEN (ISNULL(qs.execution_count / DATEDIFF(Minute, qs.cached_time, GETDATE()), 0))
-            WHEN @SortColumn = 3 THEN (qs.total_elapsed_time / qs.execution_count)
-            WHEN @SortColumn = 4 THEN (qs.total_worker_time / qs.execution_count) 
-            WHEN @SortColumn = 5 THEN (qs.total_logical_reads / qs.execution_count)
-        END ' + @SortOrder + ' OPTION (RECOMPILE);'; 
+    DECLARE @CurrentDB NVARCHAR(128);
 
-    -- Pass the parameters to sp_executesql
-    EXEC sp_executesql @Query,
-        N'@TopN INT, @SortColumn INT, @DBName NVARCHAR(128), @SPName NVARCHAR(128)',
-        @TopN = @TopN, 
-        @SortColumn = @SortColumn,
-        @DBName = @DBName,
-        @SPName = @SPName; -- Pass all parameters to the dynamic query
+    -- If DBName is NULL, blank, or 'all', process all non-system databases
+    IF @DBName IS NULL OR @DBName = '' OR LOWER(@DBName) = 'all'
+    BEGIN
+        -- Cursor for all non-system databases
+        DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+        SELECT name 
+        FROM sys.databases 
+        WHERE name NOT IN ('master', 'tempdb', 'model', 'msdb')
+        AND state = 0; -- Online databases only
+
+        OPEN db_cursor;
+        FETCH NEXT FROM db_cursor INTO @CurrentDB;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            BEGIN TRY
+                -- Construct and execute query for each database
+                SET @Query = N'INSERT INTO #Results
+                SELECT TOP(@TopN) 
+                    ''' + QUOTENAME(@CurrentDB) + ''' AS DBName,
+                    p.name AS [SP Name], 
+                    qs.execution_count AS [Execution Count],
+                    ISNULL(qs.execution_count / NULLIF(DATEDIFF(Minute, qs.cached_time, GETDATE()), 0), 0) AS [Calls/Minute],
+                    qs.total_elapsed_time / NULLIF(qs.execution_count, 0) AS [Avg Elapsed Time],
+                    qs.total_worker_time / NULLIF(qs.execution_count, 0) AS [Avg Worker Time],    
+                    qs.total_logical_reads / NULLIF(qs.execution_count, 0) AS [Avg Logical Reads],
+                    CASE 
+                        WHEN CONVERT(NVARCHAR(MAX), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N''%<MissingIndexes>%'' 
+                        THEN 1 ELSE 0 
+                    END AS [Has Missing Index],
+                    CONVERT(NVARCHAR(25), qs.last_execution_time, 20) AS [Last Execution Time],
+                    CONVERT(NVARCHAR(25), qs.cached_time, 20) AS [Plan Cached Time]' 
+                    + CASE WHEN @ShowQueryPlan = 1 THEN ', qp.query_plan AS [Query Plan]' ELSE ', NULL AS [Query Plan]' END + 
+                N' FROM ' + QUOTENAME(@CurrentDB) + N'.sys.procedures AS p WITH (NOLOCK)
+                    INNER JOIN ' + QUOTENAME(@CurrentDB) + N'.sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
+                        ON p.[object_id] = qs.[object_id]
+                    CROSS APPLY ' + QUOTENAME(@CurrentDB) + N'.sys.dm_exec_query_plan(qs.plan_handle) AS qp
+                    WHERE qs.database_id = DB_ID(''' + @CurrentDB + ''')'
+                    + CASE WHEN @SPName IS NOT NULL THEN N' AND p.name = @SPName' ELSE '' END + 
+                N' AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0;';
+
+                EXEC sp_executesql @Query,
+                    N'@TopN INT, @SPName NVARCHAR(128)',
+                    @TopN = @TopN,
+                    @SPName = @SPName;
+            END TRY
+            BEGIN CATCH
+                -- Log error but continue with next database
+                PRINT 'Error processing database ' + @CurrentDB + ': ' + ERROR_MESSAGE();
+            END CATCH
+
+            FETCH NEXT FROM db_cursor INTO @CurrentDB;
+        END
+
+        CLOSE db_cursor;
+        DEALLOCATE db_cursor;
+
+        -- Final result set
+        SELECT * FROM #Results
+        WHERE [Execution Count] IS NOT NULL
+        ORDER BY 
+            CASE WHEN @SortOrder = 'DESC' THEN
+                CASE 
+                    WHEN @SortColumn = 1 THEN [Execution Count]
+                    WHEN @SortColumn = 2 THEN [Calls/Minute]
+                    WHEN @SortColumn = 3 THEN [Avg Elapsed Time]
+                    WHEN @SortColumn = 4 THEN [Avg Worker Time]
+                    WHEN @SortColumn = 5 THEN [Avg Logical Reads]
+                END 
+            END DESC,
+            CASE WHEN @SortOrder = 'ASC' THEN
+                CASE 
+                    WHEN @SortColumn = 1 THEN [Execution Count]
+                    WHEN @SortColumn = 2 THEN [Calls/Minute]
+                    WHEN @SortColumn = 3 THEN [Avg Elapsed Time]
+                    WHEN @SortColumn = 4 THEN [Avg Worker Time]
+                    WHEN @SortColumn = 5 THEN [Avg Logical Reads]
+                END 
+            END ASC;
+    END
+    ELSE
+    BEGIN
+        -- Single database processing (original logic with minor improvements)
+        IF NOT EXISTS(SELECT * FROM sys.databases WHERE name = @DBName)
+        BEGIN
+            RAISERROR('Invalid database name specified in @DBName.', 16, 1);
+            RETURN;
+        END
+
+        -- Validate other parameters
+        IF @SortColumn NOT IN (1, 2, 3, 4, 5) 
+            OR @SortOrder NOT IN ('ASC', 'DESC') 
+            OR @TopN <= 0
+        BEGIN
+            RAISERROR('Invalid parameter value.', 16, 1);
+            RETURN;
+        END
+
+        SET @Query = N'SELECT TOP(@TopN) 
+            ''' + QUOTENAME(@DBName) + ''' AS DBName,
+            p.name AS [SP Name], 
+            qs.execution_count AS [Execution Count],
+            ISNULL(qs.execution_count / NULLIF(DATEDIFF(Minute, qs.cached_time, GETDATE()), 0), 0) AS [Calls/Minute],
+            qs.total_elapsed_time / NULLIF(qs.execution_count, 0) AS [Avg Elapsed Time],
+            qs.total_worker_time / NULLIF(qs.execution_count, 0) AS [Avg Worker Time],    
+            qs.total_logical_reads / NULLIF(qs.execution_count, 0) AS [Avg Logical Reads],
+            CASE 
+                WHEN CONVERT(NVARCHAR(MAX), qp.query_plan) COLLATE Latin1_General_BIN2 LIKE N''%<MissingIndexes>%'' 
+                THEN 1 ELSE 0 
+            END AS [Has Missing Index],
+            CONVERT(NVARCHAR(25), qs.last_execution_time, 20) AS [Last Execution Time],
+            CONVERT(NVARCHAR(25), qs.cached_time, 20) AS [Plan Cached Time]' 
+            + CASE WHEN @ShowQueryPlan = 1 THEN ', qp.query_plan AS [Query Plan]' ELSE '' END + 
+        N' FROM ' + QUOTENAME(@DBName) + N'.sys.procedures AS p WITH (NOLOCK)
+            INNER JOIN ' + QUOTENAME(@DBName) + N'.sys.dm_exec_procedure_stats AS qs WITH (NOLOCK)
+                ON p.[object_id] = qs.[object_id]
+            CROSS APPLY ' + QUOTENAME(@DBName) + N'.sys.dm_exec_query_plan(qs.plan_handle) AS qp
+            WHERE qs.database_id = DB_ID(@DBName)'
+            + CASE WHEN @SPName IS NOT NULL THEN N' AND p.name = @SPName' ELSE '' END + 
+        N' AND DATEDIFF(Minute, qs.cached_time, GETDATE()) > 0
+        ORDER BY 
+            CASE 
+                WHEN @SortColumn = 1 THEN qs.execution_count 
+                WHEN @SortColumn = 2 THEN (ISNULL(qs.execution_count / NULLIF(DATEDIFF(Minute, qs.cached_time, GETDATE()), 0), 0))
+                WHEN @SortColumn = 3 THEN (qs.total_elapsed_time / NULLIF(qs.execution_count, 0))
+                WHEN @SortColumn = 4 THEN (qs.total_worker_time / NULLIF(qs.execution_count, 0)) 
+                WHEN @SortColumn = 5 THEN (qs.total_logical_reads / NULLIF(qs.execution_count, 0))
+            END ' + @SortOrder + ';';
+
+        EXEC sp_executesql @Query,
+            N'@TopN INT, @SortColumn INT, @DBName NVARCHAR(128), @SPName NVARCHAR(128)',
+            @TopN, @SortColumn, @DBName, @SPName;
+    END
+
+    DROP TABLE #Results;
 END;
 GO
 
--- Example execution
-EXEC usp_GetTopCachedSPs
+-- Example executions:
+EXEC usp_GetTopCachedSPs;                    -- All databases
