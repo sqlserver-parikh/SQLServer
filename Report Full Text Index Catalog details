@@ -1,0 +1,68 @@
+CREATE OR ALTER PROCEDURE #usp_fulltextdetail
+AS
+BEGIN
+    -- CTE to calculate fragmentation details per table
+    WITH FragmentationDetails AS (
+        SELECT 
+            table_id,
+            COUNT(*) AS FragmentsCount,
+            CONVERT(DECIMAL(9,2), SUM(data_size / (1024.0 * 1024.0))) AS IndexSizeMb,
+            CONVERT(DECIMAL(9,2), MAX(data_size / (1024.0 * 1024.0))) AS largest_fragment_mb
+        FROM sys.fulltext_index_fragments
+        GROUP BY table_id
+    )
+    -- Main query combining full-text index details and fragmentation
+    SELECT 
+        SCHEMA_NAME(tbl.schema_id) AS SchemaName,
+        tbl.name AS TableName,
+        FT_ctlg.name AS FullTextCatalogName,
+        i.name AS UniqueIndexName,
+        STRING_AGG(scols.name, ', ') AS IndexedColumns,
+        fti.change_tracking_state AS ChangeTrackingState,
+        fti.is_enabled AS IsEnabled,
+        f.FragmentsCount,
+        f.IndexSizeMb,
+        f.largest_fragment_mb AS IndexLargestFragmentMb,
+        CASE
+            WHEN f.IndexSizeMb = 0 THEN 0
+            ELSE f.IndexSizeMb - f.largest_fragment_mb
+        END AS IndexFragmentationSpaceMb,
+        CASE
+            WHEN f.IndexSizeMb = 0 THEN 0
+            ELSE 100.0 * (f.IndexSizeMb - f.largest_fragment_mb) / f.IndexSizeMb
+        END AS IndexFragmentationPct
+    FROM 
+        sys.tables tbl
+    INNER JOIN 
+        sys.fulltext_indexes fti 
+        ON tbl.[object_id] = fti.[object_id]
+    INNER JOIN 
+        sys.fulltext_catalogs FT_ctlg 
+        ON fti.fulltext_catalog_id = FT_ctlg.fulltext_catalog_id
+    INNER JOIN 
+        sys.indexes i 
+        ON fti.unique_index_id = i.index_id 
+        AND fti.[object_id] = i.[object_id]
+    LEFT JOIN 
+        FragmentationDetails f 
+        ON f.table_id = tbl.[object_id]
+    INNER JOIN 
+        sys.fulltext_index_columns FT_idx_cols 
+        ON FT_idx_cols.[object_id] = tbl.[object_id]
+    INNER JOIN 
+        sys.columns scols 
+        ON FT_idx_cols.column_id = scols.column_id 
+        AND FT_idx_cols.[object_id] = scols.[object_id]
+    GROUP BY 
+        tbl.schema_id,
+        tbl.name,
+        FT_ctlg.name,
+        i.name,
+        fti.change_tracking_state,
+        fti.is_enabled,
+        f.FragmentsCount,
+        f.IndexSizeMb,
+        f.largest_fragment_mb;
+END;
+GO
+#usp_fulltextdetail
