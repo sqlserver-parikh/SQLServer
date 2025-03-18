@@ -1,68 +1,194 @@
 CREATE OR ALTER PROCEDURE #usp_fulltextdetail
+    @CatalogName VARCHAR(MAX) = '',
+    @DBName NVARCHAR(128) = NULL,
+    @ShowRebuildProgress BIT = 1,
+    @ShowFragmentationDetails BIT = 1
 AS
 BEGIN
-    -- CTE to calculate fragmentation details per table
-    WITH FragmentationDetails AS (
-        SELECT 
-            table_id,
-            COUNT(*) AS FragmentsCount,
-            CONVERT(DECIMAL(9,2), SUM(data_size / (1024.0 * 1024.0))) AS IndexSizeMb,
-            CONVERT(DECIMAL(9,2), MAX(data_size / (1024.0 * 1024.0))) AS largest_fragment_mb
-        FROM sys.fulltext_index_fragments
-        GROUP BY table_id
-    )
-    -- Main query combining full-text index details and fragmentation
-    SELECT 
-        SCHEMA_NAME(tbl.schema_id) AS SchemaName,
-        tbl.name AS TableName,
-        FT_ctlg.name AS FullTextCatalogName,
-        i.name AS UniqueIndexName,
-        STRING_AGG(scols.name, ', ') AS IndexedColumns,
-        fti.change_tracking_state AS ChangeTrackingState,
-        fti.is_enabled AS IsEnabled,
-        f.FragmentsCount,
-        f.IndexSizeMb,
-        f.largest_fragment_mb AS IndexLargestFragmentMb,
-        CASE
-            WHEN f.IndexSizeMb = 0 THEN 0
-            ELSE f.IndexSizeMb - f.largest_fragment_mb
-        END AS IndexFragmentationSpaceMb,
-        CASE
-            WHEN f.IndexSizeMb = 0 THEN 0
-            ELSE 100.0 * (f.IndexSizeMb - f.largest_fragment_mb) / f.IndexSizeMb
-        END AS IndexFragmentationPct
-    FROM 
-        sys.tables tbl
-    INNER JOIN 
-        sys.fulltext_indexes fti 
-        ON tbl.[object_id] = fti.[object_id]
-    INNER JOIN 
-        sys.fulltext_catalogs FT_ctlg 
-        ON fti.fulltext_catalog_id = FT_ctlg.fulltext_catalog_id
-    INNER JOIN 
-        sys.indexes i 
-        ON fti.unique_index_id = i.index_id 
-        AND fti.[object_id] = i.[object_id]
-    LEFT JOIN 
-        FragmentationDetails f 
-        ON f.table_id = tbl.[object_id]
-    INNER JOIN 
-        sys.fulltext_index_columns FT_idx_cols 
-        ON FT_idx_cols.[object_id] = tbl.[object_id]
-    INNER JOIN 
-        sys.columns scols 
-        ON FT_idx_cols.column_id = scols.column_id 
-        AND FT_idx_cols.[object_id] = scols.[object_id]
-    GROUP BY 
-        tbl.schema_id,
-        tbl.name,
-        FT_ctlg.name,
-        i.name,
-        fti.change_tracking_state,
-        fti.is_enabled,
-        f.FragmentsCount,
-        f.IndexSizeMb,
-        f.largest_fragment_mb;
+    SET NOCOUNT ON;
+
+    -- Create temp tables
+    CREATE TABLE #FullTextResults (
+        DatabaseName NVARCHAR(128),
+        SchemaName NVARCHAR(128),
+        TableName NVARCHAR(128),
+        FullTextCatalogName NVARCHAR(128),
+        UniqueIndexName NVARCHAR(128),
+        IndexedColumns NVARCHAR(MAX),
+        ChangeTrackingState CHAR(1),
+        IsEnabled BIT,
+        FragmentsCount INT,
+        IndexSizeMb DECIMAL(9,2),
+        IndexLargestFragmentMb DECIMAL(9,2),
+        IndexFragmentationSpaceMb DECIMAL(9,2),
+        IndexFragmentationPct DECIMAL(9,2)
+    );
+
+    CREATE TABLE #RebuildProgress (
+        DatabaseName NVARCHAR(128),
+        FullTextCatalogName NVARCHAR(128),
+        LastPopulatedTime DATETIME,
+        PopulateStatus VARCHAR(50),
+        MinutesPassed INT,
+        HoursPassed INT,
+        ItemCount INT,
+        MergeStatus INT,
+        PopulateCompletionAge INT,
+        PopulateStatusCode INT,
+        ImportStatus INT
+    );
+
+    DECLARE @CurrentDB NVARCHAR(128);
+    DECLARE @SQLMain NVARCHAR(MAX);  -- Changed to NVARCHAR(MAX) for larger queries
+    DECLARE @SQLProgress NVARCHAR(MAX);
+    DECLARE @SQLParams NVARCHAR(500);
+
+    -- Cursor for database list
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE (@DBName IS NULL AND 
+           database_id > 4 AND 
+           state = 0 AND       
+           is_read_only = 0)   
+    OR name = @DBName;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @CurrentDB;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @CurrentDB AND state = 0)
+        BEGIN
+            BEGIN TRY
+                -- Main query with proper spacing after USE
+                SET @SQLMain = N'USE ' + QUOTENAME(@CurrentDB) + N'; ' + N'
+                IF EXISTS (SELECT 1 FROM sys.fulltext_catalogs)
+                BEGIN
+                    IF @CatalogName IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sys.fulltext_catalogs WHERE name = @CatalogName)
+                    BEGIN
+                        RAISERROR(''Catalog "%s" not found in database ' + QUOTENAME(@CurrentDB) + N''', 16, 1, @CatalogName);
+                        RETURN;
+                    END;
+
+                    WITH FragmentationDetails AS (
+                        SELECT table_id,
+                            COUNT(*) AS FragmentsCount,
+                            CONVERT(DECIMAL(9,2), SUM(data_size / (1024.0 * 1024.0))) AS IndexSizeMb,
+                            CONVERT(DECIMAL(9,2), MAX(data_size / (1024.0 * 1024.0))) AS largest_fragment_mb
+                        FROM sys.fulltext_index_fragments
+                        GROUP BY table_id
+                    )
+                    INSERT INTO #FullTextResults
+                    SELECT 
+                        DB_NAME(),
+                        SCHEMA_NAME(t.schema_id),
+                        t.name,
+                        ftc.name,
+                        i.name,
+                        STRING_AGG(c.name, '', ''),
+                        fti.change_tracking_state,
+                        fti.is_enabled,
+                        f.FragmentsCount,
+                        f.IndexSizeMb,
+                        f.largest_fragment_mb,
+                        CASE WHEN f.IndexSizeMb = 0 THEN 0 ELSE f.IndexSizeMb - f.largest_fragment_mb END,
+                        CASE WHEN f.IndexSizeMb = 0 THEN 0 ELSE 100.0 * (f.IndexSizeMb - f.largest_fragment_mb) / f.IndexSizeMb END
+                    FROM sys.tables t
+                    INNER JOIN sys.fulltext_indexes fti ON t.[object_id] = fti.[object_id]
+                    INNER JOIN sys.fulltext_catalogs ftc ON fti.fulltext_catalog_id = ftc.fulltext_catalog_id
+                    INNER JOIN sys.indexes i ON fti.unique_index_id = i.index_id AND fti.[object_id] = i.[object_id]
+                    LEFT JOIN FragmentationDetails f ON f.table_id = t.[object_id]
+                    INNER JOIN sys.fulltext_index_columns ftic ON ftic.[object_id] = t.[object_id]
+                    INNER JOIN sys.columns c ON ftic.column_id = c.column_id AND ftic.[object_id] = c.[object_id]
+                    WHERE (@CatalogName IS NULL OR ftc.name = @CatalogName)
+                    GROUP BY t.schema_id, t.name, ftc.name, i.name, fti.change_tracking_state, fti.is_enabled,
+                        f.FragmentsCount, f.IndexSizeMb, f.largest_fragment_mb;
+                END';
+
+                -- Progress query with proper spacing after USE
+                SET @SQLProgress = N'USE ' + QUOTENAME(@CurrentDB) + N'; ' + N'
+                IF @ShowRebuildProgress = 1 AND EXISTS (SELECT 1 FROM sys.fulltext_catalogs WHERE @CatalogName IS NULL OR name = @CatalogName)
+                BEGIN
+                    DECLARE @LastPopulatedTime DATETIME = DATEADD(ss, 
+                        (SELECT MAX(FULLTEXTCATALOGPROPERTY(name, ''PopulateCompletionAge''))
+                         FROM sys.fulltext_catalogs 
+                         WHERE @CatalogName IS NULL OR name = @CatalogName), 
+                        ''1990-01-01'');
+                    DECLARE @CurrentTime DATETIME = GETDATE();
+
+                    INSERT INTO #RebuildProgress
+                    SELECT 
+                        DB_NAME(),
+                        name,
+                        @LastPopulatedTime,
+                        CASE FULLTEXTCATALOGPROPERTY(name, ''PopulateStatus'')
+                            WHEN 0 THEN ''Idle''
+                            WHEN 1 THEN ''Full Population In Progress''
+                            WHEN 2 THEN ''Paused''
+                            WHEN 3 THEN ''Throttled''
+                            WHEN 4 THEN ''Recovering''
+                            WHEN 5 THEN ''Shutdown''
+                            WHEN 6 THEN ''Incremental Population In Progress''
+                            WHEN 7 THEN ''Building Index''
+                            WHEN 8 THEN ''Disk Full. Paused''
+                            WHEN 9 THEN ''Change Tracking''
+                        END,
+                        DATEDIFF(MINUTE, @LastPopulatedTime, @CurrentTime),
+                        DATEDIFF(HOUR, @LastPopulatedTime, @CurrentTime),
+                        FULLTEXTCATALOGPROPERTY(name, ''ItemCount''),
+                        FULLTEXTCATALOGPROPERTY(name, ''MergeStatus''),
+                        FULLTEXTCATALOGPROPERTY(name, ''PopulateCompletionAge''),
+                        FULLTEXTCATALOGPROPERTY(name, ''PopulateStatus''),
+                        FULLTEXTCATALOGPROPERTY(name, ''ImportStatus'')
+                    FROM sys.fulltext_catalogs
+                    WHERE @CatalogName IS NULL OR name = @CatalogName;
+                END';
+
+                SET @SQLParams = N'@CatalogName VARCHAR(MAX), @ShowRebuildProgress BIT';
+
+                -- Execute the main query
+                EXEC sp_executesql 
+                    @SQLMain,
+                    @SQLParams,
+                    @CatalogName = @CatalogName,
+                    @ShowRebuildProgress = @ShowRebuildProgress;
+
+                -- Execute the progress query if requested
+                IF @ShowRebuildProgress = 1
+                BEGIN
+                    EXEC sp_executesql 
+                        @SQLProgress,
+                        @SQLParams,
+                        @CatalogName = @CatalogName,
+                        @ShowRebuildProgress = @ShowRebuildProgress;
+                END
+            END TRY
+            BEGIN CATCH
+                PRINT 'Error processing database ' + @CurrentDB + ': ' + ERROR_MESSAGE();
+            END CATCH
+        END
+
+        FETCH NEXT FROM db_cursor INTO @CurrentDB;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+
+    -- Return results
+    IF EXISTS (SELECT 1 FROM #FullTextResults)
+        SELECT * FROM #FullTextResults ORDER BY DatabaseName, FullTextCatalogName, TableName;
+    ELSE
+        PRINT 'No full-text catalog data found matching the specified criteria.';
+
+    IF @ShowRebuildProgress = 1 AND EXISTS (SELECT 1 FROM #RebuildProgress)
+        SELECT * FROM #RebuildProgress ORDER BY DatabaseName, FullTextCatalogName;
+
+    -- Clean up
+    DROP TABLE #FullTextResults;
+    DROP TABLE #RebuildProgress;
 END;
 GO
-#usp_fulltextdetail
+
+-- Sample calls
+EXEC #usp_fulltextdetail;
