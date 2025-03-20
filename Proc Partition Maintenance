@@ -1,12 +1,12 @@
-CREATE OR ALTER PROCEDURE [dbo].[#usp_PartitionMaintenance] 
+CREATE OR ALTER PROCEDURE [dbo].[usp_PartitionMaintenance] 
     @TableName VARCHAR(128) = '', 
     @CleanupOlderThan VARCHAR(10) = '2y',  -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y')
     @NextPartitionAfter VARCHAR(10) = '6m', -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y', '-3m')
-    @Execute BIT = 1,                       -- 0=Print commands only, 1=Execute commands
+    @Execute BIT = 0,                       -- 0=Print commands only, 1=Execute commands
     @FileGroupName VARCHAR(128) = 'PRIMARY', -- Target filegroup for new partitions
-    @PartitionALIGNEDIndex BIT = 1,         -- 1=Show partition-aligned indexes report
-    @AllPartitionTablesInfo BIT = 0,        -- 1=Show detailed partition information
-    @Cleanup BIT = 0,                       -- 1=Enable cleanup of old partitions, 0=Skip cleanup
+    @PartitionALIGNEDIndex BIT = 0,         -- 1=Show partition-aligned indexes report
+    @AllPartitionTablesInfo BIT = 1,        -- 1=Show detailed partition information
+    @Cleanup BIT = 1,                       -- 1=Enable cleanup of old partitions, 0=Skip cleanup
     @SlidingWindow BIT = 0                 -- 1=Enable creation of new partition boundaries, 0=Skip new boundaries
 AS
 BEGIN
@@ -421,52 +421,37 @@ BEGIN
                 DataCompression VARCHAR(50) -- Add data compression info
             );
             
-            -- Populate the table with partitions that need processing
-            INSERT INTO #PartitionsToProcess (TableName, BoundaryValue, PartitionFunctionName, PartitionSchemeName, RowCnt, PartitionNumber, DataCompression)
-            SELECT DISTINCT 
-                   t.name, 
-                   r.value, 
-                   f.name, 
-                   S.name, 
-                   rows, 
-                   partition_number,
-                   p.data_compression_desc
-            FROM sys.tables AS t
-                 INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
-                 INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
-                                                   AND i.index_id = p.index_id
-                 INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
-                 INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
-                 LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
-                                                                    AND r.boundary_id = p.partition_number
-            WHERE 1 = 1
-                  AND t.name LIKE @TableName
-                  AND i.type <= 1
-                  AND p.partition_number = 1
-            UNION
-            SELECT DISTINCT 
-                   t.name, 
-                   r.value, 
-                   f.name, 
-                   S.name, 
-                   rows, 
-                   partition_number,
-                   p.data_compression_desc
-            FROM sys.tables AS t
-                 INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
-                 INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
-                                                   AND i.index_id = p.index_id
-                 INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
-                 INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
-                 LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
-                                                                    AND r.boundary_id = p.partition_number
-            WHERE 1 = 1
-                  AND t.name LIKE @TableName
-                  AND i.type <= 1
-                  AND r.value < @CleanupDate
-            ORDER BY t.name, 
-                     partition_number;
-            
+
+-- Populate the table with partitions that need processing
+INSERT INTO #PartitionsToProcess (TableName, BoundaryValue, PartitionFunctionName, PartitionSchemeName, RowCnt, PartitionNumber, DataCompression)
+SELECT DISTINCT 
+       t.name, 
+       r.value, 
+       f.name, 
+       S.name, 
+       rows, 
+       partition_number,
+       p.data_compression_desc
+FROM sys.tables AS t
+     INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
+     INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
+                                       AND i.index_id = p.index_id
+     INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
+     INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
+     LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
+                                                        AND r.boundary_id = p.partition_number
+WHERE 1 = 1
+      AND t.name LIKE @TableName
+      AND i.type <= 1
+      AND (
+          -- Only include partition 1 if it has a boundary value less than @CleanupDate
+          (p.partition_number = 1 AND r.value IS NOT NULL AND r.value < @CleanupDate)
+          OR 
+          -- Include all other partitions with boundary values less than @CleanupDate
+          (p.partition_number > 1 AND r.value < @CleanupDate)
+      )
+ORDER BY t.name, 
+         partition_number;            
             -- Get all unique tables that need switchout tables
             CREATE TABLE #UniqueTables (
                 TableName VARCHAR(128) PRIMARY KEY,
