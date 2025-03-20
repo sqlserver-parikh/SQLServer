@@ -2,11 +2,12 @@ CREATE OR ALTER PROCEDURE [dbo].[usp_PartitionMaintenance]
     @TableName VARCHAR(128) = '', 
     @CleanupOlderThan VARCHAR(10) = '2y',  -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y')
     @NextPartitionAfter VARCHAR(10) = '6m', -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y', '-3m')
-    @Execute BIT = 0,                       -- 0=Print commands only, 1=Execute commands
+    @Execute BIT = 1,                       -- 0=Print commands only, 1=Execute commands
     @FileGroupName VARCHAR(128) = 'PRIMARY', -- Target filegroup for new partitions
     @PartitionALIGNEDIndex BIT = 0,         -- 1=Show partition-aligned indexes report
     @AllPartitionTablesInfo BIT = 1,        -- 1=Show detailed partition information
-    @Cleanup BIT = 1,                       -- 1=Enable cleanup of old partitions, 0=Skip cleanup
+    @Cleanup BIT = 1,						-- 1=Enable cleanup of old partitions, 0=Skip cleanup
+	@MergeRange BIT = 0,					--1= Enable merge ranges, best option to keep 0 and clean up, sometimes if multiple tables with one scheme/function than mergerage will block.
     @SlidingWindow BIT = 0                 -- 1=Enable creation of new partition boundaries, 0=Skip new boundaries
 AS
 BEGIN
@@ -817,15 +818,20 @@ ORDER BY t.name,
                                 SET @boundary = format(CAST(@BOUNDARYvalue AS DATETIMEOFFSET(7)), 'yyyy-MM-dd HH:mm:ss.fffffff zzz');
                             ELSE
                                 SET @boundary = CONVERT(VARCHAR(23), @BOUNDARYvalue, 121);
-                                
+                            
                             SET @sql = 'ALTER PARTITION FUNCTION ' + @fname + '() MERGE RANGE (''' + @boundary + '''); -- ' + @TableName;
 
                             IF @Execute = 1
                             BEGIN
                                 PRINT '-- Merging partition boundary';
                                 BEGIN TRY
+									IF @MergeRange = 1
+									BEGIN
                                     EXEC sp_executesql @sql;
                                     PRINT '-- Merge operation succeeded.';
+									END
+									PRINT @SQL
+									PRINT '-- MergeRange is 0 so just printing merge command'
                                 END TRY
                                 BEGIN CATCH
                                     PRINT '-- ERROR during partition merge: ' + ERROR_MESSAGE();
