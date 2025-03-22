@@ -1,0 +1,364 @@
+USE tempdb
+GO
+
+CREATE OR ALTER PROCEDURE usp_DBSnapshot
+(
+    @dbname sysname = 'test',                              -- Database name to snapshot or restore
+    @DBSnapshotName sysname = 'test_snap',                        -- Optional: Specific name for the snapshot; if NULL, uses default naming convention
+    @SnapshotDrive varchar(512) = NULL,       -- Optional: Specific drive/path for snapshots; if NULL, uses default backup directory
+    @retainhours int = 24,                                 -- Hours to retain snapshots
+    @Execute bit = 1,                                      -- 0 = Print only, 1 = Execute statements
+    @DropSnapshotOnly tinyint = 0,                         -- 0 = No drop, 1 = Drop all, 2 = Drop oldest, 3 = Drop newest
+    @RestoreSnapshot bit = 0,                              -- 0 = Create/manage snapshots, 1 = Restore latest snapshot
+    @SpecificSnapshotToRestore sysname = NULL,             -- Optional: Specific snapshot name to restore from; if NULL and @RestoreSnapshot = 1, uses latest
+    @Force bit = 1                                         -- 0 = Fail if snapshot exists with same name, 1 = Overwrite if snapshot exists or always create new
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Declare variables
+    DECLARE @sql NVARCHAR(MAX) = N'';
+    DECLARE @DefaultBackupDirectory VARCHAR(1024);
+    DECLARE @TargetDirectory VARCHAR(1024);
+    DECLARE @snapshotCount INT;
+    DECLARE @errorMsg NVARCHAR(512);
+    DECLARE @xp_create_cmd NVARCHAR(512);
+    DECLARE @driveLetter VARCHAR(3);
+    DECLARE @snapshotName sysname;
+    DECLARE @dateOnly VARCHAR(8) = CONVERT(VARCHAR(8), GETDATE(), 112); -- YYYYMMDD format
+
+    -- Validate @DropSnapshotOnly parameter
+    IF @DropSnapshotOnly NOT IN (0, 1, 2, 3)
+    BEGIN
+        RAISERROR('Invalid @DropSnapshotOnly value. Use: 0 = No drop, 1 = Drop all, 2 = Drop oldest, 3 = Drop newest', 16, 1);
+        RETURN;
+    END
+
+    -- Validate database exists
+    IF DB_ID(@dbname) IS NULL
+    BEGIN
+        RAISERROR('Database %s does not exist.', 16, 1, @dbname);
+        RETURN;
+    END
+
+    -- Determine target directory based on @SnapshotDrive parameter
+    IF @SnapshotDrive IS NULL
+    BEGIN
+        BEGIN TRY
+            EXECUTE master..xp_instance_regread 
+                N'HKEY_LOCAL_MACHINE',
+                N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer',
+                N'BackupDirectory',
+                @DefaultBackupDirectory OUTPUT;
+            SET @TargetDirectory = @DefaultBackupDirectory;
+        END TRY
+        BEGIN CATCH
+            SET @errorMsg = N'Error retrieving default backup directory: ' + ERROR_MESSAGE();
+            RAISERROR(@errorMsg, 16, 1);
+            RETURN;
+        END CATCH
+    END
+    ELSE
+    BEGIN
+        SET @TargetDirectory = @SnapshotDrive;
+        
+        IF RIGHT(@TargetDirectory, 1) = '\'
+            SET @TargetDirectory = LEFT(@TargetDirectory, LEN(@TargetDirectory) - 1);
+
+        DECLARE @dirExists INT;
+        BEGIN TRY
+            CREATE TABLE #DirCheck (subdirectory nvarchar(512), depth int, file_flag bit);
+            INSERT INTO #DirCheck
+            EXEC master.dbo.xp_dirtree @TargetDirectory, 0, 1;
+            
+            SELECT @dirExists = COUNT(*) FROM #DirCheck;
+            DROP TABLE #DirCheck;
+            
+            IF @dirExists = 0 AND @Execute = 1
+            BEGIN
+                SET @driveLetter = LEFT(@TargetDirectory, 2) + '\';
+                CREATE TABLE #DriveCheck (subdirectory nvarchar(512), depth int, file_flag bit);
+                INSERT INTO #DriveCheck
+                EXEC master.dbo.xp_dirtree @driveLetter, 0, 1;
+                
+                IF EXISTS (SELECT 1 FROM #DriveCheck)
+                BEGIN
+                    SET @xp_create_cmd = N'-- Directory does not exist. Attempting to create: ' + CHAR(13) + CHAR(10) +
+                                        N'EXEC master.dbo.xp_create_subdir ''' + @TargetDirectory + N'''';
+                    PRINT @xp_create_cmd;
+                    
+                    BEGIN TRY
+                        EXEC master.dbo.xp_create_subdir @TargetDirectory;
+                        PRINT N'-- Created directory: ' + @TargetDirectory;
+                        WAITFOR DELAY '00:00:02';
+                    END TRY
+                    BEGIN CATCH
+                        SET @errorMsg = N'Failed to create directory ' + @TargetDirectory + 
+                                      N'. Error: ' + ERROR_MESSAGE() + 
+                                      N'. Ensure SQL Server service account has permissions on ' + @driveLetter;
+                        RAISERROR(@errorMsg, 16, 1);
+                        DROP TABLE #DriveCheck;
+                        RETURN;
+                    END CATCH
+                END
+                ELSE
+                BEGIN
+                    SET @errorMsg = N'Drive ' + @driveLetter + N' is not accessible to SQL Server.';
+                    RAISERROR(@errorMsg, 16, 1);
+                    DROP TABLE #DriveCheck;
+                    RETURN;
+                END
+                DROP TABLE #DriveCheck;
+            END
+            ELSE IF @dirExists = 1
+            BEGIN
+                PRINT N'-- Directory already exists: ' + @TargetDirectory;
+            END
+            ELSE IF @dirExists = 0 AND @Execute = 0
+            BEGIN
+                SET @xp_create_cmd = N'-- Directory does not exist. Would create with: ' + CHAR(13) + CHAR(10) +
+                                    N'EXEC master.dbo.xp_create_subdir ''' + @TargetDirectory + N'''';
+                PRINT @xp_create_cmd;
+            END
+        END TRY
+        BEGIN CATCH
+            SET @errorMsg = N'Error checking directory: ' + ERROR_MESSAGE();
+            RAISERROR(@errorMsg, 16, 1);
+            RETURN;
+        END CATCH
+    END
+
+    -- Section 1: Handle snapshot dropping based on @DropSnapshotOnly
+    IF @DropSnapshotOnly > 0 AND @RestoreSnapshot = 0
+    BEGIN
+        SET @sql = N'';
+        
+        IF @DropSnapshotOnly = 1
+        BEGIN
+            SELECT @sql = @sql + N'DROP DATABASE ' + QUOTENAME(name) + N';' + CHAR(13) + CHAR(10)
+            FROM sys.databases
+            WHERE source_database_id = DB_ID(@dbname);
+        END
+        ELSE IF @DropSnapshotOnly = 2
+        BEGIN
+            SELECT TOP 1 @sql = N'DROP DATABASE ' + QUOTENAME(name) + N';' + CHAR(13) + CHAR(10)
+            FROM sys.databases
+            WHERE source_database_id = DB_ID(@dbname)
+            ORDER BY create_date ASC;
+        END
+        ELSE IF @DropSnapshotOnly = 3
+        BEGIN
+            SELECT TOP 1 @sql = N'DROP DATABASE ' + QUOTENAME(name) + N';' + CHAR(13) + CHAR(10)
+            FROM sys.databases
+            WHERE source_database_id = DB_ID(@dbname)
+            ORDER BY create_date DESC;
+        END
+
+        IF @sql <> N''
+        BEGIN
+            IF @Execute = 1
+            BEGIN
+                BEGIN TRY
+                    EXEC sp_executesql @sql;
+                    PRINT N'-- Successfully dropped snapshots: ' + CHAR(13) + CHAR(10) + @sql;
+                END TRY
+                BEGIN CATCH
+                    SET @errorMsg = N'Error dropping snapshots: ' + ERROR_MESSAGE();
+                    RAISERROR(@errorMsg, 16, 1);
+                END CATCH
+            END
+            ELSE
+            BEGIN
+                PRINT N'-- Drop statements to be executed:' + CHAR(13) + CHAR(10) + @sql;
+            END
+        END
+        ELSE
+        BEGIN
+            PRINT N'-- No snapshots found to drop for database: ' + @dbname;
+        END
+    END
+    ELSE IF @DropSnapshotOnly = 0 AND @RestoreSnapshot = 0
+    BEGIN
+        -- Drop snapshots older than @retainhours
+        SELECT @sql = @sql + N'DROP DATABASE ' + QUOTENAME(name) + N';' + CHAR(13) + CHAR(10)
+        FROM sys.databases
+        WHERE source_database_id = DB_ID(@dbname)
+        AND create_date < DATEADD(HOUR, -@retainhours, GETDATE());
+
+        IF @sql <> N''
+        BEGIN
+            IF @Execute = 1
+            BEGIN
+                BEGIN TRY
+                    EXEC sp_executesql @sql;
+                    PRINT N'-- Successfully dropped expired snapshots: ' + CHAR(13) + CHAR(10) + @sql;
+                END TRY
+                BEGIN CATCH
+                    SET @errorMsg = N'Error dropping expired snapshots: ' + ERROR_MESSAGE();
+                    RAISERROR(@errorMsg, 16, 1);
+                END CATCH
+            END
+            ELSE
+            BEGIN
+                PRINT N'-- Expired snapshot drop statements:' + CHAR(13) + CHAR(10) + @sql;
+            END
+        END
+
+        -- Section 2: Create new snapshot
+        -- Determine snapshot name
+        SET @snapshotName = COALESCE(@DBSnapshotName, 
+                                   @dbname + '_SNAPSHOT_' + @dateOnly);
+
+        -- Check if snapshot exists and handle @Force
+        IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @snapshotName)
+        BEGIN
+            IF @Force = 1 AND @Execute = 1
+            BEGIN
+                SET @sql = N'DROP DATABASE ' + QUOTENAME(@snapshotName);
+                BEGIN TRY
+                    EXEC sp_executesql @sql;
+                    PRINT N'-- Dropped existing snapshot ' + @snapshotName + N' due to @Force = 1';
+                    
+                    -- Add a small delay to ensure SQL Server releases file handles
+                    WAITFOR DELAY '00:00:02';
+                END TRY
+                BEGIN CATCH
+                    SET @errorMsg = N'Error dropping existing snapshot ' + @snapshotName + N': ' + ERROR_MESSAGE();
+                    RAISERROR(@errorMsg, 16, 1);
+                    RETURN;
+                END CATCH
+            END
+            ELSE IF @Force = 0
+            BEGIN
+                SET @errorMsg = N'Snapshot name ' + @snapshotName + N' already exists. Use @Force = 1 to overwrite or specify a unique name.';
+                RAISERROR(@errorMsg, 16, 1);
+                RETURN;
+            END
+            ELSE IF @Force = 1 AND @Execute = 0
+            BEGIN
+                PRINT N'-- Would drop existing snapshot ' + @snapshotName + N' due to @Force = 1';
+            END
+        END
+
+        -- Get a unique timestamp for the files (not the database name)
+        DECLARE @fileTimestamp VARCHAR(20) = @dateOnly + REPLACE(CONVERT(VARCHAR(8), GETDATE(), 108), ':', '');
+
+        -- Create the snapshot
+        SET @sql = N'CREATE DATABASE ' + QUOTENAME(@snapshotName) + N' ON ' +
+                   STUFF(
+                       (
+                           SELECT N', (NAME = ''' + name + N''', FILENAME = ''' + 
+                                  @TargetDirectory + N'\' + name + '_' + @fileTimestamp + N'.ss'')'
+                           FROM sys.master_files
+                           WHERE type = 0
+                           AND database_id = DB_ID(@dbname)
+                           FOR XML PATH('')
+                       ),
+                       1,
+                       1,
+                       N''
+                   ) +
+                   N' AS SNAPSHOT OF ' + QUOTENAME(@dbname);
+
+        IF @Execute = 1
+        BEGIN
+            BEGIN TRY
+                EXEC sp_executesql @sql;
+                PRINT N'-- Successfully created snapshot ' + @snapshotName + N' at ' + @TargetDirectory + N': ' + CHAR(13) + CHAR(10) + @sql;
+            END TRY
+            BEGIN CATCH
+                SET @errorMsg = N'Error creating snapshot: ' + ERROR_MESSAGE();
+                RAISERROR(@errorMsg, 16, 1);
+            END CATCH
+        END
+        ELSE
+        BEGIN
+            PRINT N'-- Snapshot creation statement for ' + @snapshotName + N' (target: ' + @TargetDirectory + N'): ' + CHAR(13) + CHAR(10) + @sql;
+        END
+    END
+
+    -- Section 3: Restore snapshot if @RestoreSnapshot = 1
+    IF @RestoreSnapshot = 1
+    BEGIN
+        SET @sql = N'';
+        
+        IF @SpecificSnapshotToRestore IS NOT NULL
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM sys.databases 
+                          WHERE name = @SpecificSnapshotToRestore 
+                          AND source_database_id = DB_ID(@dbname))
+            BEGIN
+                SET @errorMsg = N'Specified snapshot ' + @SpecificSnapshotToRestore + N' does not exist or is not a snapshot of ' + @dbname;
+                RAISERROR(@errorMsg, 16, 1);
+                RETURN;
+            END
+            
+            SET @sql = N'RESTORE DATABASE ' + QUOTENAME(@dbname) + 
+                      N' FROM DATABASE_SNAPSHOT = ' + QUOTENAME(@SpecificSnapshotToRestore);
+        END
+        ELSE
+        BEGIN
+            SELECT TOP 1 @sql = N'RESTORE DATABASE ' + QUOTENAME(@dbname) + 
+                               N' FROM DATABASE_SNAPSHOT = ' + QUOTENAME(name)
+            FROM sys.databases 
+            WHERE source_database_id = DB_ID(@dbname)
+            ORDER BY create_date DESC;
+            
+            IF @sql IS NULL
+            BEGIN
+                SET @errorMsg = N'No snapshots found for database ' + @dbname + N' to restore from.';
+                RAISERROR(@errorMsg, 16, 1);
+                RETURN;
+            END
+        END
+
+        IF @Execute = 1
+        BEGIN
+            BEGIN TRY
+                EXEC sp_executesql @sql;
+                PRINT N'-- Successfully restored database from snapshot: ' + CHAR(13) + CHAR(10) + @sql;
+            END TRY
+            BEGIN CATCH
+                SET @errorMsg = N'Error restoring database from snapshot: ' + ERROR_MESSAGE();
+                RAISERROR(@errorMsg, 16, 1);
+            END CATCH
+        END
+        ELSE
+        BEGIN
+            PRINT N'-- Restore statement to be executed: ' + CHAR(13) + CHAR(10) + @sql;
+        END
+    END
+
+    -- Section 4: Print available snapshots only when requested or restoring
+    IF @RestoreSnapshot = 1 OR @Execute = 0
+    BEGIN
+        SET @sql = N'';
+        SELECT @sql = @sql + N'-- Snapshot: ' + name + N' (Created: ' + CONVERT(VARCHAR(20), create_date, 120) + N')' + CHAR(13) + CHAR(10)
+        FROM sys.databases
+        WHERE source_database_id = DB_ID(@dbname)
+        ORDER BY create_date DESC;
+
+        IF @sql <> N''
+        BEGIN
+            PRINT N'-- Available snapshots for ' + @dbname + N':' + CHAR(13) + CHAR(10) + @sql;
+            
+            IF @RestoreSnapshot = 0
+            BEGIN
+                SET @sql = N'';
+                SELECT TOP 1 @sql = N'RESTORE DATABASE ' + QUOTENAME(@dbname) + 
+                                   N' FROM DATABASE_SNAPSHOT = ' + QUOTENAME(name)
+                FROM sys.databases 
+                WHERE source_database_id = DB_ID(@dbname)
+                ORDER BY create_date DESC;
+                
+                PRINT N'-- Latest snapshot restore command (for reference): ' + CHAR(13) + CHAR(10) + @sql;
+            END
+        END
+        ELSE
+        BEGIN
+            PRINT N'-- No snapshots currently exist for ' + @dbname;
+        END
+    END
+END
+GO
