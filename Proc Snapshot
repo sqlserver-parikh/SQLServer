@@ -4,14 +4,14 @@ GO
 CREATE OR ALTER PROCEDURE usp_DBSnapshot
 (
     @dbname sysname = 'test',                              -- Database name to snapshot or restore
-    @DBSnapshotName sysname = 'test_snap',                        -- Optional: Specific name for the snapshot; if NULL, uses default naming convention
-    @SnapshotDrive varchar(512) = NULL,       -- Optional: Specific drive/path for snapshots; if NULL, uses default backup directory
-    @retainhours int = 24,                                 -- Hours to retain snapshots
+    @SnapshotDrive varchar(512) = NULL,                    -- Optional: Specific drive/path for snapshots; if NULL, uses default backup directory
+    @DeleteOlderThanHours int = 168,                       -- Hours after which snapshots are dropped (default 168 = 1 week)
     @Execute bit = 1,                                      -- 0 = Print only, 1 = Execute statements
     @DropSnapshotOnly tinyint = 0,                         -- 0 = No drop, 1 = Drop all, 2 = Drop oldest, 3 = Drop newest
     @RestoreSnapshot bit = 0,                              -- 0 = Create/manage snapshots, 1 = Restore latest snapshot
     @SpecificSnapshotToRestore sysname = NULL,             -- Optional: Specific snapshot name to restore from; if NULL and @RestoreSnapshot = 1, uses latest
-    @Force bit = 1                                         -- 0 = Fail if snapshot exists with same name, 1 = Overwrite if snapshot exists or always create new
+    @DBSnapshotName sysname = NULL,                        -- Optional: Specific name for the snapshot; if NULL, uses timestamp-based naming
+    @Force bit = 1                                       -- 0 = Fail if snapshot exists with same name, 1 = Overwrite if snapshot exists
 )
 AS
 BEGIN
@@ -26,7 +26,7 @@ BEGIN
     DECLARE @xp_create_cmd NVARCHAR(512);
     DECLARE @driveLetter VARCHAR(3);
     DECLARE @snapshotName sysname;
-    DECLARE @dateOnly VARCHAR(8) = CONVERT(VARCHAR(8), GETDATE(), 112); -- YYYYMMDD format
+    DECLARE @timestamp VARCHAR(14) = CONVERT(VARCHAR(10), GETDATE(), 112) + REPLACE(CONVERT(VARCHAR(8), GETDATE(), 114), ':', ''); -- YYYYMMDDHHMMSS
 
     -- Validate @DropSnapshotOnly parameter
     IF @DropSnapshotOnly NOT IN (0, 1, 2, 3)
@@ -180,11 +180,11 @@ BEGIN
     END
     ELSE IF @DropSnapshotOnly = 0 AND @RestoreSnapshot = 0
     BEGIN
-        -- Drop snapshots older than @retainhours
+        -- Drop snapshots older than @DeleteOlderThanHours
         SELECT @sql = @sql + N'DROP DATABASE ' + QUOTENAME(name) + N';' + CHAR(13) + CHAR(10)
         FROM sys.databases
         WHERE source_database_id = DB_ID(@dbname)
-        AND create_date < DATEADD(HOUR, -@retainhours, GETDATE());
+        AND create_date < DATEADD(HOUR, -@DeleteOlderThanHours, GETDATE());
 
         IF @sql <> N''
         BEGIN
@@ -192,7 +192,7 @@ BEGIN
             BEGIN
                 BEGIN TRY
                     EXEC sp_executesql @sql;
-                    PRINT N'-- Successfully dropped expired snapshots: ' + CHAR(13) + CHAR(10) + @sql;
+                    PRINT N'-- Successfully dropped snapshots older than ' + CAST(@DeleteOlderThanHours AS NVARCHAR(10)) + N' hours: ' + CHAR(13) + CHAR(10) + @sql;
                 END TRY
                 BEGIN CATCH
                     SET @errorMsg = N'Error dropping expired snapshots: ' + ERROR_MESSAGE();
@@ -201,14 +201,13 @@ BEGIN
             END
             ELSE
             BEGIN
-                PRINT N'-- Expired snapshot drop statements:' + CHAR(13) + CHAR(10) + @sql;
+                PRINT N'-- Expired snapshot drop statements (older than ' + CAST(@DeleteOlderThanHours AS NVARCHAR(10)) + N' hours): ' + CHAR(13) + CHAR(10) + @sql;
             END
         END
 
         -- Section 2: Create new snapshot
         -- Determine snapshot name
-        SET @snapshotName = COALESCE(@DBSnapshotName, 
-                                   @dbname + '_SNAPSHOT_' + @dateOnly);
+        SET @snapshotName = COALESCE(@DBSnapshotName, @dbname + '_SNAPSHOT_' + LEFT(@timestamp,8));
 
         -- Check if snapshot exists and handle @Force
         IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @snapshotName)
@@ -219,9 +218,7 @@ BEGIN
                 BEGIN TRY
                     EXEC sp_executesql @sql;
                     PRINT N'-- Dropped existing snapshot ' + @snapshotName + N' due to @Force = 1';
-                    
-                    -- Add a small delay to ensure SQL Server releases file handles
-                    WAITFOR DELAY '00:00:02';
+                    WAITFOR DELAY '00:00:02'; -- Small delay to release file handles
                 END TRY
                 BEGIN CATCH
                     SET @errorMsg = N'Error dropping existing snapshot ' + @snapshotName + N': ' + ERROR_MESSAGE();
@@ -241,15 +238,12 @@ BEGIN
             END
         END
 
-        -- Get a unique timestamp for the files (not the database name)
-        DECLARE @fileTimestamp VARCHAR(20) = @dateOnly + REPLACE(CONVERT(VARCHAR(8), GETDATE(), 108), ':', '');
-
         -- Create the snapshot
         SET @sql = N'CREATE DATABASE ' + QUOTENAME(@snapshotName) + N' ON ' +
                    STUFF(
                        (
                            SELECT N', (NAME = ''' + name + N''', FILENAME = ''' + 
-                                  @TargetDirectory + N'\' + name + '_' + @fileTimestamp + N'.ss'')'
+                                  @TargetDirectory + N'\' + name + '_' + @timestamp + N'.ss'')'
                            FROM sys.master_files
                            WHERE type = 0
                            AND database_id = DB_ID(@dbname)
