@@ -1,4 +1,6 @@
-SELECT XEvent.query('(event/data/value/deadlock)[1]') AS DeadlockGraph
+SELECT 
+    XEvent.value('(event/@timestamp)[1]', 'datetime') AS DeadlockTime,
+    XEvent.query('(event/data/value/deadlock)[1]') AS DeadlockGraph
 FROM (
     SELECT XEvent.query('.') AS XEvent
     FROM (
@@ -8,7 +10,6 @@ FROM (
         WHERE s.NAME = 'system_health'
             AND st.target_name = 'ring_buffer'
         ) AS Data
-CROSS APPLY TargetData.nodes('RingBufferTarget/event[@name="xml_deadlock_report"]') AS XEventData(XEvent)
-) AS source;
-
+    CROSS APPLY TargetData.nodes('RingBufferTarget/event[@name="xml_deadlock_report"]') AS XEventData(XEvent)
+) AS source order by 1 desc
 --https://blog.sqlauthority.com/2017/01/09/sql-server-get-historical-deadlock-information-system-health-extended-events/
