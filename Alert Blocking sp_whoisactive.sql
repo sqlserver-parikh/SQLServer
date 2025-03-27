@@ -1,4 +1,4 @@
-USE tempdb
+USE DBASupport
 GO
 
 CREATE OR ALTER PROCEDURE [dbo].[usp_BlockingMonitor]
@@ -6,14 +6,14 @@ CREATE OR ALTER PROCEDURE [dbo].[usp_BlockingMonitor]
     @MinBlockedSessions         INT = 1,              -- Minimum number of sessions a blocker must be blocking
     @WaitTimeThresholdSec       INT = 300,            -- Initial wait time threshold in seconds
     @FollowupWaitTimeThresholdSec INT = 700,          -- Follow-up wait time threshold in seconds
-    @EmailRecipients            VARCHAR(MAX) = 'myemail@company.com',  -- Email recipients for the alert (NULL uses operator)
+    @EmailRecipients            VARCHAR(MAX) = 'mymail@company.com',  -- Email recipients for the alert (NULL uses operator)
     @ReportOnly                 BIT = 0,              -- Only display the report, don't send email (1=Yes, 0=No)
-    @FollowupIntervalMins       INT = 20              -- Minimum time between follow-up emails in minutes
-)
-AS
+    @FollowupIntervalMins       INT = 60,              -- Minimum time between follow-up emails in minutes
+    @DBName                     NVARCHAR(128) = ''  -- Database name to filter on, NULL/''/all means all databases
+)AS
 BEGIN
     SET NOCOUNT ON;
-    
+     SET @DBName = NULLIF(NULLIF(@DBName, ''), 'all');
     -- Set default email address if not provided and report only mode is off
     IF @ReportOnly = 0 AND @EmailRecipients IS NULL
     BEGIN
@@ -97,6 +97,7 @@ BEGIN
         LEFT JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
         WHERE s.session_id <> @@SPID -- Exclude our own session
           AND (r.blocking_session_id > 0 OR s.session_id IN (SELECT blocking_session_id FROM sys.dm_exec_requests WHERE blocking_session_id > 0))
+		  AND (@DBName IS NULL OR DB_NAME(r.database_id) = @DBName) 
     ),
     BlockedSessionCount AS (
         -- Count the number of sessions each session is blocking
@@ -105,6 +106,7 @@ BEGIN
             COUNT(*) AS blocked_count
         FROM sys.dm_exec_requests
         WHERE blocking_session_id > 0
+		 AND (@DBName IS NULL OR DB_NAME(database_id) = @DBName) 
         GROUP BY blocking_session_id
     )
     -- Populate the temp table with detailed blocking information
