@@ -1,47 +1,90 @@
 USE tempdb
 GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
 
 CREATE OR ALTER PROCEDURE [dbo].[usp_BlockingMonitor]
 (
     @MinBlockedSessions         INT = 1,              -- Minimum number of sessions a blocker must be blocking
     @WaitTimeThresholdSec       INT = 300,            -- Initial wait time threshold in seconds
     @FollowupWaitTimeThresholdSec INT = 700,          -- Follow-up wait time threshold in seconds
-    @EmailRecipients            VARCHAR(MAX) = 'email@company.com',  -- Email recipients for the alert (NULL uses operator)
-    @ReportOnly                 BIT = 0,              -- Only display the report, don't send email (1=Yes, 0=No)
-    @FollowupIntervalMins       INT = 1,              -- Minimum time between follow-up emails in minutes
-    @DBName                     NVARCHAR(128) = ''  -- Database name to filter on, NULL/''/all means all databases
+    @EmailRecipients            VARCHAR(MAX) = '',    -- Email recipients for the alert (NULL uses operator)
+    @EmailOperator              VARCHAR(MAX) = 'SQLSupport',  -- If email is null then operator will be chosen for email
+    @DBMailProfile              VARCHAR(128) = NULL,  -- If Null default database mail profile is chosen
+    @SendEmail                  BIT = 1,              -- Send email (1=Yes, 0=No)
+    @FollowupIntervalMins       INT = 60,              -- Minimum time between follow-up emails in minutes
+    @DBName                     NVARCHAR(128) = ''    -- Database name to filter on, NULL/''/all means all databases
 )AS
 BEGIN
     SET NOCOUNT ON;
-	DECLARE @DomainNames NVARCHAR(MAX) = '';
+    DECLARE @DomainNames NVARCHAR(MAX) = '';
+    IF @EmailRecipients = ''
+        SET @EmailRecipients = NULL;
 
-SELECT @DomainNames = STUFF((
-    SELECT DISTINCT ', ' + LEFT(name, CHARINDEX('\', name) - 1)
-    FROM sys.server_principals
-    WHERE type_desc IN ('WINDOWS_LOGIN', 'WINDOWS_GROUP')
-      AND name LIKE '%\%' 
-      AND name NOT LIKE 'NT %' 
-	  AND name NOT LIKE 'BUILTIN%'
-	  --and name like '%dba%'
-    FOR XML PATH(''), TYPE
-).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
+    SELECT @DomainNames = STUFF((
+        SELECT DISTINCT ', ' + LEFT(name, CHARINDEX('\', name) - 1)
+        FROM sys.server_principals
+        WHERE type_desc IN ('WINDOWS_LOGIN', 'WINDOWS_GROUP')
+          AND name LIKE '%\%' 
+          AND name NOT LIKE 'NT %' 
+          AND name NOT LIKE 'BUILTIN%'
+          -- and name like '%dba%'
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
 
-     SET @DBName = NULLIF(NULLIF(@DBName, ''), 'all');
-    -- Set default email address if not provided and report only mode is off
-    IF @ReportOnly = 0 AND @EmailRecipients IS NULL
-    BEGIN
-        SELECT @EmailRecipients = email_address 
-        FROM msdb..sysoperators
-        WHERE name LIKE 'SQLDBATeam'
-    END
-
+    SET @DBName = NULLIF(NULLIF(@DBName, ''), 'all');
+    
     -- Get email profile if not in report only mode
     DECLARE @EmailProfile VARCHAR(128);
-    IF @ReportOnly = 0
+    IF @SendEmail = 1 
     BEGIN
-        SELECT @EmailProfile = name
-        FROM msdb..sysmail_profile
-        WHERE profile_id = 1;
+        IF @DBMailProfile IS NULL
+        BEGIN
+            SELECT @EmailProfile = name
+            FROM msdb..sysmail_profile
+            WHERE profile_id = 1;
+            
+            IF @EmailProfile IS NULL
+            BEGIN
+                PRINT 'Warning: Default mail profile not found. Email alerts will not be sent.';
+                SET @SendEmail = 0; -- Disable email sending if no profile exists
+            END
+        END
+        ELSE 
+        BEGIN
+            -- Verify the specified profile exists
+            IF NOT EXISTS (SELECT 1 FROM msdb..sysmail_profile WHERE name = @DBMailProfile)
+            BEGIN
+                PRINT 'Warning: Specified mail profile "' + @DBMailProfile + '" not found. Email alerts will not be sent.';
+                SET @SendEmail = 0; -- Disable email sending if specified profile doesn't exist
+            END
+            ELSE
+                SET @EmailProfile = @DBMailProfile;
+        END
+    END
+
+    -- Set default email address if not provided and send email is enabled
+    IF @SendEmail = 1 AND @EmailRecipients IS NULL
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM msdb..sysoperators WHERE name = @EmailOperator)
+        BEGIN
+            PRINT 'Warning: Specified operator "' + @EmailOperator + '" not found. Email alerts will not be sent.';
+            SET @SendEmail = 0; -- Disable email sending if specified operator doesn't exist
+        END
+        ELSE
+        BEGIN
+            SELECT @EmailRecipients = email_address 
+            FROM msdb..sysoperators
+            WHERE name = @EmailOperator;
+            
+            IF @EmailRecipients IS NULL OR @EmailRecipients = ''
+            BEGIN
+                PRINT 'Warning: No email address found for operator "' + @EmailOperator + '". Email alerts will not be sent.';
+                SET @SendEmail = 0; -- Disable email sending if the operator has no email
+            END
+        END
     END
     
     -- Determine which wait time threshold to use based on whether a recent alert has been sent
@@ -54,6 +97,7 @@ SELECT @DomainNames = STUFF((
         FROM msdb.dbo.sysmail_allitems
         WHERE subject LIKE 'SQL Blocking Alert on ' + @@SERVERNAME + '%'
           AND sent_status = 'sent' -- Successfully sent
+          AND send_request_date > DATEADD(MINUTE, -@FollowupIntervalMins, GETDATE())
         ORDER BY send_request_date DESC;
         
         -- If a previous email was sent recently, use the higher follow-up threshold
@@ -110,7 +154,7 @@ SELECT @DomainNames = STUFF((
         LEFT JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
         WHERE s.session_id <> @@SPID -- Exclude our own session
           AND (r.blocking_session_id > 0 OR s.session_id IN (SELECT blocking_session_id FROM sys.dm_exec_requests WHERE blocking_session_id > 0))
-		  AND (@DBName IS NULL OR DB_NAME(r.database_id) = @DBName) 
+          AND (@DBName IS NULL OR DB_NAME(r.database_id) = @DBName) 
     ),
     BlockedSessionCount AS (
         -- Count the number of sessions each session is blocking
@@ -119,7 +163,7 @@ SELECT @DomainNames = STUFF((
             COUNT(*) AS blocked_count
         FROM sys.dm_exec_requests
         WHERE blocking_session_id > 0
-		 AND (@DBName IS NULL OR DB_NAME(database_id) = @DBName) 
+         AND (@DBName IS NULL OR DB_NAME(database_id) = @DBName) 
         GROUP BY blocking_session_id
     )
     -- Populate the temp table with detailed blocking information
@@ -142,7 +186,6 @@ SELECT @DomainNames = STUFF((
     FROM BlockingHierarchy bh
     LEFT JOIN BlockedSessionCount bsc ON bh.session_id = bsc.blocking_session_id
     WHERE 
-		
         -- Either this session is being blocked
         bh.blocking_session_id > 0
         OR 
@@ -150,33 +193,31 @@ SELECT @DomainNames = STUFF((
         EXISTS (SELECT 1 FROM BlockedSessionCount WHERE blocking_session_id = bh.session_id);
     
     -- Filter blocked sessions by wait time threshold if specified
--- Filter blocked sessions by wait time threshold if specified
--- Filter blocked sessions by wait time threshold if specified
-IF @CurrentWaitThreshold > 0
-BEGIN
-    -- First, delete blocked sessions that don't meet the wait time threshold
-    DELETE FROM #BlockingData
-    WHERE blocking_session_id > 0
-      AND (wait_duration_sec IS NULL OR wait_duration_sec < @CurrentWaitThreshold);
-    
-    -- Now update the blocked_session_count for all sessions based on what's remaining
-    -- This ensures the count is accurate after filtering
-    UPDATE b
-    SET blocked_session_count = ISNULL(c.actual_count, 0)
-    FROM #BlockingData b
-    LEFT JOIN (
-        SELECT blocking_session_id, COUNT(*) AS actual_count
-        FROM #BlockingData
+    IF @CurrentWaitThreshold > 0
+    BEGIN
+        -- First, delete blocked sessions that don't meet the wait time threshold
+        DELETE FROM #BlockingData
         WHERE blocking_session_id > 0
-        GROUP BY blocking_session_id
-    ) c ON b.session_id = c.blocking_session_id;
-    
-    -- Delete lead blockers that no longer have any sessions blocked
-    -- after applying the wait time threshold
-    DELETE FROM #BlockingData
-    WHERE blocking_session_id = 0 
-      AND blocked_session_count < @MinBlockedSessions;
-END
+          AND (wait_duration_sec IS NULL OR wait_duration_sec < @CurrentWaitThreshold);
+        
+        -- Now update the blocked_session_count for all sessions based on what's remaining
+        -- This ensures the count is accurate after filtering
+        UPDATE b
+        SET blocked_session_count = ISNULL(c.actual_count, 0)
+        FROM #BlockingData b
+        LEFT JOIN (
+            SELECT blocking_session_id, COUNT(*) AS actual_count
+            FROM #BlockingData
+            WHERE blocking_session_id > 0
+            GROUP BY blocking_session_id
+        ) c ON b.session_id = c.blocking_session_id;
+        
+        -- Delete lead blockers that no longer have any sessions blocked
+        -- after applying the wait time threshold
+        DELETE FROM #BlockingData
+        WHERE blocking_session_id = 0 
+          AND blocked_session_count < @MinBlockedSessions;
+    END
 
     -- Also filter lead blockers that don't block enough sessions
     DELETE FROM #BlockingData
@@ -221,11 +262,11 @@ END
     PRINT 'Session count: ' + CAST(@BlockCount AS VARCHAR);
     PRINT '==========================';
     
-    -- If we found blocking events and not in report only mode, check if we should send an email
-    IF @BlockCount > 0 AND @ReportOnly = 0
+    -- If we found blocking events and email sending is enabled, check if we should send an email
+    IF @BlockCount > 0 AND @SendEmail = 1
     BEGIN
         -- Check whether to send email based on follow-up interval
-        DECLARE @SendEmail BIT = 1;
+        DECLARE @SendEmailFlag BIT = 1;
         
         -- Only check for last email if follow-up interval is > 0
         IF @FollowupIntervalMins > 0 AND @LastEmailTime IS NOT NULL
@@ -233,14 +274,14 @@ END
             -- If a previous email was found and it's within the follow-up interval, don't send a new one
             IF DATEDIFF(MINUTE, @LastEmailTime, GETDATE()) < @FollowupIntervalMins
             BEGIN
-                SET @SendEmail = 0;
+                SET @SendEmailFlag = 0;
                 PRINT 'Skipping email alert - last alert was sent at ' + CONVERT(VARCHAR, @LastEmailTime, 120) + 
                       ' (less than ' + CAST(@FollowupIntervalMins AS VARCHAR) + ' minutes ago)';
             END
         END
         
         -- If we should send an email, proceed with creating and sending it
-        IF @SendEmail = 1
+        IF @SendEmailFlag = 1
         BEGIN
             -- Create a more detailed and informative email body
             DECLARE @TableHTML VARCHAR(MAX);
