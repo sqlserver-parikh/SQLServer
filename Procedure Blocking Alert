@@ -1,4 +1,4 @@
-USE DBASupport
+USE tempdb
 GO
 
 CREATE OR ALTER PROCEDURE [dbo].[usp_BlockingMonitor]
@@ -6,13 +6,26 @@ CREATE OR ALTER PROCEDURE [dbo].[usp_BlockingMonitor]
     @MinBlockedSessions         INT = 1,              -- Minimum number of sessions a blocker must be blocking
     @WaitTimeThresholdSec       INT = 300,            -- Initial wait time threshold in seconds
     @FollowupWaitTimeThresholdSec INT = 700,          -- Follow-up wait time threshold in seconds
-    @EmailRecipients            VARCHAR(MAX) = 'mymail@company.com',  -- Email recipients for the alert (NULL uses operator)
+    @EmailRecipients            VARCHAR(MAX) = 'email@company.com',  -- Email recipients for the alert (NULL uses operator)
     @ReportOnly                 BIT = 0,              -- Only display the report, don't send email (1=Yes, 0=No)
-    @FollowupIntervalMins       INT = 60,              -- Minimum time between follow-up emails in minutes
+    @FollowupIntervalMins       INT = 1,              -- Minimum time between follow-up emails in minutes
     @DBName                     NVARCHAR(128) = ''  -- Database name to filter on, NULL/''/all means all databases
 )AS
 BEGIN
     SET NOCOUNT ON;
+	DECLARE @DomainNames NVARCHAR(MAX) = '';
+
+SELECT @DomainNames = STUFF((
+    SELECT DISTINCT ', ' + LEFT(name, CHARINDEX('\', name) - 1)
+    FROM sys.server_principals
+    WHERE type_desc IN ('WINDOWS_LOGIN', 'WINDOWS_GROUP')
+      AND name LIKE '%\%' 
+      AND name NOT LIKE 'NT %' 
+	  AND name NOT LIKE 'BUILTIN%'
+	  --and name like '%dba%'
+    FOR XML PATH(''), TYPE
+).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
+
      SET @DBName = NULLIF(NULLIF(@DBName, ''), 'all');
     -- Set default email address if not provided and report only mode is off
     IF @ReportOnly = 0 AND @EmailRecipients IS NULL
@@ -386,6 +399,7 @@ END
                     <li><strong>Follow-up Wait Threshold:</strong> ' + CAST(@FollowupWaitTimeThresholdSec AS VARCHAR) + ' seconds</li>
                     <li><strong>Follow-up Interval:</strong> ' + CAST(@FollowupIntervalMins AS VARCHAR) + ' minutes</li>
                     <li><strong>Min Blocked Session Count:</strong> ' + CAST(@MinBlockedSessions AS VARCHAR) + '</li>
+                    <li><strong>Domain Name:</strong> ' + CAST(@DomainNames AS VARCHAR) + ' </li>
                 </ul>
                 
                 <p style="font-size: 10pt; color: #666666;">
