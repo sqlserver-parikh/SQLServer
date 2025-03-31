@@ -8,14 +8,15 @@ GO
 CREATE OR ALTER PROCEDURE [dbo].[usp_BlockingMonitor]
 (
     @MinBlockedSessions         INT = 1,              -- Minimum number of sessions a blocker must be blocking
-    @WaitTimeThresholdSec       INT = 300,            -- Initial wait time threshold in seconds
-    @FollowupWaitTimeThresholdSec INT = 700,          -- Follow-up wait time threshold in seconds
-    @EmailRecipients            VARCHAR(MAX) = '',    -- Email recipients for the alert (NULL uses operator)
+    @WaitTimeThresholdSec       INT = 30,            -- Initial wait time threshold in seconds
+    @FollowupWaitTimeThresholdSec INT = 400,          -- Follow-up wait time threshold in seconds
+    @EmailRecipients            VARCHAR(MAX) = 'nimit.parikh@epiqglobal.com',    -- Email recipients for the alert (NULL uses operator)
     @EmailOperator              VARCHAR(MAX) = 'SQLSupport',  -- If email is null then operator will be chosen for email
     @DBMailProfile              VARCHAR(128) = NULL,  -- If Null default database mail profile is chosen
-    @SendEmail                  BIT = 1,              -- Send email (1=Yes, 0=No)
-    @FollowupIntervalMins       INT = 60,              -- Minimum time between follow-up emails in minutes
-    @DBName                     NVARCHAR(128) = ''    -- Database name to filter on, NULL/''/all means all databases
+    @SendEmail                  BIT = 1, -- Send email (1=Yes, 0=No)
+	@EmailSubject				VARCHAR(MAX) = 'DB Blocking Alert :',
+    @FollowupIntervalMins       INT = 5,              -- Minimum time between follow-up emails in minutes
+    @DBName                     NVARCHAR(MAX) = 'msdb,tempdb'    -- Database names to filter on, comma-separated, NULL/''/all means all databases
 )AS
 BEGIN
     SET NOCOUNT ON;
@@ -34,7 +35,41 @@ BEGIN
         FOR XML PATH(''), TYPE
     ).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
 
-    SET @DBName = NULLIF(NULLIF(@DBName, ''), 'all');
+    -- Convert comma-separated database list to table
+    DECLARE @DBNameAll NVARCHAR(MAX) = NULLIF(NULLIF(@DBName, ''), 'all');
+    
+    -- Create table to hold database names
+    IF OBJECT_ID('tempdb..#DBList') IS NOT NULL
+        DROP TABLE #DBList;
+        
+    CREATE TABLE #DBList (
+        DBName NVARCHAR(128)
+    );
+    
+    -- If specific databases were provided, parse the comma-separated list
+    IF @DBNameAll IS NOT NULL
+    BEGIN
+        DECLARE @Delimiter CHAR(1) = ',';
+        DECLARE @StartPos INT = 1;
+        DECLARE @EndPos INT;
+        DECLARE @CurrentDB NVARCHAR(128);
+        
+        WHILE @StartPos <= LEN(@DBNameAll)
+        BEGIN
+            SET @EndPos = CHARINDEX(@Delimiter, @DBNameAll, @StartPos);
+            IF @EndPos = 0 SET @EndPos = LEN(@DBNameAll) + 1;
+            
+            -- Extract database name and trim whitespace
+            SET @CurrentDB = LTRIM(RTRIM(SUBSTRING(@DBNameAll, @StartPos, @EndPos - @StartPos)));
+            
+            -- Insert database name if it's not empty
+            IF LEN(@CurrentDB) > 0
+                INSERT INTO #DBList (DBName) VALUES (@CurrentDB);
+                
+            -- Move to next position
+            SET @StartPos = @EndPos + 1;
+        END
+    END
     
     -- Get email profile if not in report only mode
     DECLARE @EmailProfile VARCHAR(128);
@@ -95,7 +130,7 @@ BEGIN
     BEGIN
         SELECT TOP 1 @LastEmailTime = send_request_date
         FROM msdb.dbo.sysmail_allitems
-        WHERE subject LIKE 'SQL Blocking Alert on ' + @@SERVERNAME + '%'
+        WHERE subject LIKE @EmailSubject + ' ' + @@SERVERNAME + '%'
           AND sent_status = 'sent' -- Successfully sent
           AND send_request_date > DATEADD(MINUTE, -@FollowupIntervalMins, GETDATE())
         ORDER BY send_request_date DESC;
@@ -128,6 +163,45 @@ BEGIN
         open_transaction_count INT
     );
     
+    -- First, identify the sessions that are blocking sessions in our target databases
+    IF OBJECT_ID('tempdb..#LeadBlockers') IS NOT NULL
+        DROP TABLE #LeadBlockers;
+        
+    CREATE TABLE #LeadBlockers (
+        lead_blocker_id INT PRIMARY KEY
+    );
+    
+    -- Get all head blockers of sessions in our target databases
+    INSERT INTO #LeadBlockers (lead_blocker_id)
+    SELECT DISTINCT r1.blocking_session_id
+    FROM sys.dm_exec_requests r1
+    WHERE r1.blocking_session_id > 0
+      AND (
+            -- Check if we're filtering by database
+            NOT EXISTS (SELECT 1 FROM #DBList) -- No filter, include all
+            OR 
+            DB_NAME(r1.database_id) IN (SELECT DBName FROM #DBList) -- Only specified databases
+          );
+          
+    -- Recursively add all blockers in the chain
+    WITH BlockChain AS (
+        -- Start with our identified blockers
+        SELECT CAST(lead_blocker_id AS INT) AS session_id, 0 AS level
+        FROM #LeadBlockers
+        
+        UNION ALL
+        
+        -- Add any sessions that are blocking our already identified blockers
+        SELECT CAST(r.blocking_session_id AS INT), bc.level + 1
+        FROM BlockChain bc
+        JOIN sys.dm_exec_requests r ON bc.session_id = r.session_id
+        WHERE r.blocking_session_id > 0
+    )
+    INSERT INTO #LeadBlockers (lead_blocker_id)
+    SELECT DISTINCT session_id
+    FROM BlockChain
+    WHERE session_id NOT IN (SELECT lead_blocker_id FROM #LeadBlockers);
+    
     -- Get the head blocker information by analyzing blocking chains
     WITH BlockingHierarchy AS (
         -- Find sessions involved in blocking
@@ -153,17 +227,32 @@ BEGIN
         FROM sys.dm_exec_sessions s
         LEFT JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
         WHERE s.session_id <> @@SPID -- Exclude our own session
-          AND (r.blocking_session_id > 0 OR s.session_id IN (SELECT blocking_session_id FROM sys.dm_exec_requests WHERE blocking_session_id > 0))
-          AND (@DBName IS NULL OR DB_NAME(r.database_id) = @DBName) 
+          AND (
+                -- Include blocked sessions in our target databases
+                (r.blocking_session_id > 0 
+                 AND (
+                      NOT EXISTS (SELECT 1 FROM #DBList) -- No filter, include all
+                      OR 
+                      DB_NAME(r.database_id) IN (SELECT DBName FROM #DBList) -- Filter by database name
+                     )
+                )
+                -- Or include all sessions that are lead blockers (directly or indirectly) of our target databases
+                OR s.session_id IN (SELECT lead_blocker_id FROM #LeadBlockers)
+              )
     ),
     BlockedSessionCount AS (
         -- Count the number of sessions each session is blocking
         SELECT 
             blocking_session_id,
             COUNT(*) AS blocked_count
-        FROM sys.dm_exec_requests
+        FROM sys.dm_exec_requests r
         WHERE blocking_session_id > 0
-         AND (@DBName IS NULL OR DB_NAME(database_id) = @DBName) 
+          AND (
+                -- Check if we're filtering by database
+                NOT EXISTS (SELECT 1 FROM #DBList) -- No filter, include all
+                OR 
+                DB_NAME(r.database_id) IN (SELECT DBName FROM #DBList) -- Filter by database name
+              )
         GROUP BY blocking_session_id
     )
     -- Populate the temp table with detailed blocking information
@@ -252,11 +341,24 @@ BEGIN
     GROUP BY database_name
     ORDER BY COUNT(*) DESC;
     
+    -- Get the list of databases being monitored
+    DECLARE @MonitoredDBs NVARCHAR(MAX) = 'All Databases';
+    IF EXISTS (SELECT 1 FROM #DBList)
+    BEGIN
+        SELECT @MonitoredDBs = STUFF((
+            SELECT ', ' + DBName
+            FROM #DBList
+            ORDER BY DBName
+            FOR XML PATH(''), TYPE
+        ).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
+    END
+    
     -- Output monitoring parameters
     PRINT 'SQL Blocking Monitor Report';
     PRINT '==========================';
     PRINT 'Server: ' + @@SERVERNAME;
     PRINT 'Date/Time: ' + CONVERT(VARCHAR, GETDATE(), 120);
+    PRINT 'Monitored Databases: ' + @MonitoredDBs;
     PRINT 'Wait time threshold: ' + CAST(@CurrentWaitThreshold AS VARCHAR) + ' seconds';
     PRINT 'Follow-up interval: ' + CAST(@FollowupIntervalMins AS VARCHAR) + ' minutes';
     PRINT 'Session count: ' + CAST(@BlockCount AS VARCHAR);
@@ -308,6 +410,7 @@ BEGIN
                 <div class="summary">
                     <h3>Blocking Summary:</h3>
                     <ul>
+                        <li><strong>Monitored Databases:</strong> ' + @MonitoredDBs + '</li>
                         <li><strong>Sessions Affected:</strong> ' + CAST(@BlockCount AS VARCHAR) + '</li>
                         <li><strong>Lead Blockers:</strong> ' + CAST(@LeadBlockerCount AS VARCHAR) + '</li>
                         <li><strong>Blocked Sessions:</strong> ' + CAST(@BlockedSessionCount AS VARCHAR) + '</li>
@@ -450,7 +553,7 @@ BEGIN
             </body>
             </html>';
             
-            DECLARE @Subject VARCHAR(255) = 'SQL Blocking Alert on ' + @@SERVERNAME + 
+            DECLARE @Subject VARCHAR(255) = @EmailSubject + ' ' + @@SERVERNAME + 
                                          ' - ' + CAST(@BlockCount AS VARCHAR) + ' sessions affected' +
                                          ' (' + CAST(@LeadBlockerCount AS VARCHAR) + ' blockers, ' + 
                                          CAST(@BlockedSessionCount AS VARCHAR) + ' blocked)';
@@ -492,8 +595,14 @@ BEGIN
         blocked_session_count DESC,                          -- Most impact first
         ISNULL(wait_duration_sec, 0) DESC;                   -- Longest waits next
         
-    -- Clean up temp table
+    -- Clean up temp tables
     IF OBJECT_ID('tempdb..#BlockingData') IS NOT NULL
         DROP TABLE #BlockingData;
+        
+    IF OBJECT_ID('tempdb..#DBList') IS NOT NULL
+        DROP TABLE #DBList;
+        
+    IF OBJECT_ID('tempdb..#LeadBlockers') IS NOT NULL
+        DROP TABLE #LeadBlockers;
 END;
 GO
