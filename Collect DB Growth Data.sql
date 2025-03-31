@@ -1,10 +1,9 @@
 use tempdb
 go
 create or ALTER PROCEDURE [dbo].[usp_DBGrowthData]
-    @LogToTable BIT = 1,
+    @LogToTable BIT = 0,
     @Retention NVARCHAR(20) = '2y',
-    @GrowthTrendAnalysis TINYINT = 2
-		--   @GrowthTrendAnalysis TINYINT = 0
+    @GrowthTrendAnalysis TINYINT = 1
 --     - 0: Skip growth trend
 --     - 1: Use msdb backupset for trend
 --     - 2: Use tblDBGrowth for trend
@@ -27,6 +26,34 @@ BEGIN
 
         IF @GrowthTrendAnalysis IN (1, 2)
         BEGIN
+            -- Helper function to generate month-year column names dynamically
+            DECLARE @CurrentMonth DATE = GETUTCDATE();
+            DECLARE @MonthNames TABLE (MonthsAgo INT, ColumnName NVARCHAR(20));
+            
+            INSERT INTO @MonthNames
+            VALUES  (0, FORMAT(@CurrentMonth, 'MMMyy') + '_' + CAST(MONTH(@CurrentMonth) AS VARCHAR) + '_MB'),
+                    (-1, FORMAT(DATEADD(MONTH, -1, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -1, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-2, FORMAT(DATEADD(MONTH, -2, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -2, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-3, FORMAT(DATEADD(MONTH, -3, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -3, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-4, FORMAT(DATEADD(MONTH, -4, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -4, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-5, FORMAT(DATEADD(MONTH, -5, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -5, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-6, FORMAT(DATEADD(MONTH, -6, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -6, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-7, FORMAT(DATEADD(MONTH, -7, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -7, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-8, FORMAT(DATEADD(MONTH, -8, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -8, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-9, FORMAT(DATEADD(MONTH, -9, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -9, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-10, FORMAT(DATEADD(MONTH, -10, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -10, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-11, FORMAT(DATEADD(MONTH, -11, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -11, @CurrentMonth)) AS VARCHAR) + '_MB'),
+                    (-12, FORMAT(DATEADD(MONTH, -12, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -12, @CurrentMonth)) AS VARCHAR) + '_MB');
+
+            DECLARE @PivotColumns NVARCHAR(MAX);
+            DECLARE @SelectColumns NVARCHAR(MAX);
+            
+            -- Generate the dynamic column list for PIVOT and SELECT
+            SELECT 
+                @PivotColumns = STRING_AGG(QUOTENAME(MonthsAgo), ',') WITHIN GROUP (ORDER BY MonthsAgo DESC),
+                @SelectColumns = STRING_AGG('PVT.[' + CAST(MonthsAgo AS VARCHAR) + '] AS ' + QUOTENAME(ColumnName), ',') WITHIN GROUP (ORDER BY MonthsAgo DESC)
+            FROM @MonthNames;
+            
             DECLARE @TrendSQL NVARCHAR(MAX);
             SET @TrendSQL = '
             WITH TrendData AS (
@@ -48,9 +75,7 @@ BEGIN
             )
             SELECT 
                 PVT.DatabaseName,
-                PVT.[0] AS CurrentMonthMB,
-                PVT.[-1], PVT.[-2], PVT.[-3], PVT.[-4], PVT.[-5], PVT.[-6],
-                PVT.[-7], PVT.[-8], PVT.[-9], PVT.[-10], PVT.[-11], PVT.[-12],
+                ' + @SelectColumns + ',
                 CASE 
                     WHEN dmc.MonthsWithData > 1 THEN 
                         (PVT.[0] - COALESCE(PVT.[-12], PVT.[-11], PVT.[-10], PVT.[-9], PVT.[-8],
@@ -58,6 +83,13 @@ BEGIN
                     ELSE NULL -- No growth calculation possible with only one month
                 END AS LastXMonthGrowth,
                 dmc.MonthsWithData AS XMonthsData,
+                CASE 
+                    WHEN dmc.MonthsWithData > 1 THEN 
+                        (PVT.[0] - COALESCE(PVT.[-12], PVT.[-11], PVT.[-10], PVT.[-9], PVT.[-8],
+                                 PVT.[-7], PVT.[-6], PVT.[-5], PVT.[-4], PVT.[-3], PVT.[-2], PVT.[-1])) / 
+                        (dmc.MonthsWithData - 1)
+                    ELSE NULL -- Cannot calculate monthly growth with only one month
+                END AS MonthlyGrowthMB,
                 CASE 
                     WHEN dmc.MonthsWithData > 1 THEN
                         PVT.[0] + ((PVT.[0] - COALESCE(PVT.[-12], PVT.[-11], PVT.[-10], PVT.[-9], PVT.[-8],
@@ -90,7 +122,7 @@ BEGIN
                 SELECT DatabaseName, MonthsAgo, AvgSizeMB FROM TrendData
             ) AS raw
             PIVOT (
-                SUM(AvgSizeMB) FOR MonthsAgo IN ([0], [-1], [-2], [-3], [-4], [-5], [-6], [-7], [-8], [-9], [-10], [-11], [-12])
+                SUM(AvgSizeMB) FOR MonthsAgo IN (' + @PivotColumns + ')
             ) AS PVT
             JOIN DatabaseMonthCounts dmc ON PVT.DatabaseName = dmc.DatabaseName;
             ';
