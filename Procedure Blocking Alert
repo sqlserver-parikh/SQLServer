@@ -1,22 +1,18 @@
-USE tempdb
-GO
-SET ANSI_NULLS ON
-GO
-SET QUOTED_IDENTIFIER ON
-GO
-
+use tempdb 
+go
 CREATE OR ALTER PROCEDURE [dbo].[usp_BlockingMonitor]
 (
     @MinBlockedSessions         INT = 1,              -- Minimum number of sessions a blocker must be blocking
     @WaitTimeThresholdSec       INT = 30,            -- Initial wait time threshold in seconds
     @FollowupWaitTimeThresholdSec INT = 400,          -- Follow-up wait time threshold in seconds
-    @EmailRecipients            VARCHAR(MAX) = 'nimit.parikh@epiqglobal.com',    -- Email recipients for the alert (NULL uses operator)
+    @EmailRecipients            VARCHAR(MAX) = '',    -- Email recipients for the alert (NULL uses operator)
     @EmailOperator              VARCHAR(MAX) = 'SQLSupport',  -- If email is null then operator will be chosen for email
     @DBMailProfile              VARCHAR(128) = NULL,  -- If Null default database mail profile is chosen
     @SendEmail                  BIT = 1, -- Send email (1=Yes, 0=No)
-	@EmailSubject				VARCHAR(MAX) = 'DB Blocking Alert :',
+	@EmailSubject				VARCHAR(MAX) = 'DB Blocking Alert:',
     @FollowupIntervalMins       INT = 5,              -- Minimum time between follow-up emails in minutes
-    @DBName                     NVARCHAR(MAX) = 'msdb,tempdb'    -- Database names to filter on, comma-separated, NULL/''/all means all databases
+    @DBName                     NVARCHAR(MAX) = 'msdb,tempdb',    -- Database names to filter on, comma-separated, NULL/''/all means all databases
+    @CustomMessage              NVARCHAR(MAX) = 'There is extensive blocking in database msdb, please follow runbook link'  -- Custom message to include in the alert email
 )AS
 BEGIN
     SET NOCOUNT ON;
@@ -402,11 +398,23 @@ BEGIN
                     .highlight { background-color: #FFFACD; }
                     .leadblocker { background-color: #FFC0CB; font-weight: bold; }
                     .summary { background-color: #E6E6FA; padding: 10px; margin-bottom: 15px; border-radius: 5px; }
+                    .custom-message { background-color: #F0FFF0; padding: 10px; margin: 15px 0; border-left: 5px solid #008000; }
                 </style>
             </head>
             <body>
-                <h2>SQL Server Blocking Alert: ' + @@SERVERNAME + '</h2>
+                <h2>SQL Server Blocking Alert: ' + @@SERVERNAME + '</h2>';
                 
+            -- Add custom message if provided
+            IF @CustomMessage IS NOT NULL AND LEN(@CustomMessage) > 0
+            BEGIN
+                SET @TableHTML = @TableHTML + N'
+                <div class="custom-message">
+                    <strong>Custom Message:</strong><br />
+                    ' + @CustomMessage + '
+                </div>';
+            END
+                
+            SET @TableHTML = @TableHTML + N'
                 <div class="summary">
                     <h3>Blocking Summary:</h3>
                     <ul>
@@ -605,4 +613,3 @@ BEGIN
     IF OBJECT_ID('tempdb..#LeadBlockers') IS NOT NULL
         DROP TABLE #LeadBlockers;
 END;
-GO
