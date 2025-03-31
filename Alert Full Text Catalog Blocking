@@ -1,0 +1,162 @@
+USE tempdb 
+GO
+CREATE OR ALTER PROCEDURE [dbo].[usp_FTCBlockingAlert]
+AS
+BEGIN
+    -- Full-Text Catalog Blocking Monitor
+    -- This procedure identifies active full-text catalogs and checks for related blocking
+    SET NOCOUNT ON;
+    
+    -- Create a temporary table to hold full-text rebuild progress data
+    IF OBJECT_ID('tempdb..#FullTextProgress') IS NOT NULL
+        DROP TABLE #FullTextProgress;
+    
+    CREATE TABLE #FullTextProgress (
+        DatabaseName NVARCHAR(128),
+        FullTextCatalogName NVARCHAR(128),
+        LastPopulatedTime DATETIME,
+        PopulateStatus VARCHAR(50),
+        MinutesPassed INT,
+        HoursPassed INT,
+        ItemCount INT,
+        IndexSizeMb DECIMAL(9,2),
+        MergeStatus INT,
+        PopulateCompletionAge INT,
+        PopulateStatusCode INT,
+        ImportStatus INT
+    );
+    
+    -- Create a temporary table to hold affected databases
+    IF OBJECT_ID('tempdb..#AffectedDatabases') IS NOT NULL
+        DROP TABLE #AffectedDatabases;
+    
+    CREATE TABLE #AffectedDatabases (
+        DatabaseName NVARCHAR(128)
+    );
+    
+    -- Step 1: Get full-text catalog data 
+    INSERT INTO #FullTextProgress
+    EXEC usp_fulltextdetail
+        @CatalogName = NULL,
+        @DBName = NULL,
+        @ShowRebuildProgress = 1,
+        @ShowFragmentationDetails = 0;
+    
+    -- Check if any active full-text operations are running
+    IF EXISTS (SELECT 1 FROM #FullTextProgress)
+    BEGIN
+        PRINT 'Active full-text catalog operations found:';
+        
+        -- Display active full-text operations
+        SELECT 
+            DatabaseName,
+            FullTextCatalogName,
+            PopulateStatus,
+            HoursPassed,
+            ItemCount,
+            IndexSizeMb
+        FROM #FullTextProgress;
+        
+        -- Extract unique database names with active full-text operations
+        INSERT INTO #AffectedDatabases (DatabaseName)
+        SELECT DISTINCT DatabaseName 
+        FROM #FullTextProgress;
+        
+        -- Prepare the database filter parameter for the blocking monitor
+        DECLARE @DBFilter NVARCHAR(MAX) = '';
+        DECLARE @DBListForSubject NVARCHAR(MAX) = '';
+        
+        SELECT 
+            @DBFilter = @DBFilter + 
+                CASE WHEN @DBFilter = '' THEN '' ELSE ',' END + 
+                DatabaseName,
+            @DBListForSubject = @DBListForSubject + 
+                CASE WHEN @DBListForSubject = '' THEN '' ELSE ', ' END + 
+                DatabaseName
+        FROM #AffectedDatabases;
+        
+        -- Create custom message with FTC details for the blocking alert
+        DECLARE @CustomMessage NVARCHAR(MAX) = '';
+        
+        SET @CustomMessage = 
+            N'<h4>Active Full-Text Catalog Operations:</h4>
+            <table border="1" cellpadding="3" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+                <tr style="background-color: #f0f0f0;">
+                    <th>Database</th>
+                    <th>Catalog Name</th>
+                    <th>Status</th>
+                    <th>Hours In Progress</th>
+                    <th>Item Count</th>
+                    <th>Size (MB)</th>
+                </tr>';
+                
+        -- Add each FTC operation to the custom message
+        DECLARE @DB NVARCHAR(128), @CatalogName NVARCHAR(128), @Status VARCHAR(50),
+                @Hours INT, @Items INT, @Size DECIMAL(9,2);
+                
+        DECLARE ftc_cursor CURSOR FOR
+        SELECT 
+            DatabaseName,
+            FullTextCatalogName,
+            PopulateStatus,
+            HoursPassed,
+            ItemCount,
+            IndexSizeMb
+        FROM #FullTextProgress
+        ORDER BY DatabaseName, FullTextCatalogName;
+        
+        OPEN ftc_cursor;
+        FETCH NEXT FROM ftc_cursor INTO @DB, @CatalogName, @Status, @Hours, @Items, @Size;
+        
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            SET @CustomMessage = @CustomMessage +
+                N'<tr' + CASE WHEN @Hours > 2 THEN ' style="background-color: #FFFACD;"' ELSE '' END + '>' +
+                N'<td>' + @DB + '</td>' +
+                N'<td>' + @CatalogName + '</td>' +
+                N'<td>' + @Status + '</td>' +
+                N'<td>' + CAST(@Hours AS NVARCHAR(10)) + '</td>' +
+                N'<td>' + CAST(@Items AS NVARCHAR(20)) + '</td>' +
+                N'<td>' + CAST(@Size AS NVARCHAR(20)) + '</td>' +
+                N'</tr>';
+                
+            FETCH NEXT FROM ftc_cursor INTO @DB, @CatalogName, @Status, @Hours, @Items, @Size;
+        END
+        
+        CLOSE ftc_cursor;
+        DEALLOCATE ftc_cursor;
+        
+        SET @CustomMessage = @CustomMessage + N'</table>
+            <p><strong>Note:</strong> This blocking may be related to the active full-text catalog operations shown above.</p>';
+        
+        PRINT 'Checking for blocking in the following databases: ' + @DBFilter;
+        
+        -- Create dynamic email subject with database names
+        DECLARE @DynamicSubject NVARCHAR(MAX) = 'Full-Text Catalog Blocking Alert - DB: ' + @DBListForSubject;
+        
+        -- Step 2: Check for blocking in the affected databases
+        -- Execute the blocking monitor procedure with the filtered databases
+        EXEC [dbo].[usp_BlockingMonitor]
+            @MinBlockedSessions = 1,              -- Detect any blocking
+            @WaitTimeThresholdSec = 15,           -- Lower threshold for Full-Text related blocking (15 seconds)
+            @FollowupWaitTimeThresholdSec = 300,  -- 5 minutes for follow-up
+            @EmailRecipients = '',				  -- Update with your email
+            @EmailOperator = 'SQLSupport',        -- Update with your operator name
+            @DBMailProfile = NULL,                -- Uses default mail profile
+            @SendEmail = 1,                       -- Send email alerts
+            @EmailSubject = @DynamicSubject,      -- Dynamic subject with DB names
+            @FollowupIntervalMins = 60,           -- 10 minutes between alerts
+            @DBName = @DBFilter,                  -- Filter only affected databases
+            @CustomMessage = @CustomMessage;      -- Include FTC details in the alert
+    END
+    ELSE
+    BEGIN
+        PRINT 'No active full-text catalog operations found.';
+        PRINT 'No need to check for full-text related blocking.';
+    END;
+    
+    -- Clean up
+    DROP TABLE #FullTextProgress;
+    DROP TABLE #AffectedDatabases;
+END;
+GO
