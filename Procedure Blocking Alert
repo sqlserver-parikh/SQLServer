@@ -11,8 +11,8 @@ CREATE OR ALTER PROCEDURE [dbo].[usp_BlockingMonitor]
     @SendEmail                  BIT = 1, -- Send email (1=Yes, 0=No)
 	@EmailSubject				VARCHAR(MAX) = 'DB Blocking Alert:',
     @FollowupIntervalMins       INT = 5,              -- Minimum time between follow-up emails in minutes
-    @DBName                     NVARCHAR(MAX) = 'msdb,tempdb',    -- Database names to filter on, comma-separated, NULL/''/all means all databases
-    @CustomMessage              NVARCHAR(MAX) = 'There is extensive blocking in database msdb, please follow runbook link'  -- Custom message to include in the alert email
+    @DBName                     NVARCHAR(MAX) = '',    -- Database names to filter on, comma-separated, NULL/''/all means all databases
+    @CustomMessage              NVARCHAR(MAX) = ''  -- Custom message to include in the alert email
 )AS
 BEGIN
     SET NOCOUNT ON;
