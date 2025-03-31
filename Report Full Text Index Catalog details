@@ -1,8 +1,11 @@
-CREATE OR ALTER PROCEDURE #usp_fulltextdetail
-    @CatalogName VARCHAR(MAX) = '',
+USE tempdb;
+GO
+
+CREATE OR ALTER PROCEDURE usp_fulltextdetail
+    @CatalogName VARCHAR(MAX) = NULL,
     @DBName NVARCHAR(128) = NULL,
     @ShowRebuildProgress BIT = 1,
-    @ShowFragmentationDetails BIT = 1
+    @ShowFragmentationDetails BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -17,11 +20,11 @@ BEGIN
         IndexedColumns NVARCHAR(MAX),
         ChangeTrackingState CHAR(1),
         IsEnabled BIT,
-        FragmentsCount INT,
-        IndexSizeMb DECIMAL(9,2),
-        IndexLargestFragmentMb DECIMAL(9,2),
-        IndexFragmentationSpaceMb DECIMAL(9,2),
-        IndexFragmentationPct DECIMAL(9,2)
+        FragmentsCount INT NULL,          -- Nullable when not showing fragmentation
+        IndexSizeMb DECIMAL(9,2) NULL,    -- Nullable when not showing fragmentation
+        IndexLargestFragmentMb DECIMAL(9,2) NULL,  -- Nullable when not showing fragmentation
+        IndexFragmentationSpaceMb DECIMAL(9,2) NULL,  -- Nullable when not showing fragmentation
+        IndexFragmentationPct DECIMAL(9,2) NULL  -- Nullable when not showing fragmentation
     );
 
     CREATE TABLE #RebuildProgress (
@@ -32,6 +35,7 @@ BEGIN
         MinutesPassed INT,
         HoursPassed INT,
         ItemCount INT,
+        IndexSizeMb DECIMAL(9,2),
         MergeStatus INT,
         PopulateCompletionAge INT,
         PopulateStatusCode INT,
@@ -39,7 +43,7 @@ BEGIN
     );
 
     DECLARE @CurrentDB NVARCHAR(128);
-    DECLARE @SQLMain NVARCHAR(MAX);  -- Changed to NVARCHAR(MAX) for larger queries
+    DECLARE @SQLMain NVARCHAR(MAX);
     DECLARE @SQLProgress NVARCHAR(MAX);
     DECLARE @SQLParams NVARCHAR(500);
 
@@ -61,7 +65,7 @@ BEGIN
         IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @CurrentDB AND state = 0)
         BEGIN
             BEGIN TRY
-                -- Main query with proper spacing after USE
+                -- Main query with conditional fragmentation details
                 SET @SQLMain = N'USE ' + QUOTENAME(@CurrentDB) + N'; ' + N'
                 IF EXISTS (SELECT 1 FROM sys.fulltext_catalogs)
                 BEGIN
@@ -69,8 +73,12 @@ BEGIN
                     BEGIN
                         RAISERROR(''Catalog "%s" not found in database ' + QUOTENAME(@CurrentDB) + N''', 16, 1, @CatalogName);
                         RETURN;
-                    END;
+                    END;'
 
+                -- Add fragmentation details only if @ShowFragmentationDetails = 1
+                IF @ShowFragmentationDetails = 1
+                BEGIN
+                    SET @SQLMain = @SQLMain + N'
                     WITH FragmentationDetails AS (
                         SELECT table_id,
                             COUNT(*) AS FragmentsCount,
@@ -103,10 +111,14 @@ BEGIN
                     INNER JOIN sys.columns c ON ftic.column_id = c.column_id AND ftic.[object_id] = c.[object_id]
                     WHERE (@CatalogName IS NULL OR ftc.name = @CatalogName)
                     GROUP BY t.schema_id, t.name, ftc.name, i.name, fti.change_tracking_state, fti.is_enabled,
-                        f.FragmentsCount, f.IndexSizeMb, f.largest_fragment_mb;
+                        f.FragmentsCount, f.IndexSizeMb, f.largest_fragment_mb;'
+                END
+              
+
+                SET @SQLMain = @SQLMain + N'
                 END';
 
-                -- Progress query with proper spacing after USE
+                -- Progress query (unchanged except for parameter list)
                 SET @SQLProgress = N'USE ' + QUOTENAME(@CurrentDB) + N'; ' + N'
                 IF @ShowRebuildProgress = 1 AND EXISTS (SELECT 1 FROM sys.fulltext_catalogs WHERE @CatalogName IS NULL OR name = @CatalogName)
                 BEGIN
@@ -137,22 +149,27 @@ BEGIN
                         DATEDIFF(MINUTE, @LastPopulatedTime, @CurrentTime),
                         DATEDIFF(HOUR, @LastPopulatedTime, @CurrentTime),
                         FULLTEXTCATALOGPROPERTY(name, ''ItemCount''),
+                        CONVERT(DECIMAL(9,2), FULLTEXTCATALOGPROPERTY(name, ''IndexSize'') / 1024.0),
                         FULLTEXTCATALOGPROPERTY(name, ''MergeStatus''),
                         FULLTEXTCATALOGPROPERTY(name, ''PopulateCompletionAge''),
                         FULLTEXTCATALOGPROPERTY(name, ''PopulateStatus''),
                         FULLTEXTCATALOGPROPERTY(name, ''ImportStatus'')
                     FROM sys.fulltext_catalogs
-                    WHERE @CatalogName IS NULL OR name = @CatalogName;
+                    WHERE (@CatalogName IS NULL OR name = @CatalogName)
+                        AND FULLTEXTCATALOGPROPERTY(name, ''PopulateStatus'') <> 0
+                        AND (FULLTEXTCATALOGPROPERTY(name, ''ItemCount'') > 10000 
+                             OR FULLTEXTCATALOGPROPERTY(name, ''IndexSize'') > 1024);
                 END';
 
-                SET @SQLParams = N'@CatalogName VARCHAR(MAX), @ShowRebuildProgress BIT';
+                SET @SQLParams = N'@CatalogName VARCHAR(MAX), @ShowRebuildProgress BIT, @ShowFragmentationDetails BIT';
 
                 -- Execute the main query
                 EXEC sp_executesql 
                     @SQLMain,
                     @SQLParams,
                     @CatalogName = @CatalogName,
-                    @ShowRebuildProgress = @ShowRebuildProgress;
+                    @ShowRebuildProgress = @ShowRebuildProgress,
+                    @ShowFragmentationDetails = @ShowFragmentationDetails;
 
                 -- Execute the progress query if requested
                 IF @ShowRebuildProgress = 1
@@ -161,7 +178,8 @@ BEGIN
                         @SQLProgress,
                         @SQLParams,
                         @CatalogName = @CatalogName,
-                        @ShowRebuildProgress = @ShowRebuildProgress;
+                        @ShowRebuildProgress = @ShowRebuildProgress,
+                        @ShowFragmentationDetails = @ShowFragmentationDetails;
                 END
             END TRY
             BEGIN CATCH
@@ -179,16 +197,18 @@ BEGIN
     IF EXISTS (SELECT 1 FROM #FullTextResults)
         SELECT * FROM #FullTextResults ORDER BY DatabaseName, FullTextCatalogName, TableName;
     ELSE
-        PRINT 'No full-text catalog data found matching the specified criteria.';
+        PRINT 'No full-text catalog data found matching the specified criteria (main results).';
 
-    IF @ShowRebuildProgress = 1 AND EXISTS (SELECT 1 FROM #RebuildProgress)
-        SELECT * FROM #RebuildProgress ORDER BY DatabaseName, FullTextCatalogName;
+    IF @ShowRebuildProgress = 1 
+    BEGIN
+        IF EXISTS (SELECT 1 FROM #RebuildProgress)
+            SELECT * FROM #RebuildProgress ORDER BY DatabaseName, FullTextCatalogName;
+        ELSE
+            PRINT 'No full-text catalog data found matching the rebuild progress criteria.';
+    END
 
     -- Clean up
     DROP TABLE #FullTextResults;
     DROP TABLE #RebuildProgress;
 END;
 GO
-
--- Sample calls
-EXEC #usp_fulltextdetail;
