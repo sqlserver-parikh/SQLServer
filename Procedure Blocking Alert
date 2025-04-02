@@ -7,6 +7,7 @@ CREATE OR ALTER PROCEDURE [dbo].[usp_BlockingMonitor]
     @FollowupWaitTimeThresholdSec INT = 400,          -- Follow-up wait time threshold in seconds
     @EmailRecipients            VARCHAR(MAX) = '',    -- Email recipients for the alert (NULL uses operator)
     @EmailOperator              VARCHAR(MAX) = 'SQLSupport',  -- If email is null then operator will be chosen for email
+	@CCRecipients				VARCHAR(MAX) = '',
     @DBMailProfile              VARCHAR(128) = NULL,  -- If Null default database mail profile is chosen
     @SendEmail                  BIT = 1, -- Send email (1=Yes, 0=No)
 	@EmailSubject				VARCHAR(MAX) = 'DB Blocking Alert:',
@@ -569,6 +570,7 @@ BEGIN
             EXEC msdb.dbo.sp_send_dbmail
                 @recipients = @EmailRecipients,
                 @profile_name = @EmailProfile,
+				@copy_recipients = @CCRecipients,
                 @subject = @Subject,
                 @body = @TableHTML,
                 @body_format = 'HTML';
