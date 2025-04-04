@@ -1,12 +1,12 @@
 CREATE OR ALTER PROCEDURE [dbo].[usp_PartitionMaintenance] 
     @TableName VARCHAR(128) = '', 
-    @CleanupOlderThan VARCHAR(10) = '2y',  -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y')
+    @CleanupOlderThan VARCHAR(10) = '3m',  -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y')
     @NextPartitionAfter VARCHAR(10) = '6m', -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y', '-3m')
-    @Execute BIT = 1,                       -- 0=Print commands only, 1=Execute commands
+    @Execute BIT = 0,                       -- 0=Print commands only, 1=Execute commands
     @FileGroupName VARCHAR(128) = 'PRIMARY', -- Target filegroup for new partitions
     @PartitionALIGNEDIndex BIT = 0,         -- 1=Show partition-aligned indexes report
     @AllPartitionTablesInfo BIT = 1,        -- 1=Show detailed partition information
-    @Cleanup BIT = 1,						-- 1=Enable cleanup of old partitions, 0=Skip cleanup
+    @Cleanup BIT = 0,						-- 1=Enable cleanup of old partitions, 0=Skip cleanup
 	@MergeRange BIT = 0,					--1= Enable merge ranges, best option to keep 0 and clean up, sometimes if multiple tables with one scheme/function than mergerage will block.
     @SlidingWindow BIT = 0                 -- 1=Enable creation of new partition boundaries, 0=Skip new boundaries
 AS
@@ -442,15 +442,17 @@ FROM sys.tables AS t
      LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
                                                         AND r.boundary_id = p.partition_number
 WHERE 1 = 1
-      AND t.name LIKE @TableName
-      AND i.type <= 1
-      AND (
-          -- Only include partition 1 if it has a boundary value less than @CleanupDate
-          (p.partition_number = 1 AND r.value IS NOT NULL AND r.value < @CleanupDate)
-          OR 
-          -- Include all other partitions with boundary values less than @CleanupDate
-          (p.partition_number > 1 AND r.value < @CleanupDate)
-      )
+    AND t.name LIKE @TableName
+	AND i.type <= 1
+    AND p.partition_number > 1  -- Exclude partition 1
+    AND r.value IS NOT NULL
+    AND r.value < @CleanupDate
+    AND p.partition_number < (
+        SELECT MAX(p2.partition_number) 
+        FROM sys.partitions p2 
+        INNER JOIN sys.indexes i2 ON p2.object_id = i2.object_id AND p2.index_id = i2.index_id
+        WHERE i2.object_id = i.object_id AND i2.index_id <= 1
+    )  -- Exclude the last partition
 ORDER BY t.name, 
          partition_number;            
             -- Get all unique tables that need switchout tables
