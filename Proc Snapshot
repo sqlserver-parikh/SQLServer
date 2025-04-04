@@ -3,15 +3,16 @@ GO
 
 CREATE OR ALTER PROCEDURE usp_DBSnapshot
 (
-    @dbname sysname = 'test',                              -- Database name to snapshot or restore
-    @SnapshotDrive varchar(512) = NULL,                    -- Optional: Specific drive/path for snapshots; if NULL, uses default backup directory
-    @DeleteOlderThanHours int = 168,                       -- Hours after which snapshots are dropped (default 168 = 1 week)
-    @Execute bit = 1,                                      -- 0 = Print only, 1 = Execute statements
-    @DropSnapshotOnly tinyint = 0,                         -- 0 = No drop, 1 = Drop all, 2 = Drop oldest, 3 = Drop newest
-    @RestoreSnapshot bit = 0,                              -- 0 = Create/manage snapshots, 1 = Restore latest snapshot
-    @SpecificSnapshotToRestore sysname = NULL,             -- Optional: Specific snapshot name to restore from; if NULL and @RestoreSnapshot = 1, uses latest
-    @DBSnapshotName sysname = NULL,                        -- Optional: Specific name for the snapshot; if NULL, uses timestamp-based naming
-    @Force bit = 1                                       -- 0 = Fail if snapshot exists with same name, 1 = Overwrite if snapshot exists
+    @dbname sysname = 'test',    -- Database name to snapshot or restore
+    @SnapshotDrive varchar(512) = NULL,                     -- Optional: Specific drive/path for snapshots; if NULL, uses default backup directory
+    @DeleteOlderThanHours int = 168,                        -- Hours after which snapshots are dropped (default 168 = 1 week)
+    @Execute bit = 1,                                        -- 0 = Print only, 1 = Execute statements
+    @DropSnapshotOnly tinyint = 0,                          -- 0 = No drop, 1 = Drop all, 2 = Drop oldest, 3 = Drop newest
+    @RestoreSnapshot bit = 1,                               -- 0 = Create/manage snapshots, 1 = Restore latest snapshot
+    @SpecificSnapshotToRestore sysname = NULL,              -- Optional: Specific snapshot name to restore from; if NULL and @RestoreSnapshot = 1, uses latest
+    @DBSnapshotName sysname = NULL,                         -- Optional: Specific name for the snapshot; if NULL, uses timestamp-based naming
+    @Force bit = 1,                                          -- 0 = Fail if snapshot exists with same name, 1 = Overwrite if snapshot exists
+    @ForceSingleUserRestore bit = 1                                  -- 0 = Don't set single user mode, 1 = Set single user mode with rollback immediate before restore
 )
 AS
 BEGIN
@@ -276,6 +277,14 @@ BEGIN
     IF @RestoreSnapshot = 1
     BEGIN
         SET @sql = N'';
+        DECLARE @snapshotToRestore sysname;
+        
+        -- Set single user mode if requested
+        IF @ForceSingleUserRestore = 1
+        BEGIN
+            SET @sql = N'ALTER DATABASE ' + QUOTENAME(@dbname) + 
+                      N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE;' + CHAR(13) + CHAR(10);
+        END
         
         IF @SpecificSnapshotToRestore IS NOT NULL
         BEGIN
@@ -288,23 +297,32 @@ BEGIN
                 RETURN;
             END
             
-            SET @sql = N'RESTORE DATABASE ' + QUOTENAME(@dbname) + 
-                      N' FROM DATABASE_SNAPSHOT = ' + QUOTENAME(@SpecificSnapshotToRestore);
+            SET @snapshotToRestore = @SpecificSnapshotToRestore;
         END
         ELSE
         BEGIN
-            SELECT TOP 1 @sql = N'RESTORE DATABASE ' + QUOTENAME(@dbname) + 
-                               N' FROM DATABASE_SNAPSHOT = ' + QUOTENAME(name)
+            SELECT TOP 1 @snapshotToRestore = name
             FROM sys.databases 
             WHERE source_database_id = DB_ID(@dbname)
             ORDER BY create_date DESC;
             
-            IF @sql IS NULL
+            IF @snapshotToRestore IS NULL
             BEGIN
                 SET @errorMsg = N'No snapshots found for database ' + @dbname + N' to restore from.';
                 RAISERROR(@errorMsg, 16, 1);
                 RETURN;
             END
+        END
+        
+        -- Fix: Use single quotes for snapshot name instead of QUOTENAME
+        SET @sql = @sql + N'RESTORE DATABASE ' + QUOTENAME(@dbname) + 
+                  N' FROM DATABASE_SNAPSHOT = ''' + @snapshotToRestore + ''';' + CHAR(13) + CHAR(10);
+                  
+        -- Add multi-user mode if we set single user before
+        IF @ForceSingleUserRestore = 1
+        BEGIN
+            SET @sql = @sql + N'ALTER DATABASE ' + QUOTENAME(@dbname) + 
+                      N' SET MULTI_USER;' + CHAR(13) + CHAR(10);
         END
 
         IF @Execute = 1
@@ -314,6 +332,19 @@ BEGIN
                 PRINT N'-- Successfully restored database from snapshot: ' + CHAR(13) + CHAR(10) + @sql;
             END TRY
             BEGIN CATCH
+                -- If we set it to single user but the restore failed, try to set it back to multi-user
+                IF @ForceSingleUserRestore = 1
+                BEGIN
+                    BEGIN TRY
+                        SET @sql = N'ALTER DATABASE ' + QUOTENAME(@dbname) + N' SET MULTI_USER;';
+                        EXEC sp_executesql @sql;
+                        PRINT N'-- Reverted database to multi-user mode after restore failure.';
+                    END TRY
+                    BEGIN CATCH
+                        PRINT N'-- WARNING: Unable to revert database to multi-user mode after restore failure.';
+                    END CATCH
+                END
+                
                 SET @errorMsg = N'Error restoring database from snapshot: ' + ERROR_MESSAGE();
                 RAISERROR(@errorMsg, 16, 1);
             END CATCH
@@ -341,7 +372,7 @@ BEGIN
             BEGIN
                 SET @sql = N'';
                 SELECT TOP 1 @sql = N'RESTORE DATABASE ' + QUOTENAME(@dbname) + 
-                                   N' FROM DATABASE_SNAPSHOT = ' + QUOTENAME(name)
+                                   N' FROM DATABASE_SNAPSHOT = ''' + name + ''''
                 FROM sys.databases 
                 WHERE source_database_id = DB_ID(@dbname)
                 ORDER BY create_date DESC;
