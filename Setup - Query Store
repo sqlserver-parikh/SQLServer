@@ -1,49 +1,265 @@
+USE tempdb
+GO
 CREATE OR ALTER PROCEDURE usp_QueryStore 
-    @dbname SYSNAME = 'DBASupport', @maxsize int = 512, @Rollback bit = 0
+    @dbname SYSNAME = NULL, 
+    @maxsize INT = 1000,               -- For SQL Server 2019+, default is 1000MB; For older versions, default is 100MB
+    @interval_length INT = 15,         -- Default is 60 minutes
+    @retention_days INT = 15,          -- Default is 30 days
+    @max_plans_per_query INT = 50,    -- Default is 200 plans
+    @query_capture_mode VARCHAR(20) = 'AUTO', -- AUTO/ALL/NONE
+    @data_flush_interval INT = 900,    -- Default is 900 seconds (15 minutes)
+    @Rollback BIT = 0,
+	@Debug BIT = 0
 AS
+/* 
+PARAMETER DESCRIPTIONS:
+
+1. @maxsize (MAX_STORAGE_SIZE_MB):
+   - Controls the maximum size of Query Store data in megabytes
+   - Default: 1000MB for SQL Server 2019+, 100MB for earlier versions
+   - When this limit is reached, Query Store automatically changes to read-only mode
+   - Recommended: Size should be set based on database workload and available storage
+
+2. @interval_length (INTERVAL_LENGTH_MINUTES):
+   - Defines the time window for aggregating runtime statistics
+   - Valid values: 1, 5, 10, 15, 30, 60, 1440 minutes
+   - Default: 60 minutes
+   - Smaller intervals provide more granular data but consume more storage
+   - Larger intervals save space but provide less detailed performance insights
+
+3. @retention_days (STALE_QUERY_THRESHOLD_DAYS):
+   - Specifies how long Query Store keeps historical data
+   - Valid range: 1-365 days
+   - Default: 30 days
+   - Older data is automatically removed when exceeding this threshold
+   - Balance between historical data needs and storage constraints
+
+4. @max_plans_per_query:
+   - Limits the number of execution plans stored per query
+   - Valid range: 1-200
+   - Default: 200
+   - Helps control storage usage for queries with many plan variations
+   - Lower values save space but might miss some plan variations
+
+5. @query_capture_mode:
+   - Determines which queries are tracked by Query Store
+   - Values:
+     * AUTO: Captures relevant queries based on execution count and resource consumption
+     * ALL: Captures all queries
+     * NONE: Stops capturing new queries
+   - Default: AUTO
+   - AUTO is recommended for most scenarios to balance insights and overhead
+
+6. @data_flush_interval (DATA_FLUSH_INTERVAL_SECONDS):
+   - Controls how often Query Store data is written from memory to disk
+   - Default: 900 seconds (15 minutes)
+   - Lower values reduce data loss risk but increase I/O
+   - Higher values improve performance but increase potential data loss in crashes
+
+USAGE EXAMPLES:
+
+-- Enable Query Store with default settings
+EXEC usp_QueryStore @dbname = 'YourDB';
+
+-- Enable with custom settings for heavy workload
+EXEC usp_QueryStore 
+    @dbname = 'YourDB',
+    @maxsize = 2000,
+    @interval_length = 30,
+    @retention_days = 45,
+    @query_capture_mode = 'ALL';
+
+-- Enable with minimal storage impact
+EXEC usp_QueryStore 
+    @dbname = 'YourDB',
+    @maxsize = 500,
+    @interval_length = 60,
+    @retention_days = 15,
+    @max_plans_per_query = 50,
+    @query_capture_mode = 'AUTO';
+
+-- Disable Query Store
+EXEC usp_QueryStore @dbname = 'YourDB', @Rollback = 1;
+*/
+
 BEGIN
-SET NOCOUNT ON;
+    SET NOCOUNT ON;
+    
+    -- Parameter validation
+    IF @interval_length NOT IN (1, 5, 10, 15, 30, 60, 1440)
+    BEGIN
+        RAISERROR('Invalid @interval_length. Valid values are: 1, 5, 10, 15, 30, 60, 1440 (minutes)', 16, 1);
+        RETURN;
+    END
+
+    IF @retention_days NOT BETWEEN 1 AND 365
+    BEGIN
+        RAISERROR('@retention_days must be between 1 and 365', 16, 1);
+        RETURN;
+    END
+
+    IF @max_plans_per_query NOT BETWEEN 1 AND 200
+    BEGIN
+        RAISERROR('@max_plans_per_query must be between 1 and 200', 16, 1);
+        RETURN;
+    END
+
+    IF @maxsize NOT BETWEEN 10 AND 10000
+    BEGIN
+        RAISERROR('@maxsize must be between 10 and 10000 MB', 16, 1);
+        RETURN;
+    END
+
+    IF UPPER(@query_capture_mode) NOT IN ('ALL', 'AUTO', 'NONE')
+    BEGIN
+        RAISERROR('Invalid @query_capture_mode. Valid values are: ALL, AUTO, NONE', 16, 1);
+        RETURN;
+    END
+
+    -- Table variable to store databases to process
+    DECLARE @DatabasesToProcess TABLE (
+        DatabaseName SYSNAME,
+        ProcessOrder INT IDENTITY(1,1)
+    );
+    
+    -- If @dbname is null, empty, or 'all', get all user databases
+    IF @dbname IS NULL OR @dbname = '' OR LOWER(@dbname) = 'all'
+    BEGIN
+        INSERT INTO @DatabasesToProcess (DatabaseName)
+        SELECT name 
+        FROM sys.databases 
+        WHERE database_id > 4  -- Exclude system databases
+        AND name NOT IN ('rdsadmin','ReportServer', 'ReportServerTempDB','Distribution')
+        AND state_desc = 'ONLINE'  -- Only include online databases
+        AND is_read_only = 0;  -- Exclude read-only databases
+    END
+    ELSE
+    BEGIN
+        INSERT INTO @DatabasesToProcess (DatabaseName)
+        VALUES (@dbname);
+    END
+
+    DECLARE @CurrentDB SYSNAME;
     DECLARE @sql NVARCHAR(MAX);
-    SET @sql = N'ALTER DATABASE [' + @dbname + N'] SET QUERY_STORE = ON
-    ALTER DATABASE [' + @dbname + N'] SET QUERY_STORE
-	(OPERATION_MODE = READ_WRITE, INTERVAL_LENGTH_MINUTES = 15, MAX_STORAGE_SIZE_MB = ' + convert(varchar(4), @maxsize ) + ', CLEANUP_POLICY = (STALE_QUERY_THRESHOLD_DAYS = 15))
-    ALTER DATABASE [' + @dbname + N'] SET QUERY_STORE CLEAR; 
-    USE ' + QUOTENAME(@dbname) + N'; 
-    SELECT
-       DB_NAME() DatabaseName,
-       actual_state_desc ActualState,
-       FORMAT(current_storage_size_mb, ''N0'') CurrentStorageSize_MB,
-       FORMAT(max_storage_size_mb, ''N0'') MaxStorageSize_MB,
-       CAST(current_storage_size_mb AS FLOAT)/CAST(max_storage_size_mb AS FLOAT) TotalUtilization_PCT,
-       CASE
-          WHEN readonly_reason = 1 THEN ''Database in read-only mode''
-          WHEN readonly_reason = 2 THEN ''Database in single-user mode''
-          WHEN readonly_reason = 4 THEN ''Database in emergency mode''
-          WHEN readonly_reason = 8 THEN ''Database is secondary replica''
-          WHEN readonly_reason = 65536 THEN ''Query Store has reached the size limit set by the MAX_STORAGE_SIZE_MB option''
-          WHEN readonly_reason = 131072 THEN ''The number of different statements in Query Store has reached the internal memory limit''
-          WHEN readonly_reason = 262144 THEN ''Size of in-memory items waiting to be persisted on disk has reached the internal memory limit''
-          WHEN readonly_reason = 524288 THEN ''User database has reached disk size limit''
-          ELSE ''N\A''
-       END as ReadOnlyReason,
-       stale_query_threshold_days RetentionDays,
-       size_based_cleanup_mode_desc CleanupMode,
-       flush_interval_seconds/60 FlushInterval, 
-       max_plans_per_query MaxPlanPerQuery
-    FROM ' + QUOTENAME(@dbname) + N'.sys.database_query_store_options';
+    DECLARE @CurrentProcessOrder INT = 1;
+    DECLARE @MaxProcessOrder INT = (SELECT MAX(ProcessOrder) FROM @DatabasesToProcess);
+    DECLARE @QueryStoreState INT;
+    DECLARE @ErrorMessage NVARCHAR(1000);
 
-	if @Rollback = 0
-	begin
-    PRINT @sql;
-    EXEC sp_executesql @sql;
+    WHILE @CurrentProcessOrder <= @MaxProcessOrder
+    BEGIN
+        SELECT @CurrentDB = DatabaseName
+        FROM @DatabasesToProcess
+        WHERE ProcessOrder = @CurrentProcessOrder;
 
-    PRINT N'Query Store is now enabled for database - ' + @dbname;
-	end
-	else begin 
-SET @sql = 'ALTER DATABASE [' + @dbname + '] SET QUERY_STORE = OFF;'
-EXEC sp_executesql
-     @sql;
-PRINT 'Query Store is now disabled for database - ' + @dbname
-end
+        -- Check if database exists
+        IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @CurrentDB)
+        BEGIN
+            SET @ErrorMessage = 'Database [' + @CurrentDB + '] does not exist.';
+            RAISERROR(@ErrorMessage, 11, 1);
+            GOTO NextDatabase;
+        END
+
+        -- Check current Query Store state
+        SET @sql = N'
+        SELECT @QueryStoreState = actual_state
+        FROM [' + @CurrentDB + '].sys.database_query_store_options;'
+
+        EXEC sp_executesql 
+            @sql,
+            N'@QueryStoreState INT OUTPUT',
+            @QueryStoreState OUTPUT;
+
+        -- If Rollback is requested
+        IF @Rollback = 1
+        BEGIN
+            IF @QueryStoreState = 0  -- If already OFF
+            BEGIN
+                PRINT 'Query Store is already disabled for database - ' + @CurrentDB;
+            END
+            ELSE
+            BEGIN
+                SET @sql = 'ALTER DATABASE [' + @CurrentDB + '] SET QUERY_STORE = OFF;';
+                EXEC sp_executesql @sql;
+                PRINT 'Query Store is now disabled for database - ' + @CurrentDB;
+            END
+        END
+        ELSE
+        BEGIN
+   IF @QueryStoreState = 2  -- If already ON
+    BEGIN
+        SET @sql = N'
+        ALTER DATABASE [' + @CurrentDB + N'] SET QUERY_STORE (
+            OPERATION_MODE = READ_WRITE,
+            CLEANUP_POLICY = (
+                STALE_QUERY_THRESHOLD_DAYS = ' + CONVERT(VARCHAR(3), @retention_days) + '),
+            MAX_STORAGE_SIZE_MB = ' + CONVERT(VARCHAR(5), @maxsize) + ',
+            INTERVAL_LENGTH_MINUTES = ' + CONVERT(VARCHAR(4), @interval_length) + ',
+            QUERY_CAPTURE_MODE = ' + @query_capture_mode + ',
+            MAX_PLANS_PER_QUERY = ' + CONVERT(VARCHAR(3), @max_plans_per_query) + ',
+            DATA_FLUSH_INTERVAL_SECONDS = ' + CONVERT(VARCHAR(5), @data_flush_interval) + '
+        );'
+		IF @Debug = 1
+		PRINT @SQL
+        EXEC sp_executesql @sql;
+        PRINT 'Query Store settings updated for database - ' + @CurrentDB;
+    END
+    ELSE
+    BEGIN
+        SET @sql = N'
+        ALTER DATABASE [' + @CurrentDB + N'] SET QUERY_STORE = ON;
+        ALTER DATABASE [' + @CurrentDB + N'] SET QUERY_STORE (
+            OPERATION_MODE = READ_WRITE,
+            CLEANUP_POLICY = (
+                STALE_QUERY_THRESHOLD_DAYS = ' + CONVERT(VARCHAR(3), @retention_days) + '
+            ),
+            MAX_STORAGE_SIZE_MB = ' + CONVERT(VARCHAR(5), @maxsize) + ',
+            INTERVAL_LENGTH_MINUTES = ' + CONVERT(VARCHAR(4), @interval_length) + ',
+            QUERY_CAPTURE_MODE = ' + @query_capture_mode + ',
+            MAX_PLANS_PER_QUERY = ' + CONVERT(VARCHAR(3), @max_plans_per_query) + ',
+            DATA_FLUSH_INTERVAL_SECONDS = ' + CONVERT(VARCHAR(5), @data_flush_interval) + '
+        );'
+		IF @Debug = 1
+		PRINT @SQL
+        EXEC sp_executesql @sql;
+
+                -- Get and display current Query Store status
+                SET @sql = N'
+                SELECT
+                    ''' + @CurrentDB + ''' AS DatabaseName,
+                    actual_state_desc AS ActualState,
+                    FORMAT(current_storage_size_mb, ''N0'') AS CurrentStorageSize_MB,
+                    FORMAT(max_storage_size_mb, ''N0'') AS MaxStorageSize_MB,
+                    CAST(current_storage_size_mb AS FLOAT)/CAST(max_storage_size_mb AS FLOAT) AS TotalUtilization_PCT,
+                    CASE
+                        WHEN readonly_reason = 1 THEN ''Database in read-only mode''
+                        WHEN readonly_reason = 2 THEN ''Database in single-user mode''
+                        WHEN readonly_reason = 4 THEN ''Database in emergency mode''
+                        WHEN readonly_reason = 8 THEN ''Database is secondary replica''
+                        WHEN readonly_reason = 65536 THEN ''Query Store has reached the size limit set by the MAX_STORAGE_SIZE_MB option''
+                        WHEN readonly_reason = 131072 THEN ''The number of different statements in Query Store has reached the internal memory limit''
+                        WHEN readonly_reason = 262144 THEN ''Size of in-memory items waiting to be persisted on disk has reached the internal memory limit''
+                        WHEN readonly_reason = 524288 THEN ''User database has reached disk size limit''
+                        ELSE ''N/A''
+                    END as ReadOnlyReason,
+                    stale_query_threshold_days AS RetentionDays,
+                    size_based_cleanup_mode_desc AS CleanupMode,
+                    flush_interval_seconds/60 AS FlushInterval,
+                    max_plans_per_query AS MaxPlanPerQuery,
+                    query_capture_mode_desc AS QueryCaptureMode
+                FROM [' + @CurrentDB + N'].sys.database_query_store_options;'
+	
+	IF @Debug = 1
+		PRINT @SQL
+
+                EXEC sp_executesql @sql;
+                PRINT 'Query Store is now enabled for database - ' + @CurrentDB;
+            END
+        END
+
+        NextDatabase:
+        SET @CurrentProcessOrder += 1;
+    END
 END;
 GO
+usp_QueryStore
