@@ -1,0 +1,265 @@
+USE tempdb
+GO
+CREATE OR ALTER PROCEDURE [dbo].[usp_CPUAlert]
+(
+    @ZScoreThreshold FLOAT = 2.0,       -- Default Z-Score threshold for alerts
+    @SampleMinutes INT = 180,             -- How many minutes of current data to analyze
+    @LogToErrorLog BIT = 1,             -- Whether to log alerts to SQL Server error log
+    @IgnoreSystemIdleTime BIT = 1,      -- Whether to focus on SQL+Other CPU vs including idle time
+    @RetentionDays INT = 90             -- How long to keep data for historical analysis
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Ensure we have CPU usage data by calling the existing procedure
+    -- This will populate tblCPUUsage if it doesn't exist or add new data
+
+	   BEGIN TRY
+        EXEC [dbo].[usp_CPUUsage] @LogToTable = 1, @retentiondays = @RetentionDays;
+    END TRY
+    BEGIN CATCH
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+        RAISERROR('Failed to execute usp_CPUUsage. Make sure it exists before running this procedure. 
+Original error: %s
+Reference: https://github.com/sqlserver-parikh/SQLServer/blob/master/Procedure%%20CPU%%20Usage.sql', 
+            16, 1, @ErrorMessage);
+        RETURN;
+    END CATCH;
+
+            -- Create a table to store alert details if it doesn't exist
+        IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblCPUAlerts]') AND type in (N'U'))
+        BEGIN
+            CREATE TABLE [dbo].[tblCPUAlerts](
+                [AlertID] [int] IDENTITY(1,1) PRIMARY KEY,
+                [AlertTime] [datetime] NOT NULL,
+                [CurrentCPUUsage] [float] NOT NULL,
+                [MaxZScore] [float] NOT NULL,
+                [PeriodType] [varchar](20) NOT NULL,
+                [PeriodAvg] [float] NOT NULL,
+                [PeriodStdDev] [float] NOT NULL,
+                [AlertMessage] [nvarchar](2000) NOT NULL
+            );
+        END
+    -- Create temp table for current CPU stats
+    CREATE TABLE #CurrentCPU
+    (
+        SQLCPUUsage INT,
+        IdleProcess INT,
+        RestCPUUsage INT,
+        EffectiveCPUUsage INT,  -- Will be SQL+Rest or just SQL based on @IgnoreSystemIdleTime
+        RunTime DATETIME
+    );
+    
+    -- Create temp table for historical stats by period
+    CREATE TABLE #HistoricalStats
+    (
+        PeriodType VARCHAR(20),  -- 'Daily', 'Weekly', 'Monthly'
+        AvgCPUUsage FLOAT,
+        StdDevCPUUsage FLOAT
+    );
+    
+    -- Current time variables
+    DECLARE @CurrentTime DATETIME = GETDATE();
+    DECLARE @SampleStartTime DATETIME = DATEADD(MINUTE, -@SampleMinutes, @CurrentTime);
+    
+    -- Get current CPU usage for analysis period (last @SampleMinutes)
+    INSERT INTO #CurrentCPU
+    SELECT 
+        SQLCPUUsage,
+        IdleProcess,
+        RestCPUUsage,
+        CASE WHEN @IgnoreSystemIdleTime = 1 
+             THEN SQLCPUUsage + RestCPUUsage 
+             ELSE SQLCPUUsage END AS EffectiveCPUUsage,
+        RunTime
+    FROM [dbo].[tblCPUUsage]
+    WHERE RunTime BETWEEN @SampleStartTime AND @CurrentTime;
+    
+    -- Calculate current CPU metrics
+    DECLARE @CurrentAvgCPU FLOAT;
+    
+    SELECT @CurrentAvgCPU = AVG(EffectiveCPUUsage)
+    FROM #CurrentCPU;
+    
+    -- Insert Daily stats (same hours in the past days)
+    INSERT INTO #HistoricalStats (PeriodType, AvgCPUUsage, StdDevCPUUsage)
+    SELECT 
+        'Daily' AS PeriodType,
+        AVG(CASE WHEN @IgnoreSystemIdleTime = 1 
+                 THEN SQLCPUUsage + RestCPUUsage 
+                 ELSE SQLCPUUsage END) AS AvgCPUUsage,
+        ISNULL(STDEV(CASE WHEN @IgnoreSystemIdleTime = 1 
+                          THEN SQLCPUUsage + RestCPUUsage 
+                          ELSE SQLCPUUsage END), 1) AS StdDevCPUUsage
+    FROM [dbo].[tblCPUUsage]
+    WHERE 
+        -- Same hour range over past days
+        DATEPART(HOUR, RunTime) = DATEPART(HOUR, @CurrentTime) 
+        AND DATEPART(MINUTE, RunTime) BETWEEN 
+            DATEPART(MINUTE, @SampleStartTime) AND DATEPART(MINUTE, @CurrentTime)
+        AND RunTime < DATEADD(HOUR, -24, @CurrentTime) -- Exclude current day
+        AND RunTime > DATEADD(DAY, -@RetentionDays, @CurrentTime); -- Within retention period
+    
+    -- Insert Weekly stats (same day of week)
+    INSERT INTO #HistoricalStats (PeriodType, AvgCPUUsage, StdDevCPUUsage)
+    SELECT 
+        'Weekly' AS PeriodType,
+        AVG(CASE WHEN @IgnoreSystemIdleTime = 1 
+                 THEN SQLCPUUsage + RestCPUUsage 
+                 ELSE SQLCPUUsage END) AS AvgCPUUsage,
+        ISNULL(STDEV(CASE WHEN @IgnoreSystemIdleTime = 1 
+                          THEN SQLCPUUsage + RestCPUUsage 
+                          ELSE SQLCPUUsage END), 1) AS StdDevCPUUsage
+    FROM [dbo].[tblCPUUsage]
+    WHERE 
+        -- Same day of week, same hour range
+        DATEPART(WEEKDAY, RunTime) = DATEPART(WEEKDAY, @CurrentTime)
+        AND DATEPART(HOUR, RunTime) = DATEPART(HOUR, @CurrentTime)
+        AND RunTime < DATEADD(DAY, -7, @CurrentTime) -- Exclude current week
+        AND RunTime > DATEADD(DAY, -@RetentionDays, @CurrentTime); -- Within retention period
+    
+    -- Insert Monthly stats (same day of month)
+    INSERT INTO #HistoricalStats (PeriodType, AvgCPUUsage, StdDevCPUUsage)
+    SELECT 
+        'Monthly' AS PeriodType,
+        AVG(CASE WHEN @IgnoreSystemIdleTime = 1 
+                 THEN SQLCPUUsage + RestCPUUsage 
+                 ELSE SQLCPUUsage END) AS AvgCPUUsage,
+        ISNULL(STDEV(CASE WHEN @IgnoreSystemIdleTime = 1 
+                          THEN SQLCPUUsage + RestCPUUsage 
+                          ELSE SQLCPUUsage END), 1) AS StdDevCPUUsage
+    FROM [dbo].[tblCPUUsage]
+    WHERE 
+        -- Same day of month, same hour range 
+        DATEPART(DAY, RunTime) = DATEPART(DAY, @CurrentTime)
+        AND DATEPART(HOUR, RunTime) = DATEPART(HOUR, @CurrentTime)
+        AND RunTime < DATEADD(MONTH, -1, @CurrentTime) -- Exclude current month
+        AND RunTime > DATEADD(DAY, -@RetentionDays, @CurrentTime); -- Within retention period
+    
+    -- Full 24-hour baseline (all hours)
+    INSERT INTO #HistoricalStats (PeriodType, AvgCPUUsage, StdDevCPUUsage)
+    SELECT 
+        '24Hours' AS PeriodType,
+        AVG(CASE WHEN @IgnoreSystemIdleTime = 1 
+                 THEN SQLCPUUsage + RestCPUUsage 
+                 ELSE SQLCPUUsage END) AS AvgCPUUsage,
+        ISNULL(STDEV(CASE WHEN @IgnoreSystemIdleTime = 1 
+                          THEN SQLCPUUsage + RestCPUUsage 
+                          ELSE SQLCPUUsage END), 1) AS StdDevCPUUsage
+    FROM [dbo].[tblCPUUsage]
+    WHERE 
+        RunTime > DATEADD(DAY, -1, @CurrentTime) -- Last 24 hours
+        AND RunTime < @SampleStartTime; -- Exclude current analysis window
+    
+    -- Calculate z-scores for each period
+    SELECT 
+        PeriodType,
+        AvgCPUUsage,
+        StdDevCPUUsage,
+        (@CurrentAvgCPU - AvgCPUUsage) / NULLIF(StdDevCPUUsage, 0) AS ZScore
+    INTO #ZScores
+    FROM #HistoricalStats;
+    
+    -- Determine if any period exceeds threshold
+    DECLARE @MaxZScore FLOAT;
+    DECLARE @MaxZScorePeriod VARCHAR(20);
+    DECLARE @AlertMessage NVARCHAR(2000);
+    
+    SELECT TOP 1 
+        @MaxZScore = ZScore,
+        @MaxZScorePeriod = PeriodType
+    FROM #ZScores
+    WHERE ABS(ZScore) > @ZScoreThreshold
+    ORDER BY ABS(ZScore) DESC;
+    
+    -- If we have at least one period with z-score above threshold, generate alert
+    IF @MaxZScore IS NOT NULL
+    BEGIN
+       
+        -- Format the alert message
+        SET @AlertMessage = 'CPU ALERT: Current CPU usage (' + 
+                         CAST(@CurrentAvgCPU AS VARCHAR(10)) + 
+                         '%) is abnormal with Z-Score of ' + 
+                         CAST(@MaxZScore AS VARCHAR(10)) + 
+                         ' compared to ' + @MaxZScorePeriod + 
+                         ' average (' + 
+                         CAST((SELECT AvgCPUUsage FROM #ZScores WHERE PeriodType = @MaxZScorePeriod) AS VARCHAR(10)) + 
+                         '%). This indicates ' + 
+                         CASE WHEN @MaxZScore > 0 THEN 'higher' ELSE 'lower' END + 
+                         ' than normal CPU activity.';
+                         
+        -- Log to SQL Server error log if requested
+        IF @LogToErrorLog = 1
+        BEGIN
+            RAISERROR(@AlertMessage, 10, 1) WITH LOG;
+        END
+        
+        -- Always log to our alerts table
+        INSERT INTO [dbo].[tblCPUAlerts] (
+            AlertTime, 
+            CurrentCPUUsage, 
+            MaxZScore, 
+            PeriodType, 
+            PeriodAvg, 
+            PeriodStdDev, 
+            AlertMessage
+        )
+        SELECT 
+            @CurrentTime,
+            @CurrentAvgCPU,
+            @MaxZScore,
+            @MaxZScorePeriod,
+            AvgCPUUsage,
+            StdDevCPUUsage,
+            @AlertMessage
+        FROM #ZScores 
+        WHERE PeriodType = @MaxZScorePeriod;
+        
+        -- Return alert details
+        SELECT 
+            'ALERT GENERATED' AS Status,
+            @CurrentTime AS AlertTime,
+            @CurrentAvgCPU AS CurrentCPUUsage,
+            @MaxZScore AS MaxZScore,
+            @MaxZScorePeriod AS PeriodType,
+            (SELECT AvgCPUUsage FROM #ZScores WHERE PeriodType = @MaxZScorePeriod) AS PeriodAvgCPU,
+            (SELECT StdDevCPUUsage FROM #ZScores WHERE PeriodType = @MaxZScorePeriod) AS PeriodStdDev,
+            @AlertMessage AS AlertMessage;
+    END
+    ELSE
+    BEGIN
+        -- Return non-alert status
+        SELECT 
+            'NO ALERT' AS Status,
+            @CurrentTime AS CheckTime,
+            @CurrentAvgCPU AS CurrentCPUUsage,
+            (SELECT MAX(ABS(ZScore)) FROM #ZScores) AS MaxZScore,
+            @ZScoreThreshold AS Threshold;
+    END
+    
+	--select * from #CurrentCPU
+	--select * from #HistoricalStats
+	--select * from #ZScores
+    -- Clean up temp tables
+    DROP TABLE #CurrentCPU;
+    DROP TABLE #HistoricalStats;
+    DROP TABLE #ZScores;
+    
+    -- Clean up old alerts
+    DELETE FROM [dbo].[tblCPUAlerts]
+    WHERE AlertTime < DATEADD(DAY, -@RetentionDays, GETDATE());
+END
+GO
+
+-- Example usage 1: Check with default threshold (Z-Score > 2.0)
+EXEC [dbo].[usp_CPUAlert]
+GO
+
+-- Example usage 2: More sensitive threshold (Z-Score > 1.5) 
+-- EXEC [dbo].[usp_CPUAlert] @ZScoreThreshold = 1.5
+-- GO
+
+-- Example usage 3: Don't log to error log, just check and return status
+-- EXEC [dbo].[usp_CPUAlert] @LogToErrorLog = 0
+-- GO
