@@ -1,4 +1,4 @@
-USE msdb;
+
 SELECT collection_time,
        [dd hh:mm:ss.mss],
  --     ,Left(cast(sql_text as varchar(max)),50) SQLText 
