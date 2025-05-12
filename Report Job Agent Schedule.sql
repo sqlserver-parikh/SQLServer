@@ -2,9 +2,9 @@ USE tempdb
 GO
 CREATE OR ALTER PROCEDURE usp_AgentJobReport
 (
-    @jStatus varchar(128) = 'enabled' --Enabled, Disabled, ALL
-    , @jIsScheduled varchar(128) = 'Yes' --Yes, No, ALL
-    , @ShowOnlyFailedJobsInPast24Hours bit = 1
+    @jStatus varchar(128) = 'ALL' --Enabled, Disabled, ALL
+    , @jIsScheduled varchar(128) = 'ALL' --Yes, No, ALL
+    , @ShowOnlyFailedJobsInPast24Hours bit = 0
     , @ShowOnlyFailedJobsInPast7Days bit = 0
     , @ShowOnlyFailedJobsInPast30Days bit = 0
     , @jobname varchar(128) = NULL
