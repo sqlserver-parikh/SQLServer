@@ -3,10 +3,10 @@ GO
 CREATE OR ALTER PROCEDURE usp_BackupReport
 (
     @DbNames NVARCHAR(MAX) = '' -- NULL: All DBs
-  , @BackupType CHAR(1) = 'L'   -- D: Full, L: Log, I: Incremental, NULL: All backup types
+  , @BackupType CHAR(1) = NULL   -- D: Full, L: Log, I: Incremental, NULL: All backup types
   , @LookBackDays INT = 7  -- Must be > 0
   , @MinBackupSizeMB INT = 0 -- 0 will show all backups 1024 will show all backups > than 1GB in size
-  , @BackupGrowthReport BIT = 1 --If this is 1 then only @dbname parameter is used others are not used
+  , @BackupGrowthReport BIT = 0 --If this is 1 then only @dbname parameter is used others are not used
 )
 AS
 BEGIN
