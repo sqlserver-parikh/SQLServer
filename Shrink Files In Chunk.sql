@@ -8,7 +8,9 @@ CREATE OR ALTER PROCEDURE dbo.usp_BatchShrinkFiles
     @FileName varchar(128) = '',    -- Specific filename, 'ALL' Or Empty '' Or NULL for all files  
     @Drive varchar(128) = '',       -- Drive or mount point to target, 'ALL' Or Empty '' Or NULL for all drives  
     @Execute bit = 1,               -- 1 = execute commands, 0 = print only  
-    @LockTimeout int = 180000       -- Lock timeout in milliseconds (default 3 minutes)
+    @LockTimeout int = 180000,      -- Lock timeout in milliseconds (default 3 minutes)
+    @TimeLimit int = 600,           -- Each file will be shrink for max 10mins
+    @LogTable bit = 1             -- 0 = don't create/log to table, 1 = create and log to table
 AS  
 BEGIN  
     SET NOCOUNT ON;  
@@ -23,6 +25,9 @@ BEGIN
     DECLARE @CurrentFreeSpace DECIMAL(20, 2); -- Free space after current shrink  
     DECLARE @FinalFreeSpace DECIMAL(20, 2);   -- Free space after complete batch  
     DECLARE @SpaceUsedMB DECIMAL(20, 2);      -- Space used in MB  
+    DECLARE @IStartTime datetime;
+
+    SET @IStartTime = GETDATE();
       
     -- Logging variables  
     DECLARE @LogID BIGINT;  
@@ -40,45 +45,48 @@ BEGIN
         ELSE @FileName   
     END;  
   
-    -- Create logging table if it doesn't exist  
-    IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblShrinkFileLog]') AND type in (N'U'))  
-    BEGIN  
-        CREATE TABLE [dbo].[tblShrinkFileLog] (  
-            [LogID] [bigint] IDENTITY(1,1) NOT NULL,  
-            [DatabaseName] [varchar](128) NOT NULL,  
-            [FileName] [varchar](128) NOT NULL,  
-            [PhysicalName] [varchar](512) NOT NULL,  
-            [ShrinkStartTime] [datetime2](7) NOT NULL,  
-            [ShrinkEndTime] [datetime2](7) NULL,  
-            [DurationSeconds] [decimal](10,2) NULL,  
-            [InitialSize_MB] [decimal](20,2) NOT NULL,  
-            [FinalSize_MB] [decimal](20,2) NULL,  
-            [TargetSize_MB] [decimal](20,2) NOT NULL,  
-            [ShrinkIncrement_MB] [int] NOT NULL,  
-            [TargetFreeSpace_Pct] [int] NOT NULL,  
-            [MaxFreeSpace_MB] [int] NOT NULL,  
-            [InitialFreeSpace_MB] [decimal](20,2) NULL,  
-            [CurrentFreeSpace_MB] [decimal](20,2) NULL,  
-            [FinalFreeSpace_MB] [decimal](20,2) NULL,  
-            [ShrinkCommand] [nvarchar](max) NOT NULL,  
-            [ExecuteMode] [bit] NOT NULL,  
-            [Status] [varchar](20) NOT NULL DEFAULT 'InProgress',  
-            [ErrorMessage] [nvarchar](max) NULL,  
-            [CreatedDate] [datetime2](7) NOT NULL DEFAULT GETDATE(),  
-            CONSTRAINT [PK_tblShrinkFileLog] PRIMARY KEY CLUSTERED ([LogID] ASC)  
-        );  
-          
-        -- Create indexes for better query performance  
-        CREATE NONCLUSTERED INDEX [IX_tblShrinkFileLog_DatabaseName] ON [dbo].[tblShrinkFileLog] ([DatabaseName]);  
-        CREATE NONCLUSTERED INDEX [IX_tblShrinkFileLog_ShrinkStartTime] ON [dbo].[tblShrinkFileLog] ([ShrinkStartTime]);  
-        CREATE NONCLUSTERED INDEX [IX_tblShrinkFileLog_Status] ON [dbo].[tblShrinkFileLog] ([Status]);  
-          
-        PRINT '-- tblShrinkFileLog table created successfully with indexes.';  
-    END  
-    ELSE  
-    BEGIN  
-        PRINT '-- tblShrinkFileLog table already exists.';  
-    END  
+    -- Create logging table if it doesn't exist and @LogTable = 1  
+    IF @LogTable = 1
+    BEGIN
+        IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblShrinkFileLog]') AND type in (N'U'))  
+        BEGIN  
+            CREATE TABLE [dbo].[tblShrinkFileLog] (  
+                [LogID] [bigint] IDENTITY(1,1) NOT NULL,  
+                [DatabaseName] [varchar](128) NOT NULL,  
+                [FileName] [varchar](128) NOT NULL,  
+                [PhysicalName] [varchar](512) NOT NULL,  
+                [ShrinkStartTime] [datetime2](7) NOT NULL,  
+                [ShrinkEndTime] [datetime2](7) NULL,  
+                [DurationSeconds] [decimal](10,2) NULL,  
+                [InitialSize_MB] [decimal](20,2) NOT NULL,  
+                [FinalSize_MB] [decimal](20,2) NULL,  
+                [TargetSize_MB] [decimal](20,2) NOT NULL,  
+                [ShrinkIncrement_MB] [int] NOT NULL,  
+                [TargetFreeSpace_Pct] [int] NOT NULL,  
+                [MaxFreeSpace_MB] [int] NOT NULL,  
+                [InitialFreeSpace_MB] [decimal](20,2) NULL,  
+                [CurrentFreeSpace_MB] [decimal](20,2) NULL,  
+                [FinalFreeSpace_MB] [decimal](20,2) NULL,  
+                [ShrinkCommand] [nvarchar](max) NOT NULL,  
+                [ExecuteMode] [bit] NOT NULL,  
+                [Status] [varchar](20) NOT NULL DEFAULT 'InProgress',  
+                [ErrorMessage] [nvarchar](max) NULL,  
+                [CreatedDate] [datetime2](7) NOT NULL DEFAULT GETDATE(),  
+                CONSTRAINT [PK_tblShrinkFileLog] PRIMARY KEY CLUSTERED ([LogID] ASC)  
+            );  
+              
+            -- Create indexes for better query performance  
+            CREATE NONCLUSTERED INDEX [IX_tblShrinkFileLog_DatabaseName] ON [dbo].[tblShrinkFileLog] ([DatabaseName]);  
+            CREATE NONCLUSTERED INDEX [IX_tblShrinkFileLog_ShrinkStartTime] ON [dbo].[tblShrinkFileLog] ([ShrinkStartTime]);  
+            CREATE NONCLUSTERED INDEX [IX_tblShrinkFileLog_Status] ON [dbo].[tblShrinkFileLog] ([Status]);  
+              
+            PRINT '-- tblShrinkFileLog table created successfully with indexes.';  
+        END  
+        ELSE  
+        BEGIN  
+            PRINT '-- tblShrinkFileLog table already exists.';  
+        END  
+    END
   
     -- Handle the ALL parameter for drive, including NULL and empty string  
     SET @Drive = CASE   
@@ -208,23 +216,25 @@ BEGIN
                     SET @Sql = 'USE ' + QUOTENAME(@CurrentDB) + '; SET LOCK_TIMEOUT ' + CAST(@LockTimeout AS VARCHAR(20)) + '; DBCC SHRINKFILE(' + QUOTENAME(@FileName) + ', ' +   
                               CAST(FLOOR(@LoopCurrentSize) AS VARCHAR(20)) + ')';  
                       
-                    -- Record start time and insert initial log entry  
+                    -- Record start time and insert initial log entry if @LogTable = 1  
                     SET @StartTime = GETDATE();  
-                      
-                    INSERT INTO [dbo].[tblShrinkFileLog] (  
-                        [DatabaseName], [FileName], [PhysicalName], [ShrinkStartTime],   
-                        [InitialSize_MB], [TargetSize_MB], [ShrinkIncrement_MB],   
-                        [TargetFreeSpace_Pct], [MaxFreeSpace_MB], [InitialFreeSpace_MB],   
-                        [CurrentFreeSpace_MB], [ShrinkCommand], [ExecuteMode], [Status]  
-                    )  
-                    VALUES (  
-                        @CurrentDB, @FileName, @PhysicalName, @StartTime,  
-                        @CurrentSize, @LoopCurrentSize, @BatchShrinkSize,  
-                        @FreePct, @MaxMBFree, @InitialFreeSpace,  
-                        @CurrentFreeSpace, @Sql, @Execute, 'InProgress'  
-                    );  
-                      
-                    SET @LogID = SCOPE_IDENTITY();  
+                    IF @LogTable = 1
+                    BEGIN  
+                        INSERT INTO [dbo].[tblShrinkFileLog] (  
+                            [DatabaseName], [FileName], [PhysicalName], [ShrinkStartTime],   
+                            [InitialSize_MB], [TargetSize_MB], [ShrinkIncrement_MB],   
+                            [TargetFreeSpace_Pct], [MaxFreeSpace_MB], [InitialFreeSpace_MB],   
+                            [CurrentFreeSpace_MB], [ShrinkCommand], [ExecuteMode], [Status]  
+                        )  
+                        VALUES (  
+                            @CurrentDB, @FileName, @PhysicalName, @StartTime,  
+                            @CurrentSize, @LoopCurrentSize, @BatchShrinkSize,  
+                            @FreePct, @MaxMBFree, @InitialFreeSpace,  
+                            @CurrentFreeSpace, @Sql, @Execute, 'InProgress'  
+                        );  
+                          
+                        SET @LogID = SCOPE_IDENTITY();  
+                    END
                       
                     -- Execute or print based on @Execute parameter  
                     IF @Execute = 1  
@@ -251,21 +261,28 @@ BEGIN
                             SET @CurrentFreeSpace = @FinalSize - @SpaceUsedMB;  
                             SET @FinalFreeSpace = @CurrentFreeSpace; -- Update for final batch  
                               
-                            -- Update log entry with completion details  
-                            UPDATE [dbo].[tblShrinkFileLog]   
-                            SET [ShrinkEndTime] = @EndTime,  
-                                [DurationSeconds] = @ElapsedSeconds,  
-                                [FinalSize_MB] = @FinalSize,  
-                                [CurrentFreeSpace_MB] = @CurrentFreeSpace,  
-                                [FinalFreeSpace_MB] = @FinalFreeSpace,  
-                                [Status] = 'Completed'  
-                            WHERE [LogID] = @LogID;  
+                            -- Update log entry with completion details if @LogTable = 1  
+                            IF @LogTable = 1
+                            BEGIN
+                                UPDATE [dbo].[tblShrinkFileLog]   
+                                SET [ShrinkEndTime] = @EndTime,  
+                                    [DurationSeconds] = @ElapsedSeconds,  
+                                    [FinalSize_MB] = @FinalSize,  
+                                    [CurrentFreeSpace_MB] = @CurrentFreeSpace,  
+                                    [FinalFreeSpace_MB] = @FinalFreeSpace,  
+                                    [Status] = 'Completed'  
+                                WHERE [LogID] = @LogID;  
+                            END
                               
                             PRINT '-- Shrink completed for ' + QUOTENAME(@FileName) + ':';  
                             PRINT '-- Current Size After Shrink: ' + CAST(@FinalSize AS VARCHAR(20)) + ' MB';  
                             PRINT '-- Current Free Space After Shrink: ' + CAST(@CurrentFreeSpace AS VARCHAR(20)) + ' MB';  
                             PRINT '-- Duration: ' + CAST(@ElapsedSeconds AS VARCHAR(10)) + ' seconds';  
-                              
+                            IF (GETDATE() > DATEADD(ss, @TimeLimit, @IStartTime) OR @TimeLimit IS NULL)
+                            BEGIN
+                                SET @IStartTime = GETDATE();
+                                BREAK;
+                            END;
                             WAITFOR DELAY '00:00:01';  
                         END TRY  
                         BEGIN CATCH  
@@ -275,13 +292,16 @@ BEGIN
                             -- Check for lock timeout error (1222)  
                             IF ERROR_NUMBER() = 1222  
                             BEGIN  
-                                -- Update log entry with lock timeout details  
-                                UPDATE [dbo].[tblShrinkFileLog]   
-                                SET [ShrinkEndTime] = @EndTime,  
-                                    [DurationSeconds] = @ElapsedSeconds,  
-                                    [Status] = 'Skipped',  
-                                    [ErrorMessage] = 'Lock timeout occurred (' + CAST(@LockTimeout AS VARCHAR(20)) + 'ms). Skipping file.'  
-                                WHERE [LogID] = @LogID;  
+                                -- Update log entry with lock timeout details if @LogTable = 1  
+                                IF @LogTable = 1
+                                BEGIN
+                                    UPDATE [dbo].[tblShrinkFileLog]   
+                                    SET [ShrinkEndTime] = @EndTime,  
+                                        [DurationSeconds] = @ElapsedSeconds,  
+                                        [Status] = 'Skipped',  
+                                        [ErrorMessage] = 'Lock timeout occurred (' + CAST(@LockTimeout AS VARCHAR(20)) + 'ms). Skipping file.'  
+                                    WHERE [LogID] = @LogID;  
+                                END
                                   
                                 PRINT '-- Lock timeout occurred for ' + QUOTENAME(@FileName) + ' after ' + CAST(@LockTimeout AS VARCHAR(20)) + 'ms. Skipping file.';  
                                 FETCH NEXT FROM ShrinkCursor INTO @FileName, @PhysicalName, @CurrentSize, @ShrinkTo, @InitialFreeSpace;  
@@ -289,13 +309,16 @@ BEGIN
                             END  
                             ELSE  
                             BEGIN  
-                                -- Update log entry with other error details  
-                                UPDATE [dbo].[tblShrinkFileLog]   
-                                SET [ShrinkEndTime] = @EndTime,  
-                                    [DurationSeconds] = @ElapsedSeconds,  
-                                    [Status] = 'Failed',  
-                                    [ErrorMessage] = ERROR_MESSAGE()  
-                                WHERE [LogID] = @LogID;  
+                                -- Update log entry with other error details if @LogTable = 1  
+                                IF @LogTable = 1
+                                BEGIN
+                                    UPDATE [dbo].[tblShrinkFileLog]   
+                                    SET [ShrinkEndTime] = @EndTime,  
+                                        [DurationSeconds] = @ElapsedSeconds,  
+                                        [Status] = 'Failed',  
+                                        [ErrorMessage] = ERROR_MESSAGE()  
+                                    WHERE [LogID] = @LogID;  
+                                END
                                   
                                 PRINT '-- Error during shrink operation for ' + QUOTENAME(@FileName) + ': ' + ERROR_MESSAGE();  
                                 -- Continue with next iteration  
@@ -308,15 +331,18 @@ BEGIN
                         SET @EndTime = GETDATE();  
                         SET @ElapsedSeconds = DATEDIFF(MILLISECOND, @StartTime, @EndTime) / 1000.0;  
                           
-                        -- Update log entry for preview mode  
-                        UPDATE [dbo].[tblShrinkFileLog]   
-                        SET [ShrinkEndTime] = @EndTime,  
-                            [DurationSeconds] = @ElapsedSeconds,  
-                            [FinalSize_MB] = @LoopCurrentSize, -- Projected size  
-                            [CurrentFreeSpace_MB] = @CurrentFreeSpace,  
-                            [FinalFreeSpace_MB] = @CurrentFreeSpace, -- Projected final free space  
-                            [Status] = 'Preview'  
-                        WHERE [LogID] = @LogID;  
+                        -- Update log entry for preview mode if @LogTable = 1  
+                        IF @LogTable = 1
+                        BEGIN
+                            UPDATE [dbo].[tblShrinkFileLog]   
+                            SET [ShrinkEndTime] = @EndTime,  
+                                [DurationSeconds] = @ElapsedSeconds,  
+                                [FinalSize_MB] = @LoopCurrentSize, -- Projected size  
+                                [CurrentFreeSpace_MB] = @CurrentFreeSpace,  
+                                [FinalFreeSpace_MB] = @CurrentFreeSpace, -- Projected final free space  
+                                [Status] = 'Preview'  
+                            WHERE [LogID] = @LogID;  
+                        END
                           
                         PRINT '-- Preview mode for ' + QUOTENAME(@FileName) + ':';  
                         PRINT '-- Projected Size After Shrink: ' + CAST(@LoopCurrentSize AS VARCHAR(20)) + ' MB';  
@@ -335,14 +361,17 @@ BEGIN
         BEGIN CATCH  
             PRINT '-- Error occurred: ' + ERROR_MESSAGE();  
               
-            -- Update any in-progress log entries to failed status  
-            UPDATE [dbo].[tblShrinkFileLog]   
-            SET [Status] = 'Failed',  
-                [ErrorMessage] = ERROR_MESSAGE(),  
-                [ShrinkEndTime] = GETDATE()  
-            WHERE [Status] = 'InProgress'   
-              AND [DatabaseName] = @CurrentDB  
-              AND [ShrinkEndTime] IS NULL;  
+            -- Update any in-progress log entries to failed status if @LogTable = 1  
+            IF @LogTable = 1
+            BEGIN
+                UPDATE [dbo].[tblShrinkFileLog]   
+                SET [Status] = 'Failed',  
+                    [ErrorMessage] = ERROR_MESSAGE(),  
+                    [ShrinkEndTime] = GETDATE()  
+                WHERE [Status] = 'InProgress'   
+                  AND [DatabaseName] = @CurrentDB  
+                  AND [ShrinkEndTime] IS NULL;  
+            END
               
             IF CURSOR_STATUS('global', 'ShrinkCursor') >= 0  
             BEGIN  
@@ -369,13 +398,13 @@ BEGIN
     DEALLOCATE @DatabaseCursor;  
   
     IF @Execute = 1  
-        PRINT '-- Database file shrink operation completed. Check tblShrinkFileLog table for detailed results.';  
+        PRINT '-- Database file shrink operation completed.' + CASE WHEN @LogTable = 1 THEN ' Check tblShrinkFileLog table for detailed results.' ELSE '' END;  
     ELSE  
-        PRINT '-- Database file shrink commands generated (preview mode). Check tblShrinkFileLog table for logged operations.';  
+        PRINT '-- Database file shrink commands generated (preview mode).' + CASE WHEN @LogTable = 1 THEN ' Check tblShrinkFileLog table for logged operations.' ELSE '' END;  
 END
 GO
 EXEC usp_BatchShrinkFiles
-
---CLEANUP
---DROP TABLE tblShrinkFileLog
---DROP PROCEDURE usp_BatchShrinkFiles
+GO
+----Cleanup
+--DROP PROCEDURE IF EXISTS usp_BatchShrinkFiles
+--DROP TABLE IF EXISTS [tblShrinkFileLog]
