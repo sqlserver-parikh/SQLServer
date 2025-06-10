@@ -1,0 +1,88 @@
+USE tempdb;
+GO
+CREATE OR ALTER PROCEDURE dbo.usp_CleanupJobHistory
+    @JobName NVARCHAR(128) = NULL,  -- Optional: name of the job
+    @KeepCount INT = 50000,                 -- Required: number of rows to keep
+    @ReportOnly BIT = 1           -- Optional: 1 = report only, 0 = delete
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @KeepCount < 0
+    BEGIN
+        RAISERROR('KeepCount must be a non-negative integer.', 16, 1);
+        RETURN;
+    END
+
+    IF @ReportOnly = 1
+    BEGIN
+        -- Report mode
+        SELECT 
+            j.name AS JobName,
+            COUNT(h.instance_id) AS TotalRows,
+            SUM(CASE 
+                    WHEN CONVERT(DATETIME, 
+                        STUFF(STUFF(CAST(h.run_date AS CHAR(8)), 5, 0, '-'), 8, 0, '-') + ' ' +
+                        STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR(6)), 6), 3, 0, ':'), 6, 0, ':')
+                        ) >= DATEADD(DAY, -1, GETDATE()) THEN 1 ELSE 0 
+                END) AS RowsLast24Hours,
+            SUM(CASE 
+                    WHEN CONVERT(DATETIME, 
+                        STUFF(STUFF(CAST(h.run_date AS CHAR(8)), 5, 0, '-'), 8, 0, '-') + ' ' +
+                        STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR(6)), 6), 3, 0, ':'), 6, 0, ':')
+                        ) >= DATEADD(DAY, -7, GETDATE()) THEN 1 ELSE 0 
+                END) AS RowsLast7Days,
+            CASE 
+                WHEN COUNT(h.instance_id) > @KeepCount THEN 'Exceeds threshold'
+                ELSE 'Within threshold'
+            END AS Status
+        FROM msdb.dbo.sysjobhistory h
+        JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+        WHERE (@JobName IS NULL OR j.name = @JobName)
+        GROUP BY j.name
+        HAVING COUNT(h.instance_id) > @KeepCount OR @JobName IS NOT NULL;
+        RETURN;
+    END
+
+    -- Cleanup logic
+    IF @JobName IS NOT NULL
+    BEGIN
+        DECLARE @JobId UNIQUEIDENTIFIER;
+
+        SELECT @JobId = job_id
+        FROM msdb.dbo.sysjobs
+        WHERE name = @JobName;
+
+        IF @JobId IS NULL
+        BEGIN
+            RAISERROR('Job name not found: %s', 16, 1, @JobName);
+            RETURN;
+        END
+
+        ;WITH OrderedHistory AS (
+            SELECT 
+                instance_id,
+                ROW_NUMBER() OVER (ORDER BY run_date DESC, run_time DESC) AS rn
+            FROM msdb.dbo.sysjobhistory
+            WHERE job_id = @JobId
+        )
+        DELETE FROM msdb.dbo.sysjobhistory
+        WHERE instance_id IN (
+            SELECT instance_id FROM OrderedHistory WHERE rn > @KeepCount
+        );
+    END
+    ELSE
+    BEGIN
+        ;WITH OrderedHistory AS (
+            SELECT 
+                instance_id,
+                ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY run_date DESC, run_time DESC) AS rn
+            FROM msdb.dbo.sysjobhistory
+        )
+        DELETE FROM msdb.dbo.sysjobhistory
+        WHERE instance_id IN (
+            SELECT instance_id FROM OrderedHistory WHERE rn > @KeepCount
+        );
+    END
+END;
+GO
