@@ -4,8 +4,9 @@ GO
 -- Create stored procedure to read or set the EventSourceFlags registry key
 CREATE OR ALTER PROCEDURE usp_ManageAuditEventSourceFlags
     @AuditName NVARCHAR(128) = 'SqlThreatDetection_Audit', -- Name of the server audit
-    @Action NVARCHAR(10) = 'SET',                        -- Action: 'READ' or 'SET'
-    @ValueData INT = 1                                    -- Value to set (used only if @Action = 'SET')
+    @Action NVARCHAR(10) = 'set',                        -- Action: 'READ' or 'SET'
+    @RestartAudit bit = 0,
+	@ValueData INT = 1                                    -- Value to set (used only if @Action = 'SET')
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -106,11 +107,15 @@ BEGIN
                     BEGIN TRY
                         -- Construct and execute dynamic SQL to stop the audit
                         SET @SqlStmt = N'ALTER SERVER AUDIT [' + @AuditName + '] WITH (STATE = OFF);';
-                        EXEC sp_executesql @SqlStmt;
+						IF @RestartAudit = 0
+							PRINT @SqlStmt
+							ELSE EXEC sp_executesql @SqlStmt;
 
                         -- Construct and execute dynamic SQL to start the audit
                         SET @SqlStmt = N'ALTER SERVER AUDIT [' + @AuditName + '] WITH (STATE = ON);';
-                        EXEC sp_executesql @SqlStmt;
+                        IF @RestartAudit = 0
+							PRINT @SqlStmt
+							ELSE EXEC sp_executesql @SqlStmt;
 
                         SELECT @RegistryValue AS RegistryValue, 
                                'Registry key set to ' + CAST(@ValueData AS NVARCHAR(10)) + ' and audit ''' + @AuditName + ''' restarted.' AS Message;
