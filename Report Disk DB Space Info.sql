@@ -4,7 +4,7 @@ CREATE OR ALTER PROCEDURE usp_DiskDBSpaceReport
 (    
     @Disk NVARCHAR(256) = NULL,   -- Specific disk or mount point to filter
     @DBName NVARCHAR(128) = null,   -- Specific database name to filter
-    @LowDiskPct DECIMAL(5,2) = 20, -- Show drives below this free space percentage
+    @LowDiskPct DECIMAL(5,2) = 100, -- Show drives below this free space percentage
     @BackupLookBackDays int = 30 --How far back backup should be checked.
 )
 AS
@@ -244,6 +244,11 @@ BEGIN
         CONVERT(DECIMAL(20, 0), f.size / 128.0) AS FileSizeMb,
         CONVERT(DECIMAL(20, 2), ((f.size / 128.0) / HD.DbSizeMb) * 100) AS Pct2DbSize,
         CAST(f.size / 128.0 - (d.SpaceUsed / 128.0) AS DECIMAL(15, 2)) AS FileSpaceFreeMb,
+		   CASE
+            WHEN f.type_desc = 'Log' THEN CONVERT(VARCHAR(15),DLS.log_since_last_log_backup_mb)
+			WHEN f.type_desc = 'Rows' THEN 'Data File'
+            ELSE f.type_desc
+        END AS LogSizeSinceLastLogBackupMB,
         CONVERT(DECIMAL(15, 2), (100 * CAST(f.size / 128.0 - (d.SpaceUsed / 128.0) AS DECIMAL(15, 2))) 
             / (f.size / 128.0)) AS FilePercentFree,
         CAST(CAST(s.available_bytes / 1048576.0 AS DECIMAL(20, 2)) 
@@ -299,6 +304,7 @@ BEGIN
             ON SD.database_id = f.database_id
         INNER JOIN #DbSizeInfo HD
             ON DB_NAME(f.database_id) = HD.DbName
+			CROSS APPLY sys.dm_db_log_stats(f.database_id) DLS
     WHERE (@Disk IS NULL OR s.volume_mount_point = @Disk)
         AND (@DBName IS NULL OR DB_NAME(f.database_id) = @DBName)
         AND (@LowDiskPct IS NULL OR 
@@ -320,6 +326,7 @@ BEGIN
         NULL,
         NULL,
         NULL,
+		NULL,
         NULL,
         NULL,
         NULL,
