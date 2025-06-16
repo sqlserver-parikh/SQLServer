@@ -20,6 +20,8 @@ BEGIN
         @@SERVERNAME AS ServerName,
         DB_NAME(des.database_id) AS DBName,
         FORMAT(ds.DatabaseSizeMB, 'N0') AS DatabaseSizeMB, -- Format with commas
+		D.log_since_last_log_backup_mb , D.log_backup_time AS 'last log backup time' ,
+
         CONVERT(DECIMAL(10, 2), (ds.DatabaseSizeMB * CONVERT(NUMERIC(6, 2), dmr.percent_complete) / 100) / DATEDIFF(SECOND, start_time, GETDATE())) AS MBPS,
         dmr.session_id AS SessionID,
         start_time AS StartTime,
@@ -52,6 +54,7 @@ BEGIN
         sys.dm_exec_sessions des ON dmr.session_id = des.session_id
     LEFT JOIN 
         #dbsize ds ON des.database_id = ds.DBID
+		CROSS APPLY sys.dm_db_log_stats(des.database_id) D
     WHERE 
         command IN ('RESTORE DATABASE', 'BACKUP DATABASE', 'BACKUP LOG');
 
