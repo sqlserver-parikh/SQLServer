@@ -1,3 +1,5 @@
+USE tempdb
+GO
 CREATE OR ALTER PROCEDURE usp_TrackBackupProgress
 AS
 BEGIN
@@ -56,3 +58,5 @@ BEGIN
     -- Drop the temporary table
     DROP TABLE #dbsize;
 END;
+GO
+usp_TrackBackupProgress
