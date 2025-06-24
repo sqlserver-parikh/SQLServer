@@ -1,0 +1,140 @@
+USE master;
+GO
+
+-- Create a temporary table to store results
+IF OBJECT_ID('tempdb..#EncryptedColumns') IS NOT NULL
+    DROP TABLE #EncryptedColumns;
+
+CREATE TABLE #EncryptedColumns (
+    DatabaseName NVARCHAR(256),
+    SchemaName NVARCHAR(256),
+    TableName NVARCHAR(256),
+    ColumnName NVARCHAR(256),
+    EncryptionType NVARCHAR(128),
+    DataType NVARCHAR(128),
+    KeyName NVARCHAR(256) NULL
+);
+
+-- Create a debug table to capture errors and problematic data
+IF OBJECT_ID('tempdb..#DebugTruncation') IS NOT NULL
+    DROP TABLE #DebugTruncation;
+
+CREATE TABLE #DebugTruncation (
+    DatabaseName NVARCHAR(256),
+    ErrorMessage NVARCHAR(MAX),
+    ProblematicData NVARCHAR(MAX)
+);
+
+-- Declare variables for cursor
+DECLARE @DatabaseName NVARCHAR(256);
+DECLARE @SQL NVARCHAR(MAX);
+
+-- Cursor to iterate through all databases
+DECLARE db_cursor CURSOR FOR
+SELECT name 
+FROM sys.databases 
+WHERE state = 0 -- Online databases only
+AND name NOT IN ('tempdb', 'master', 'model', 'msdb'); -- Exclude system databases
+
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @DatabaseName;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    -- Dynamic SQL to query potential encrypted columns (symmetric key encryption)
+    SET @SQL = N'
+    USE ' + QUOTENAME(@DatabaseName) + N';
+    INSERT INTO #DebugTruncation (DatabaseName, ErrorMessage, ProblematicData)
+    SELECT 
+        DB_NAME(),
+        N''Potential truncation'',
+        N''Schema: '' + s.name + N'', Table: '' + t.name + N'', Column: '' + c.name + 
+        N'', EncryptionType: Symmetric Key (Potential), DataType: '' + TYPE_NAME(c.system_type_id) +
+        N'', KeyName: '' + COALESCE(sk.name, N''None'')
+    FROM sys.columns c
+    JOIN sys.tables t ON c.object_id = t.object_id
+    JOIN sys.schemas s ON t.schema_id = s.schema_id
+    LEFT JOIN sys.symmetric_keys sk ON sk.name IS NOT NULL
+    WHERE c.system_type_id = 165 -- varbinary columns
+    AND EXISTS (SELECT 1 FROM sys.symmetric_keys) -- Only include if symmetric keys exist
+    AND (
+        LEN(s.name) > 256 OR
+        LEN(t.name) > 256 OR
+        LEN(c.name) > 256 OR
+        LEN(N''Symmetric Key (Potential)'') > 128 OR
+        LEN(TYPE_NAME(c.system_type_id)) > 128 OR
+        LEN(COALESCE(sk.name, N''None'')) > 256
+    );
+
+    INSERT INTO #EncryptedColumns (
+        DatabaseName, SchemaName, TableName, ColumnName, 
+        EncryptionType, DataType, KeyName
+    )
+    SELECT 
+        DB_NAME(),
+        s.name,
+        t.name,
+        c.name,
+        N''Symmetric Key (Potential)'',
+        TYPE_NAME(c.system_type_id),
+        COALESCE(sk.name, N''None'')
+    FROM sys.columns c
+    JOIN sys.tables t ON c.object_id = t.object_id
+    JOIN sys.schemas s ON t.schema_id = s.schema_id
+    LEFT JOIN sys.symmetric_keys sk ON sk.name IS NOT NULL
+    WHERE c.system_type_id = 165 -- varbinary columns
+    AND EXISTS (SELECT 1 FROM sys.symmetric_keys); -- Only include if symmetric keys exist
+    ';
+
+    -- Log the SQL statement for debugging if too long
+    IF LEN(@SQL) > 4000
+    BEGIN
+        INSERT INTO #DebugTruncation (DatabaseName, ErrorMessage, ProblematicData)
+        VALUES (@DatabaseName, N'Long SQL Statement', LEFT(@SQL, 4000));
+    END
+
+    -- Execute the dynamic SQL
+    BEGIN TRY
+        EXEC sp_executesql @SQL;
+    END TRY
+    BEGIN CATCH
+        -- Handle errors
+        INSERT INTO #DebugTruncation (
+            DatabaseName, ErrorMessage, ProblematicData
+        )
+        VALUES (
+            @DatabaseName, 
+            N'Error: ' + ERROR_MESSAGE(),
+            LEFT(@SQL, 4000)
+        );
+    END CATCH
+
+    FETCH NEXT FROM db_cursor INTO @DatabaseName;
+END;
+
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+
+-- Return debug information for errors
+SELECT 
+    DatabaseName,
+    ErrorMessage,
+    ProblematicData
+FROM #DebugTruncation
+WHERE ErrorMessage IS NOT NULL;
+
+-- Return results
+SELECT 
+    DatabaseName,
+    SchemaName,
+    TableName,
+    ColumnName,
+    EncryptionType,
+    DataType,
+    KeyName
+FROM #EncryptedColumns
+ORDER BY DatabaseName, SchemaName, TableName, ColumnName;
+
+-- Clean up
+DROP TABLE #EncryptedColumns;
+DROP TABLE #DebugTruncation;
