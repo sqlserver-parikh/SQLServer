@@ -1,0 +1,523 @@
+-- Procedure: Enable Transparent Data Encryption (TDE) on a SQL Server database with certificate rotation
+-- Parameters:
+--   @DatabaseName: Name of the database to encrypt
+--   @CertificateName: Name of the certificate used for encryption
+--   @EncryptionAlgorithm: Algorithm for encryption (e.g., AES_128, AES_256)
+--   @MasterKeyPassword: Password for the database master key (required for creation/regeneration, optional if SMK encryption exists)
+--   @BackupCertificate: Flag to back up the certificate (1 = Yes, 0 = No)
+--   @BackupPath: File path for certificate and key backup (if NULL, uses default SQL backup path)
+--   @Force: Flag to drop existing certificate if it exists (1 = Yes, 0 = No)
+--   @RotateCertificate: Flag to enable certificate rotation check (1 = Yes, 0 = No)
+--   @RotateIfExpiringDays: Rotate certificate if it expires within this number of days (default 60, ignored if RotateCertificate = 0)
+--   @IgnoreMasterKeyPassword: Flag to skip password-based master key opening if SMK encryption exists (1 = Yes, 0 = No)
+--   @RegenerateMasterKey: Flag to regenerate master key with new password if it exists and cannot be opened (1 = Yes, 0 = No)
+--   @PrintOnly: Flag to print SQL statements without executing them (1 = Yes, 0 = No)
+USE tempdb
+go
+CREATE OR ALTER PROCEDURE dbo.usp_EnableTDE
+    @DatabaseName NVARCHAR(128)= 'Testing',
+    @CertificateName NVARCHAR(128) = 'TDE_Certificate',
+    @EncryptionAlgorithm NVARCHAR(32) = 'AES_256',
+    @MasterKeyPassword NVARCHAR(128) = '0n3Str0ngP@ssword2025!',
+    @BackupCertificate BIT = 1,
+    @BackupPath NVARCHAR(256) = NULL,
+    @Force BIT = 0,
+    @RotateCertificate BIT = 0,
+    @RotateIfExpiringDays INT = 60,
+    @IgnoreMasterKeyPassword BIT = 0,
+    @RegenerateMasterKey BIT = 0,
+    @PrintOnly BIT = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @SQL NVARCHAR(MAX);
+    DECLARE @ErrorMessage NVARCHAR(500);
+    DECLARE @CertificateExists INT;
+    DECLARE @MasterKeyExists INT;
+    DECLARE @BackupFileCert NVARCHAR(256);
+    DECLARE @BackupFileKey NVARCHAR(256);
+    DECLARE @NewCertificateName NVARCHAR(128);
+    DECLARE @ExpiryDate DATETIME;
+    DECLARE @DaysToExpiry INT;
+    DECLARE @DefaultBackupPath NVARCHAR(256);
+    DECLARE @RegKey NVARCHAR(512);
+    DECLARE @ValueName NVARCHAR(512) = 'BackupDirectory';
+    DECLARE @Value NVARCHAR(512);
+    DECLARE @IsSMKEncrypted BIT = 0;
+
+    BEGIN TRY
+        -- Validate input parameters
+        IF @DatabaseName IS NULL OR @DatabaseName = ''
+        BEGIN
+            RAISERROR('DatabaseName parameter cannot be null or empty.', 16, 1);
+            RETURN;
+        END
+
+        IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @DatabaseName)
+        BEGIN
+            RAISERROR('Specified database does not exist.', 16, 1);
+            RETURN;
+        END
+
+        IF @EncryptionAlgorithm NOT IN ('AES_128', 'AES_192', 'AES_256', 'TRIPLE_DES_3KEY')
+        BEGIN
+            RAISERROR('Invalid encryption algorithm. Supported values: AES_128, AES_192, AES_256, TRIPLE_DES_3KEY.', 16, 1);
+            RETURN;
+        END
+
+        IF @RotateIfExpiringDays < 0
+        BEGIN
+            RAISERROR('RotateIfExpiringDays cannot be negative.', 16, 1);
+            RETURN;
+        END
+
+        IF @IgnoreMasterKeyPassword = 1 AND @MasterKeyPassword IS NOT NULL
+        BEGIN
+            RAISERROR('MasterKeyPassword should be NULL when IgnoreMasterKeyPassword is enabled.', 16, 1);
+            RETURN;
+        END
+
+        IF @RegenerateMasterKey = 1 AND @MasterKeyPassword IS NULL
+        BEGIN
+            RAISERROR('MasterKeyPassword must be provided when RegenerateMasterKey is enabled.', 16, 1);
+            RETURN;
+        END
+
+        -- Retrieve default SQL Server backup path if @BackupPath is NULL or empty and backup is requested
+        IF @BackupCertificate = 1 AND (@BackupPath IS NULL OR @BackupPath = '')
+        BEGIN
+            -- Construct registry key path for SQL Server instance
+            SET @RegKey = N'Software\Microsoft\MSSQLServer\MSSQLServer';
+
+            -- Read default backup directory from registry using three-part name
+            IF @PrintOnly = 1
+                EXEC master.dbo.xp_instance_regread 
+         N'HKEY_LOCAL_MACHINE', 
+         N'Software\Microsoft\MSSQLServer\MSSQLServer', 
+         N'BackupDirectory', 
+         @Value OUTPUT;
+
+            IF @Value IS NOT NULL
+            BEGIN
+                SET @DefaultBackupPath = @Value;
+                -- Ensure path ends with a backslash
+                IF RIGHT(@DefaultBackupPath, 1) != '\'
+                    SET @DefaultBackupPath = @DefaultBackupPath + '\';
+                SET @BackupPath = @DefaultBackupPath;
+                PRINT 'Using default SQL Server backup path: ' + @BackupPath;
+
+                -- Validate that the backup path is accessible
+                IF @PrintOnly = 1
+                BEGIN
+                    PRINT 'Would validate path: EXEC master.dbo.xp_dirtree ''' + @BackupPath + ''', 1, 0;';
+                END
+                ELSE
+                BEGIN
+                    DECLARE @PathCheck INT;
+                    EXEC @PathCheck = master.dbo.xp_dirtree @BackupPath, 1, 0;
+                    IF @PathCheck IS NULL
+                    BEGIN
+                        RAISERROR('Default backup path %s is not accessible or does not exist.', 16, 1, @BackupPath);
+                        RETURN;
+                    END
+                END
+            END
+            ELSE
+            BEGIN
+                RAISERROR('Failed to retrieve default SQL Server backup path from registry.', 16, 1);
+                RETURN;
+            END
+        END
+
+        -- Check if master key exists in the master database
+        SET @MasterKeyExists = (SELECT COUNT(*) FROM master.sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##');
+
+        -- Check user permissions and create/regenerate/open master key in master database
+        IF @PrintOnly = 1
+     
+        IF @MasterKeyExists = 1
+        BEGIN
+            -- Check if master key is encrypted by SMK
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would check SMK encryption: SELECT 1 FROM master.sys.key_encryptions WHERE key_id = (SELECT symmetric_key_id FROM master.sys.symmetric_keys WHERE name = ''##MS_DatabaseMasterKey##'') AND crypt_type = ''EKS'';';
+            END
+            ELSE
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM master.sys.key_encryptions
+                    WHERE key_id = (SELECT symmetric_key_id FROM master.sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+                    AND crypt_type = 'EKS'
+                )
+                BEGIN
+                    SET @IsSMKEncrypted = 1;
+                    PRINT 'Master key is encrypted by Service Master Key.';
+                END
+            END
+
+            -- Check for CONTROL or VIEW DEFINITION permissions
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would check permissions: SELECT 1 FROM sys.database_permissions WHERE major_id = (SELECT symmetric_key_id FROM master.sys.symmetric_keys WHERE name = ''##MS_DatabaseMasterKey#'') AND permission_name IN (''CONTROL'', ''VIEW DEFINITION'') AND grantee_principal_id = USER_ID();';
+            END
+            ELSE
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM sys.database_permissions
+                    WHERE major_id = (SELECT symmetric_key_id FROM master.sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+                    AND permission_name IN ('CONTROL', 'VIEW DEFINITION')
+                    AND grantee_principal_id = USER_ID()
+                )
+                BEGIN
+                    RAISERROR('User does not have CONTROL or VIEW DEFINITION permission on the master key. Grant permissions using: GRANT CONTROL ON SYMMETRIC KEY::##MS_DatabaseMasterKey## TO [YourUser];', 16, 1);
+                    RETURN;
+                END
+            END
+
+            -- Regenerate master key if requested
+            IF @RegenerateMasterKey = 1
+            BEGIN
+                SET @SQL = 'ALTER MASTER KEY REGENERATE WITH ENCRYPTION BY PASSWORD = ''' + @MasterKeyPassword + ''';';
+                IF @PrintOnly = 1
+                BEGIN
+                    PRINT 'Would execute: ' + @SQL;
+                END
+                ELSE
+                BEGIN
+                    EXEC sp_executesql @SQL;
+                    PRINT 'Database master key regenerated with new password.';
+                    SET @IsSMKEncrypted = 1; -- Regeneration typically includes SMK encryption
+                END
+            END
+
+            -- Open master key if not SMK-encrypted and password is provided or regeneration occurred
+            IF @IsSMKEncrypted = 0 AND @IgnoreMasterKeyPassword = 0
+            BEGIN
+                IF @MasterKeyPassword IS NULL
+                BEGIN
+                    RAISERROR('MasterKeyPassword must be provided when master key is not encrypted by SMK and IgnoreMasterKeyPassword is disabled.', 16, 1);
+                    RETURN;
+                END
+
+                SET @SQL = 'OPEN MASTER KEY DECRYPTION BY PASSWORD = ''' + @MasterKeyPassword + ''';';
+                IF @PrintOnly = 1
+                BEGIN
+                    PRINT 'Would execute: ' + @SQL;
+                END
+                ELSE
+                BEGIN
+                    BEGIN TRY
+                        EXEC sp_executesql @SQL;
+                        PRINT 'Database master key opened.';
+                    END TRY
+                    BEGIN CATCH
+                        SET @ErrorMessage = ERROR_MESSAGE();
+                        RAISERROR('Failed to open master key: %s. Verify the provided @MasterKeyPassword is correct or use RegenerateMasterKey = 1.', 16, 1, @ErrorMessage);
+                        RETURN;
+                    END CATCH
+                END
+            END
+            ELSE IF @IsSMKEncrypted = 0 AND @IgnoreMasterKeyPassword = 1 AND @RegenerateMasterKey = 0
+            BEGIN
+                RAISERROR('Master key is not encrypted by SMK. Cannot ignore MasterKeyPassword without regenerating the master key. Provide the correct password or set RegenerateMasterKey = 1.', 16, 1);
+                RETURN;
+            END
+        END
+        ELSE
+        BEGIN
+            -- Create master key if it doesn't exist
+            IF @MasterKeyPassword IS NULL
+            BEGIN
+                RAISERROR('MasterKeyPassword must be provided to create a new master key.', 16, 1);
+                RETURN;
+            END
+
+            SET @SQL = 'CREATE MASTER KEY ENCRYPTION BY PASSWORD = ''' + @MasterKeyPassword + ''';';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would execute: ' + @SQL;
+            END
+            ELSE
+            BEGIN
+                EXEC sp_executesql @SQL;
+                PRINT 'Database master key created.';
+                SET @MasterKeyExists = 1;
+            END
+
+            -- Open the newly created master key
+            SET @SQL = 'OPEN MASTER KEY DECRYPTION BY PASSWORD = ''' + @MasterKeyPassword + ''';';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would execute: ' + @SQL;
+            END
+            ELSE
+            BEGIN
+                EXEC sp_executesql @SQL;
+                PRINT 'Database master key opened.';
+            END
+        END
+
+        -- Check if certificate already exists
+        SET @CertificateExists = (SELECT COUNT(*) FROM sys.certificates WHERE name = @CertificateName);
+
+        -- Check certificate expiration if it exists and rotation is enabled
+        IF @CertificateExists > 0 AND @RotateCertificate = 1 AND @RotateIfExpiringDays > 0
+        BEGIN
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would check certificate expiry: SELECT expiry_date FROM sys.certificates WHERE name = ''' + @CertificateName + ''';';
+            END
+            ELSE
+            BEGIN
+                SELECT @ExpiryDate = expiry_date
+                FROM sys.certificates
+                WHERE name = @CertificateName;
+
+                SET @DaysToExpiry = DATEDIFF(DAY, GETDATE(), @ExpiryDate);
+            END
+
+            IF @DaysToExpiry <= @RotateIfExpiringDays
+            BEGIN
+                PRINT 'Certificate ' + @CertificateName + ' expires in ' + CAST(@DaysToExpiry AS NVARCHAR(10)) + ' days. Rotating certificate.';
+
+                -- Generate new certificate name (append timestamp to avoid conflicts)
+                SET @NewCertificateName = @CertificateName + '_Rotated_' + REPLACE(CONVERT(NVARCHAR(19), GETDATE(), 120), ':', '');
+
+                -- Create new certificate
+                SET @SQL = 'CREATE CERTIFICATE ' + QUOTENAME(@NewCertificateName) +
+                           ' WITH SUBJECT = ''TDE Certificate for ' + @DatabaseName + ' (Rotated)'', ' +
+                           ' EXPIRY_DATE = ''' + CONVERT(NVARCHAR(10), DATEADD(YEAR, 10, GETDATE()), 120) + ''';';
+                IF @PrintOnly = 1
+                BEGIN
+                    PRINT 'Would execute: ' + @SQL;
+                END
+                ELSE
+                BEGIN
+                    EXEC sp_executesql @SQL;
+                    PRINT 'New certificate ' + @NewCertificateName + ' created for rotation.';
+                END
+
+                -- Backup new certificate if requested
+                IF @BackupCertificate = 1
+                BEGIN
+                    IF RIGHT(@BackupPath, 1) != '\'
+                        SET @BackupPath = @BackupPath + '\';
+
+                    SET @BackupFileCert = @BackupPath + @NewCertificateName + '.cer';
+                    SET @BackupFileKey = @BackupPath + @NewCertificateName + '.pvk';
+
+                    SET @SQL = 'BACKUP CERTIFICATE ' + QUOTENAME(@NewCertificateName) +
+                               ' TO FILE = ''' + @BackupFileCert + '''' +
+                               ' WITH PRIVATE KEY (FILE = ''' + @BackupFileKey + ''', ' +
+                               ' ENCRYPTION BY PASSWORD = ''' + @MasterKeyPassword + ''');';
+                    IF @PrintOnly = 1
+                    BEGIN
+                        PRINT 'Would execute: ' + @SQL;
+                    END
+                    ELSE
+                    BEGIN
+                        EXEC sp_executesql @SQL;
+                        PRINT 'New certificate backed up to ' + @BackupFileCert + ' and private key to ' + @BackupFileKey + '.';
+                    END
+                END
+
+                -- Update database to use the new certificate
+                SET @SQL = 'USE ' + QUOTENAME(@DatabaseName) + ';' +
+                           ' ALTER DATABASE ENCRYPTION KEY' +
+                           ' ENCRYPTION BY SERVER CERTIFICATE ' + QUOTENAME(@NewCertificateName) + ';';
+                IF @PrintOnly = 1
+                BEGIN
+                    PRINT 'Would execute: ' + @SQL;
+                END
+                ELSE
+                BEGIN
+                    EXEC sp_executesql @SQL;
+                    PRINT 'Database ' + @DatabaseName + ' now uses rotated certificate ' + @NewCertificateName + '.';
+                END
+
+                -- Optionally drop the old certificate if @Force is enabled
+                IF @Force = 1
+                BEGIN
+                    SET @SQL = 'DROP CERTIFICATE ' + QUOTENAME(@CertificateName) + ';';
+                    IF @PrintOnly = 1
+                    BEGIN
+                        PRINT 'Would execute: ' + @SQL;
+                    END
+                    ELSE
+                    BEGIN
+                        EXEC sp_executesql @SQL;
+                        PRINT 'Old certificate ' + @CertificateName + ' dropped.';
+                    END
+                END
+
+                -- Update certificate name for TDE enablement
+                SET @CertificateName = @NewCertificateName;
+                SET @CertificateExists = 1;
+            END
+            ELSE
+            BEGIN
+                PRINT 'Certificate ' + @CertificateName + ' expires in ' + CAST(@DaysToExpiry AS NVARCHAR(10)) + ' days. No rotation needed.';
+            END
+        END
+        ELSE IF @CertificateExists > 0 AND @RotateCertificate = 1 AND @RotateIfExpiringDays = 0
+        BEGIN
+            RAISERROR('RotateIfExpiringDays must be greater than 0 when RotateCertificate is enabled.', 16, 1);
+            RETURN;
+        END
+
+        -- Drop existing certificate if @Force is enabled and no rotation occurred
+        IF @CertificateExists > 0 AND @Force = 1 AND (@RotateCertificate = 0 OR @DaysToExpiry > @RotateIfExpiringDays)
+        BEGIN
+            SET @SQL = 'DROP CERTIFICATE ' + QUOTENAME(@CertificateName) + ';';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would execute: ' + @SQL;
+            END
+            ELSE
+            BEGIN
+                EXEC sp_executesql @SQL;
+                PRINT 'Existing certificate dropped due to Force option.';
+                SET @CertificateExists = 0;
+            END
+        END
+
+        -- Create certificate if it doesn't exist
+        IF @CertificateExists = 0
+        BEGIN
+            SET @SQL = 'CREATE CERTIFICATE ' + QUOTENAME(@CertificateName) +
+                       ' WITH SUBJECT = ''TDE Certificate for ' + @DatabaseName + ''', ' +
+                       ' EXPIRY_DATE = ''' + CONVERT(NVARCHAR(10), DATEADD(YEAR, 10, GETDATE()), 120) + ''';';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would execute: ' + @SQL;
+            END
+            ELSE
+            BEGIN
+                EXEC sp_executesql @SQL;
+                PRINT 'Certificate ' + @CertificateName + ' created.';
+            END
+        END
+        ELSE
+        BEGIN
+            PRINT 'Certificate ' + @CertificateName + ' already exists.';
+        END
+
+        -- Backup certificate if requested (for non-rotated or newly created certificate)
+        IF @BackupCertificate = 1 AND (@RotateCertificate = 0 OR @DaysToExpiry > @RotateIfExpiringDays)
+        BEGIN
+            IF RIGHT(@BackupPath, 1) != '\'
+                SET @BackupPath = @BackupPath + '\';
+
+            SET @BackupFileCert = @BackupPath + @CertificateName + '.cer';
+            SET @BackupFileKey = @BackupPath + @CertificateName + '.pvk';
+
+            SET @SQL = 'BACKUP CERTIFICATE ' + QUOTENAME(@CertificateName) +
+                       ' TO FILE = ''' + @BackupFileCert + '''' +
+                       ' WITH PRIVATE KEY (FILE = ''' + @BackupFileKey + ''', ' +
+                       ' ENCRYPTION BY PASSWORD = ''' + @MasterKeyPassword + ''');';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would execute: ' + @SQL;
+            END
+            ELSE
+            BEGIN
+                EXEC sp_executesql @SQL;
+                PRINT 'Certificate backed up to ' + @BackupFileCert + ' and private key to ' + @BackupFileKey + '.';
+            END
+        END
+
+        -- Check if TDE is already enabled on the database
+        IF NOT EXISTS (SELECT 1 FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID(@DatabaseName))
+        BEGIN
+            -- Enable TDE on the specified database
+            SET @SQL = 'ALTER DATABASE ' + QUOTENAME(@DatabaseName) +
+                       ' SET ENCRYPTION ON;';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would execute: ' + @SQL;
+            END
+            ELSE
+            BEGIN
+                EXEC sp_executesql @SQL;
+            END
+
+            SET @SQL = 'USE ' + QUOTENAME(@DatabaseName) + ';' +
+                       ' CREATE DATABASE ENCRYPTION KEY' +
+                       ' WITH ALGORITHM = ' + @EncryptionAlgorithm +
+                       ' ENCRYPTION BY SERVER CERTIFICATE ' + QUOTENAME(@CertificateName) + ';';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would execute: ' + @SQL;
+            END
+            ELSE
+            BEGIN
+                EXEC sp_executesql @SQL;
+                PRINT 'TDE enabled on database ' + @DatabaseName + ' with certificate ' + @CertificateName + '.';
+            END
+        END
+        ELSE
+        BEGIN
+            PRINT 'TDE is already enabled on database ' + @DatabaseName + '.';
+        END
+
+        -- Close the master key if it was opened explicitly
+        IF @MasterKeyExists = 1 AND @IsSMKEncrypted = 0
+        BEGIN
+            SET @SQL = 'CLOSE MASTER KEY;';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would execute: ' + @SQL;
+            END
+            ELSE
+            BEGIN
+                EXEC sp_executesql @SQL;
+                PRINT 'Database master key closed.';
+            END
+        END
+    END TRY
+    BEGIN CATCH
+        -- Capture error details
+        SET @ErrorMessage = ERROR_MESSAGE();
+
+        -- Close master key if it was opened explicitly and an error occurred
+        IF @MasterKeyExists = 1 AND @IsSMKEncrypted = 0
+        BEGIN
+            SET @SQL = 'CLOSE MASTER KEY;';
+            IF @PrintOnly = 1
+            BEGIN
+                PRINT 'Would execute: ' + @SQL;
+            END
+            ELSE
+            BEGIN
+                BEGIN TRY
+                    EXEC sp_executesql @SQL;
+                    PRINT 'Database master key closed due to error.';
+                END TRY
+                BEGIN CATCH
+                    -- Suppress secondary error to avoid masking primary error
+                END CATCH
+            END
+        END
+
+        -- Provide specific guidance for master key errors
+        IF @ErrorMessage LIKE '%Cannot find the symmetric key%master key%'
+        BEGIN
+            SET @ErrorMessage = @ErrorMessage + ' Ensure the user has CONTROL or VIEW DEFINITION permission on the master key, or verify that the master key exists in the master database.';
+        END
+        ELSE IF @ErrorMessage LIKE '%Please create a master key%' OR @ErrorMessage LIKE '%open the master key%'
+        BEGIN
+            SET @ErrorMessage = @ErrorMessage + ' Ensure the correct @MasterKeyPassword is provided, set RegenerateMasterKey = 1, or use IgnoreMasterKeyPassword = 1 if SMK encryption is enabled.';
+        END
+        ELSE IF @ErrorMessage LIKE '%permission on the master key%'
+        BEGIN
+            SET @ErrorMessage = @ErrorMessage + ' Run: USE master; GRANT CONTROL ON SYMMETRIC KEY::##MS_DatabaseMasterKey## TO [YourUser];';
+        END
+
+        RAISERROR('Error enabling TDE or rotating certificate: %s', 16, 1, @ErrorMessage);
+        RETURN;
+    END CATCH
+END;
+GO
