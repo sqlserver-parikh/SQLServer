@@ -2,10 +2,10 @@ USE DBASupport;
 GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_EnableTDE
-    @DatabaseName NVARCHAR(128) = 'Testing',
+    @DatabaseName NVARCHAR(128) = 'Testing2',
     @CertificateName NVARCHAR(128) = 'TDE_Certificate',
     @EncryptionAlgorithm NVARCHAR(32) = 'AES_256',
-    @MasterKeyPassword NVARCHAR(128) = '1Str0ngP@sswordRel@2025!',
+    @MasterKeyPassword NVARCHAR(128) = '1Str0ngP@ssword@2025!',
     @BackupCertificate BIT = 1,
     @BackupPath NVARCHAR(256) = NULL,
     @PrintOnly BIT = 0
