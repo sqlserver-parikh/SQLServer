@@ -2,13 +2,13 @@ USE DBASupport;
 GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_EnableTDE
-    @DatabaseName NVARCHAR(128) = 'Testing2',
+    @DatabaseName NVARCHAR(128) = 'Testing3',
     @CertificateName NVARCHAR(128) = 'TDE_Certificate',
     @EncryptionAlgorithm NVARCHAR(32) = 'AES_256',
-    @MasterKeyPassword NVARCHAR(128) = '1Str0ngP@ssword@2025!',
-    @BackupCertificate BIT = 1,
+    @MasterKeyPassword NVARCHAR(128) = NULL,
+    @BackupCertificate BIT = 0,
     @BackupPath NVARCHAR(256) = NULL,
-    @PrintOnly BIT = 0
+    @PrintOnly BIT = 1
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -51,6 +51,18 @@ BEGIN
         -- Check if master key exists
         SET @MasterKeyExists = (SELECT COUNT(*) FROM master.sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##');
 
+        -- Check if certificate exists
+        SET @CertificateExists = (SELECT COUNT(*) FROM master.sys.certificates WHERE name = @CertificateName);
+
+        -- Validate MasterKeyPassword when required
+        IF (@MasterKeyExists = 0 OR @CertificateExists = 0 OR @BackupCertificate = 1)
+            AND (@MasterKeyPassword IS NULL OR @MasterKeyPassword = '')
+        BEGIN
+            RAISERROR('MasterKeyPassword is required when creating a master key, certificate, or backing up the certificate.', 16, 1);
+            RETURN;
+        END
+
+        -- Create master key if it doesn't exist
         IF @MasterKeyExists = 0
         BEGIN
             SET @SQL = 'USE master;' + CHAR(10) +
@@ -62,9 +74,7 @@ BEGIN
                 EXEC sp_executesql @SQL;
         END
 
-        -- Check if certificate exists
-        SET @CertificateExists = (SELECT COUNT(*) FROM master.sys.certificates WHERE name = @CertificateName);
-
+        -- Create certificate if it doesn't exist
         IF @CertificateExists = 0
         BEGIN
             SET @SQL = 'USE master;' + CHAR(10) +
@@ -83,11 +93,11 @@ BEGIN
         BEGIN
             IF @BackupPath IS NULL
             BEGIN
-              EXEC master.dbo.xp_instance_regread 
-					 N'HKEY_LOCAL_MACHINE', 
-					 N'Software\Microsoft\MSSQLServer\MSSQLServer', 
-					 N'BackupDirectory', 
-					 @BackupPath OUTPUT;
+                EXEC master.dbo.xp_instance_regread 
+                    N'HKEY_LOCAL_MACHINE', 
+                    N'Software\Microsoft\MSSQLServer\MSSQLServer', 
+                    N'BackupDirectory', 
+                    @BackupPath OUTPUT;
             END
 
             IF RIGHT(@BackupPath, 1) != '\'
