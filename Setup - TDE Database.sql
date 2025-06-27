@@ -1,8 +1,8 @@
-USE DBASupport;
+USE tempdb;
 GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_EnableTDE
-    @DatabaseName NVARCHAR(128) = 'Testing3',
+    @DatabaseName NVARCHAR(128) = NULL,
     @CertificateName NVARCHAR(128) = 'TDE_Certificate',
     @EncryptionAlgorithm NVARCHAR(32) = 'AES_256',
     @MasterKeyPassword NVARCHAR(128) = NULL,
@@ -30,11 +30,21 @@ BEGIN
 
     BEGIN TRY
         -- Validate input parameters
-        IF @DatabaseName IS NULL OR @DatabaseName = ''
+        IF @BackupCertificate = 0
         BEGIN
-            RAISERROR('DatabaseName parameter cannot be null or empty.', 16, 1);
-            RETURN;
+            IF @DatabaseName IS NULL OR @DatabaseName = ''
+            BEGIN
+                RAISERROR('DatabaseName parameter is required when not performing backup operation.', 16, 1);
+                RETURN;
+            END
+
+            IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @DatabaseName)
+            BEGIN
+                RAISERROR('Specified database does not exist.', 16, 1);
+                RETURN;
+            END
         END
+
 
         IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @DatabaseName)
         BEGIN
