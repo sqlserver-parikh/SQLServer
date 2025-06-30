@@ -18,39 +18,37 @@ CREATE OR ALTER PROCEDURE usp_GrantAccess
     @PrintOnly BIT = 1
 AS
 BEGIN
+    SET NOCOUNT ON;
     DECLARE @SQL NVARCHAR(MAX);
-    DECLARE @IsSqlLogin BIT = CASE WHEN CHARINDEX('\\', @UserName) = 0 THEN 1 ELSE 0 END;
-
-    -- Generate a strong password if not provided for SQL login
-    IF @IsSqlLogin = 1 AND ( @Password IS NULL OR @Password = '')
+    DECLARE @IsSqlLogin BIT = CASE WHEN CHARINDEX('\', @UserName) = 0 THEN 1 ELSE 0 END;
+    select @IsSqlLogin
+    -- Generate a strong password only for SQL logins if not provided
+    IF @IsSqlLogin = 1 AND (@Password IS NULL OR @Password = '')
     BEGIN
+        DECLARE @Lower NVARCHAR(26) = 'abcdefghijklmnopqrstuvwxyz';
+        DECLARE @Upper NVARCHAR(26) = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        DECLARE @Digits NVARCHAR(10) = '0123456789';
+        DECLARE @Special NVARCHAR(20) = '!@#$%^&*()-_=+[]{}';
+        DECLARE @AllChars NVARCHAR(200) = @Lower + @Upper + @Digits + @Special;
+        DECLARE @CharLength INT = LEN(@AllChars);
+        DECLARE @GeneratedPassword NVARCHAR(128) = '';
+        
+        -- Ensure at least one character from each category
+        SET @GeneratedPassword += SUBSTRING(@Lower, CAST(RAND() * LEN(@Lower) + 1 AS INT), 1);
+        SET @GeneratedPassword += SUBSTRING(@Upper, CAST(RAND() * LEN(@Upper) + 1 AS INT), 1);
+        SET @GeneratedPassword += SUBSTRING(@Digits, CAST(RAND() * LEN(@Digits) + 1 AS INT), 1);
+        SET @GeneratedPassword += SUBSTRING(@Special, CAST(RAND() * LEN(@Special) + 1 AS INT), 1);
 
+        -- Fill the rest of the password
+        WHILE LEN(@GeneratedPassword) < 18
+        BEGIN
+            SET @GeneratedPassword += SUBSTRING(@AllChars, CAST(RAND() * @CharLength + 1 AS INT), 1);
+        END
 
-
-    DECLARE @Lower NVARCHAR(26) = 'abcdefghijklmnopqrstuvwxyz';
-    DECLARE @Upper NVARCHAR(26) = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    DECLARE @Digits NVARCHAR(10) = '0123456789';
-    DECLARE @Special NVARCHAR(20) = '!@#$%^&*()-_=+[]{}';
-    DECLARE @AllChars NVARCHAR(200) = @Lower + @Upper + @Digits + @Special;
-    DECLARE @CharLength INT = LEN(@AllChars);
-    DECLARE @GeneratedPassword NVARCHAR(128) = '';
-    
-    -- Ensure at least one character from each category
-    SET @GeneratedPassword += SUBSTRING(@Lower, CAST(RAND() * LEN(@Lower) + 1 AS INT), 1);
-    SET @GeneratedPassword += SUBSTRING(@Upper, CAST(RAND() * LEN(@Upper) + 1 AS INT), 1);
-    SET @GeneratedPassword += SUBSTRING(@Digits, CAST(RAND() * LEN(@Digits) + 1 AS INT), 1);
-    SET @GeneratedPassword += SUBSTRING(@Special, CAST(RAND() * LEN(@Special) + 1 AS INT), 1);
-
--- Fill the rest of the password
-WHILE LEN(@GeneratedPassword) < 18
-BEGIN
-    SET @GeneratedPassword += SUBSTRING(@AllChars, CAST(RAND() * @CharLength + 1 AS INT), 1);
-END
-
-SET @Password = @GeneratedPassword;
+        SET @Password = @GeneratedPassword;
     END
 
-    -- Validate password complexity if SQL login and not hashed
+    -- Validate password complexity only for SQL logins and if not hashed
     IF @IsSqlLogin = 1 AND @IsPasswordHashed = 0 AND (
         @Password IS NULL OR 
         LEN(@Password) < 16 OR 
@@ -77,7 +75,7 @@ SET @Password = @GeneratedPassword;
                            CHECK_POLICY = OFF,
                            CHECK_EXPIRATION = OFF;';
             ELSE
-                SET @SQL = 'CREATE LOGIN [' + @UserName + '] WITH PASSWORD = ''' + @Password + ''';';
+                SET @SQL = 'CREATE LOGIN [' + @UserName + '] WITH PASSWORD = ''' + REPLACE(@Password, '''', '''''') + ''';';
         END
         ELSE
             SET @SQL = 'CREATE LOGIN [' + @UserName + '] FROM WINDOWS;';
@@ -89,14 +87,15 @@ SET @Password = @GeneratedPassword;
     -- Grant access to databases
     DECLARE @DBNameCursor NVARCHAR(100);
     DECLARE db_cursor CURSOR FOR
-    SELECT name FROM sys.databases
-    WHERE (
-        EXISTS (
-            SELECT 1 FROM STRING_SPLIT(@DBNames, ',') 
-            WHERE LTRIM(RTRIM(value)) = sys.databases.name
-        )
-        OR ((@DBNames IS NULL OR @DBNames = '') AND (@IncludeSystemDBs = 1 OR database_id > 4))
-    );
+    SELECT TRIM(value) AS name
+    FROM STRING_SPLIT(@DBNames, ',')
+    WHERE TRIM(value) IN (SELECT name FROM sys.databases)
+    AND (@IncludeSystemDBs = 1 OR TRIM(value) NOT IN ('master', 'model', 'msdb', 'tempdb'))
+    UNION
+    SELECT name
+    FROM sys.databases
+    WHERE @DBNames = '' AND @IncludeSystemDBs = 1
+    AND name NOT IN ('master', 'model', 'msdb', 'tempdb');
 
     OPEN db_cursor;
     FETCH NEXT FROM db_cursor INTO @DBNameCursor;
@@ -149,7 +148,7 @@ SET @Password = @GeneratedPassword;
         BEGIN
             DECLARE @Role NVARCHAR(100);
             DECLARE @RolesCursor CURSOR;
-            SET @RolesCursor = CURSOR FOR SELECT value FROM STRING_SPLIT(@CustomRoles, ',');
+            SET @RolesCursor = CURSOR FOR SELECT TRIM(value) FROM STRING_SPLIT(@CustomRoles, ',');
 
             OPEN @RolesCursor;
             FETCH NEXT FROM @RolesCursor INTO @Role;
