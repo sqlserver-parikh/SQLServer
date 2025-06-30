@@ -21,7 +21,7 @@ BEGIN
     SET NOCOUNT ON;
     DECLARE @SQL NVARCHAR(MAX);
     DECLARE @IsSqlLogin BIT = CASE WHEN CHARINDEX('\', @UserName) = 0 THEN 1 ELSE 0 END;
-    select @IsSqlLogin
+
     -- Generate a strong password only for SQL logins if not provided
     IF @IsSqlLogin = 1 AND (@Password IS NULL OR @Password = '')
     BEGIN
