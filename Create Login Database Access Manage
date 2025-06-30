@@ -1,253 +1,159 @@
+
 USE tempdb;
 GO
-CREATE OR ALTER PROCEDURE usp_DBAccessManage
-    @LoginName NVARCHAR(128) ='test',
-    @Password NVARCHAR(128) = NULL,
+
+CREATE OR ALTER PROCEDURE usp_GrantAccess
+    @UserName NVARCHAR(100) = 'Hello',
+    @Password NVARCHAR(MAX) = '0x02002933BC22A6F305DCA4241FDB4703A9551',
+    @IsPasswordHashed BIT = 1,
+    @SID NVARCHAR(100) = '0x16DCE9F134DD24F7',
     @Schema NVARCHAR(128) = NULL,
-    @ReadAccess BIT = 1,
-    @WriteAccess BIT = 1,
-    @ViewDefinition BIT = 0,
-    @ExecuteProcedure BIT = 0,
-    @ViewServerState BIT = 1,
-    @CustomRole NVARCHAR(128) = NULL,
-    @SystemDBs BIT = 0,
-    @DatabaseName NVARCHAR(MAX) = NULL,
-    @Execute BIT = 0
+    @GrantRead BIT = 1,
+    @GrantWrite BIT = 1,
+    @GrantExecute BIT = 1,
+    @GrantViewDefinition BIT = 0,
+    @GrantViewServerState BIT = 0,
+    @CustomRoles NVARCHAR(MAX) = NULL,
+    @DBName NVARCHAR(100) = NULL,
+    @IncludeSystemDBs BIT = 0,
+    @PrintOnly BIT = 1
 AS
 BEGIN
-    -- Server name
-    DECLARE @ServerName NVARCHAR(128) = @@SERVERNAME;
-    DECLARE @CreateLoginSQL NVARCHAR(MAX);
     DECLARE @SQL NVARCHAR(MAX);
-    DECLARE @SchemaFilter NVARCHAR(MAX);
-    DECLARE @DbName NVARCHAR(128);
-    DECLARE @GeneratedPassword NVARCHAR(128);
+    DECLARE @IsSqlLogin BIT = CASE WHEN CHARINDEX('\\', @UserName) = 0 THEN 1 ELSE 0 END;
 
-
-    -- Generate a strong random password if not provided
-    IF @Password IS NULL AND CHARINDEX('\', @LoginName) = 0
+    -- Generate a strong password if not provided for SQL login
+    IF @IsSqlLogin = 1 AND @Password IS NULL
     BEGIN
-        -- Generate a strong 16-character random password with diverse characters
-        DECLARE @Chars NVARCHAR(100) = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
-        DECLARE @CharLength INT = LEN(@Chars)
-        DECLARE @i INT = 1
-        SET @GeneratedPassword = ''
-
+        DECLARE @Chars NVARCHAR(100) = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
+        DECLARE @CharLength INT = LEN(@Chars);
+        DECLARE @i INT = 1;
+        DECLARE @GeneratedPassword NVARCHAR(128) = '';
         WHILE @i <= 16
         BEGIN
-            SET @GeneratedPassword = @GeneratedPassword + SUBSTRING(@Chars, CAST(RAND(CHECKSUM(NEWID())) * @CharLength AS INT) + 1, 1)
-            SET @i = @i + 1
+            SET @GeneratedPassword += SUBSTRING(@Chars, CAST(RAND(CHECKSUM(NEWID())) * @CharLength AS INT) + 1, 1);
+            SET @i += 1;
         END
-
-        SET @Password = @GeneratedPassword
-    END
-    PRINT '--Login Name: ' + @LoginName
-    PRINT '--Password: ' + @Password
-
-    -- Split @DatabaseName into a table of database names
-    DECLARE @DatabaseTable TABLE (DatabaseName NVARCHAR(128));
-    IF @DatabaseName IS NOT NULL
-    BEGIN
-        INSERT INTO @DatabaseTable (DatabaseName)
-        SELECT value FROM STRING_SPLIT(@DatabaseName, ',');
+        SET @Password = @GeneratedPassword;
     END
 
-    -- Check if the login exists
-    IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = @LoginName)
+    -- Validate password complexity if SQL login and not hashed
+    IF @IsSqlLogin = 1 AND @IsPasswordHashed = 0 AND (
+        @Password IS NULL OR 
+        LEN(@Password) < 16 OR 
+        @Password NOT LIKE '%[A-Z]%' OR 
+        @Password NOT LIKE '%[a-z]%' OR 
+        @Password NOT LIKE '%[0-9]%' OR 
+        @Password NOT LIKE '%[^a-zA-Z0-9]%'
+    )
     BEGIN
-        -- Check if the login is a domain account
-        IF CHARINDEX('\', @LoginName) = 0
+        RAISERROR('Password must be at least 16 characters long and include at least one uppercase letter, one lowercase letter, one number, and one special character.', 16, 1);
+        RETURN;
+    END
+
+    -- Create login if it doesn't exist
+    IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = @UserName)
+    BEGIN
+        IF @IsSqlLogin = 1
         BEGIN
-            -- Create SQL login with password
-            SET @CreateLoginSQL = 'CREATE LOGIN [' + @LoginName + '] WITH PASSWORD = ''' + @Password + ''''
+            IF @IsPasswordHashed = 1
+                SET @SQL = 'CREATE LOGIN [' + @UserName + '] WITH PASSWORD = ' + @Password + ' HASHED' +
+                           ISNULL(', SID = ' + @SID, '') + ',
+                           DEFAULT_DATABASE = [master],
+                           DEFAULT_LANGUAGE = [us_english],
+                           CHECK_POLICY = OFF,
+                           CHECK_EXPIRATION = OFF;';
+            ELSE
+                SET @SQL = 'CREATE LOGIN [' + @UserName + '] WITH PASSWORD = ''' + @Password + ''';';
         END
         ELSE
-        BEGIN
-            -- Create Windows login
-            SET @CreateLoginSQL = 'CREATE LOGIN [' + @LoginName + '] FROM WINDOWS'
-        END
-        IF @Execute = 1
-        BEGIN
-            EXEC(@CreateLoginSQL)
-        END
-        ELSE
-        BEGIN
-            PRINT @CreateLoginSQL
-        END
+            SET @SQL = 'CREATE LOGIN [' + @UserName + '] FROM WINDOWS;';
+
+        PRINT @SQL;
+        IF @PrintOnly = 0 EXEC sp_executesql @SQL;
     END
 
-    -- Cursor to loop through all user databases and optionally system databases
+    -- Grant access to databases
+    DECLARE @DBNameCursor NVARCHAR(100);
     DECLARE db_cursor CURSOR FOR
-    SELECT name FROM sys.databases 
-    WHERE (database_id > 4 OR @SystemDBs = 1) -- Include system databases if @SystemDBs is 1
-    AND state_desc = 'ONLINE' -- Database is online
-    AND is_read_only = 0 -- Database is in read-write mode
-    AND (@DatabaseName IS NULL OR name IN (SELECT DatabaseName FROM @DatabaseTable)) -- Filter by specified databases
-    OPEN db_cursor
-    FETCH NEXT FROM db_cursor INTO @DbName
+    SELECT name FROM sys.databases
+    WHERE (@DBName IS NOT NULL AND name = @DBName)
+       OR (@DBName IS NULL AND (@IncludeSystemDBs = 1 OR database_id > 4));
 
-    -- Print header information
-    PRINT '--Server: ' + @ServerName;
-    PRINT '--User: ' + @LoginName;
-    PRINT '--Granted Access:';
-    PRINT '-------------------';
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DBNameCursor;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        -- Construct the SQL to create the user if it doesn't exist
-        SET @SQL = 'USE [' + @DbName + '];
-                    IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = ''' + @LoginName + ''')
-                    BEGIN
-                        CREATE USER [' + @LoginName + '] FOR LOGIN [' + @LoginName + '];
-                    END'
+        SET @SQL = 'USE [' + @DBNameCursor + '];';
+        SET @SQL += '
+            IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = ''' + @UserName + ''')
+                CREATE USER [' + @UserName + '] FOR LOGIN [' + @UserName + '];
+            ELSE
+                ALTER USER [' + @UserName + '] WITH LOGIN = [' + @UserName + '];';
 
-        -- Execute or print the SQL
-        IF @Execute = 1
-        BEGIN
-            EXEC(@SQL)
-        END
-        ELSE
-        BEGIN
-            PRINT @SQL
-        END
-
-        -- Define schema filter
-        SET @SchemaFilter = ISNULL(@Schema, 'dbo')
-
-        -- Track access rights given
-        DECLARE @AccessRights NVARCHAR(MAX) = '';
-
-        -- Grant permissions based on the parameters
-        IF @ReadAccess = 1
+        IF @GrantRead = 1
         BEGIN
             IF @Schema IS NULL
-            BEGIN
-                SET @SQL = 'USE [' + @DbName + '];
-                            ALTER ROLE db_datareader ADD MEMBER [' + @LoginName + ']'
-            END
+                SET @SQL += ' ALTER ROLE db_datareader ADD MEMBER [' + @UserName + '];';
             ELSE
-            BEGIN
-                SET @SQL = 'USE [' + @DbName + '];
-                            GRANT SELECT ON SCHEMA::[' + @Schema + '] TO [' + @LoginName + ']'
-            END
-            IF @Execute = 1
-            BEGIN
-                EXEC(@SQL)
-            END
-            ELSE
-            BEGIN
-                PRINT @SQL
-            END
-            SET @AccessRights = @AccessRights + 'Read Access; '
-        END
-        IF @WriteAccess = 1
-        BEGIN
-            IF @Schema IS NULL
-            BEGIN
-                SET @SQL = 'USE [' + @DbName + '];
-                            ALTER ROLE db_datawriter ADD MEMBER [' + @LoginName + ']'
-            END
-            ELSE
-            BEGIN
-                SET @SQL = 'USE [' + @DbName + '];
-                            GRANT INSERT, UPDATE, DELETE ON SCHEMA::[' + @Schema + '] TO [' + @LoginName + ']'
-            END
-            IF @Execute = 1
-            BEGIN
-                EXEC(@SQL)
-            END
-            ELSE
-            BEGIN
-                PRINT @SQL
-            END
-            SET @AccessRights = @AccessRights + 'Write Access; '
-        END
-        IF @ViewDefinition = 1
-        BEGIN
-            IF @Schema IS NULL
-            BEGIN
-                SET @SQL = 'USE [' + @DbName + '];
-                            GRANT VIEW DEFINITION TO [' + @LoginName + ']'
-            END
-            ELSE
-            BEGIN
-                SET @SQL = 'USE [' + @DbName + '];
-                            GRANT VIEW DEFINITION ON SCHEMA::[' + @Schema + '] TO [' + @LoginName + ']'
-            END
-            IF @Execute = 1
-            BEGIN
-                EXEC(@SQL)
-            END
-            ELSE
-            BEGIN
-                PRINT @SQL
-            END
-            SET @AccessRights = @AccessRights + 'View Definition; '
-        END
-        IF @ExecuteProcedure = 1
-        BEGIN
-            IF @Schema IS NULL
-            BEGIN
-                SET @SQL = 'USE [' + @DbName + '];
-                            GRANT EXECUTE TO [' + @LoginName + ']'
-            END
-            ELSE
-            BEGIN
-                SET @SQL = 'USE [' + @DbName + '];
-                            GRANT EXECUTE ON SCHEMA::[' + @Schema + '] TO [' + @LoginName + ']'
-            END
-            IF @Execute = 1
-            BEGIN
-                EXEC(@SQL)
-            END
-            ELSE
-            BEGIN
-                PRINT @SQL
-            END
-            SET @AccessRights = @AccessRights + 'Execute Procedure; '
-        END
-        IF @ViewServerState = 1
-        BEGIN
-            SET @SQL = 'USE [' + @DbName + '];
-                        GRANT VIEW SERVER STATE TO [' + @LoginName + ']'
-            IF @Execute = 1
-            BEGIN
-                EXEC(@SQL)
-            END
-            ELSE
-            BEGIN
-                PRINT @SQL
-            END
-            SET @AccessRights = @AccessRights + 'View Server State; '
+                SET @SQL += ' GRANT SELECT ON SCHEMA::[' + @Schema + '] TO [' + @UserName + '];';
         END
 
-        -- Grant access to custom role if it exists
-        IF @CustomRole IS NOT NULL
+        IF @GrantWrite = 1
         BEGIN
-            SET @SQL = 'USE [' + @DbName + '];
-                        IF EXISTS (SELECT * FROM sys.database_principals WHERE name = ''' + @CustomRole + ''')
-                        BEGIN
-                            ALTER ROLE [' + @CustomRole + '] ADD MEMBER [' + @LoginName + '];
-                        END'
-            IF @Execute = 1
-            BEGIN
-                EXEC(@SQL)
-            END
+            IF @Schema IS NULL
+                SET @SQL += ' ALTER ROLE db_datawriter ADD MEMBER [' + @UserName + '];';
             ELSE
-            BEGIN
-                PRINT @SQL
-            END
-            SET @AccessRights = @AccessRights + 'Custom Role (' + @CustomRole + '); '
+                SET @SQL += ' GRANT INSERT, UPDATE, DELETE ON SCHEMA::[' + @Schema + '] TO [' + @UserName + '];';
         END
 
-        -- Print access rights for the database
-        PRINT '--Database: ' + @DbName + ' - ' + @AccessRights;
+        IF @GrantExecute = 1
+        BEGIN
+            IF @Schema IS NULL
+                SET @SQL += ' GRANT EXECUTE TO [' + @UserName + '];';
+            ELSE
+                SET @SQL += ' GRANT EXECUTE ON SCHEMA::[' + @Schema + '] TO [' + @UserName + '];';
+        END
 
-        FETCH NEXT FROM db_cursor INTO @DbName
+        IF @GrantViewDefinition = 1
+        BEGIN
+            IF @Schema IS NULL
+                SET @SQL += ' GRANT VIEW DEFINITION TO [' + @UserName + '];';
+            ELSE
+                SET @SQL += ' GRANT VIEW DEFINITION ON SCHEMA::[' + @Schema + '] TO [' + @UserName + '];';
+        END
+
+        IF @GrantViewServerState = 1
+            SET @SQL += ' GRANT VIEW SERVER STATE TO [' + @UserName + '];';
+
+        IF @CustomRoles IS NOT NULL
+        BEGIN
+            DECLARE @Role NVARCHAR(100);
+            DECLARE @RolesCursor CURSOR;
+            SET @RolesCursor = CURSOR FOR SELECT value FROM STRING_SPLIT(@CustomRoles, ',');
+
+            OPEN @RolesCursor;
+            FETCH NEXT FROM @RolesCursor INTO @Role;
+
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                SET @SQL += ' IF EXISTS (SELECT * FROM sys.database_principals WHERE name = ''' + @Role + ''')
+                    ALTER ROLE [' + @Role + '] ADD MEMBER [' + @UserName + '];';
+                FETCH NEXT FROM @RolesCursor INTO @Role;
+            END
+
+            CLOSE @RolesCursor;
+            DEALLOCATE @RolesCursor;
+        END
+
+        PRINT @SQL;
+        IF @PrintOnly = 0 EXEC sp_executesql @SQL;
+
+        FETCH NEXT FROM db_cursor INTO @DBNameCursor;
     END
 
-    CLOSE db_cursor
-    DEALLOCATE db_cursor
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
 END
 GO
-EXEC usp_DBAccessManage
