@@ -14,6 +14,7 @@ CREATE OR ALTER PROCEDURE usp_GrantAccess
     @GrantViewServerState BIT = 0,
     @CustomRoles NVARCHAR(MAX) = NULL,
     @DBNames NVARCHAR(MAX) = '',
+    @ExcludeDBs NVARCHAR(MAX) = NULL,
     @IncludeSystemDBs BIT = 0,
     @PrintOnly BIT = 1
 AS
@@ -32,7 +33,7 @@ BEGIN
         DECLARE @AllChars NVARCHAR(200) = @Lower + @Upper + @Digits + @Special;
         DECLARE @CharLength INT = LEN(@AllChars);
         DECLARE @GeneratedPassword NVARCHAR(128) = '';
-        
+
         -- Ensure at least one character from each category
         SET @GeneratedPassword += SUBSTRING(@Lower, CAST(RAND() * LEN(@Lower) + 1 AS INT), 1);
         SET @GeneratedPassword += SUBSTRING(@Upper, CAST(RAND() * LEN(@Upper) + 1 AS INT), 1);
@@ -46,6 +47,7 @@ BEGIN
         END
 
         SET @Password = @GeneratedPassword;
+        PRINT 'Generated Password: ' + @Password;
     END
 
     -- Validate password complexity only for SQL logins and if not hashed
@@ -87,15 +89,28 @@ BEGIN
     -- Grant access to databases
     DECLARE @DBNameCursor NVARCHAR(100);
     DECLARE db_cursor CURSOR FOR
-    SELECT TRIM(value) AS name
-    FROM STRING_SPLIT(@DBNames, ',')
-    WHERE TRIM(value) IN (SELECT name FROM sys.databases)
-    AND (@IncludeSystemDBs = 1 OR TRIM(value) NOT IN ('master', 'model', 'msdb', 'tempdb'))
-    UNION
     SELECT name
-    FROM sys.databases
-    WHERE @DBNames = '' AND @IncludeSystemDBs = 1
-    AND name NOT IN ('master', 'model', 'msdb', 'tempdb');
+        FROM sys.databases
+        WHERE (
+            -- If @DBNames is empty, include all (filtered by system DBs below)
+            @DBNames = ''
+            OR name IN (
+                SELECT LTRIM(RTRIM(value)) FROM STRING_SPLIT(@DBNames, ',')
+            )
+        )
+        AND (
+            -- Exclude any databases listed in @ExcludeDBs
+            @ExcludeDBs IS NULL
+            OR name NOT IN (
+                SELECT LTRIM(RTRIM(value)) FROM STRING_SPLIT(@ExcludeDBs, ',')
+            )
+        )
+        AND (
+            -- If system DBs are not included, exclude them
+            @IncludeSystemDBs = 1
+            OR name NOT IN ('master', 'model', 'msdb', 'tempdb')
+        );
+
 
     OPEN db_cursor;
     FETCH NEXT FROM db_cursor INTO @DBNameCursor;
@@ -148,7 +163,7 @@ BEGIN
         BEGIN
             DECLARE @Role NVARCHAR(100);
             DECLARE @RolesCursor CURSOR;
-            SET @RolesCursor = CURSOR FOR SELECT TRIM(value) FROM STRING_SPLIT(@CustomRoles, ',');
+            SET @RolesCursor = CURSOR FOR SELECT LTRIM(RTRIM(value)) FROM STRING_SPLIT(@CustomRoles, ',');
 
             OPEN @RolesCursor;
             FETCH NEXT FROM @RolesCursor INTO @Role;
