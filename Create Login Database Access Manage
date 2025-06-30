@@ -1,12 +1,11 @@
-
 USE tempdb;
 GO
 
 CREATE OR ALTER PROCEDURE usp_GrantAccess
-    @UserName NVARCHAR(100) = 'Hello',
-    @Password NVARCHAR(MAX) = '0x02002933BC22A6F305DCA4241FDB4703A9551',
-    @IsPasswordHashed BIT = 1,
-    @SID NVARCHAR(100) = '0x16DCE9F134DD24F7',
+    @UserName NVARCHAR(100) = 'hellooo',
+    @Password NVARCHAR(MAX) = NULL,
+    @IsPasswordHashed BIT = 0,
+    @SID NVARCHAR(100) = NULL,
     @Schema NVARCHAR(128) = NULL,
     @GrantRead BIT = 1,
     @GrantWrite BIT = 1,
@@ -14,7 +13,7 @@ CREATE OR ALTER PROCEDURE usp_GrantAccess
     @GrantViewDefinition BIT = 0,
     @GrantViewServerState BIT = 0,
     @CustomRoles NVARCHAR(MAX) = NULL,
-    @DBName NVARCHAR(100) = NULL,
+    @DBNames NVARCHAR(MAX) = '',
     @IncludeSystemDBs BIT = 0,
     @PrintOnly BIT = 1
 AS
@@ -23,18 +22,32 @@ BEGIN
     DECLARE @IsSqlLogin BIT = CASE WHEN CHARINDEX('\\', @UserName) = 0 THEN 1 ELSE 0 END;
 
     -- Generate a strong password if not provided for SQL login
-    IF @IsSqlLogin = 1 AND @Password IS NULL
+    IF @IsSqlLogin = 1 AND ( @Password IS NULL OR @Password = '')
     BEGIN
-        DECLARE @Chars NVARCHAR(100) = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
-        DECLARE @CharLength INT = LEN(@Chars);
-        DECLARE @i INT = 1;
-        DECLARE @GeneratedPassword NVARCHAR(128) = '';
-        WHILE @i <= 16
-        BEGIN
-            SET @GeneratedPassword += SUBSTRING(@Chars, CAST(RAND(CHECKSUM(NEWID())) * @CharLength AS INT) + 1, 1);
-            SET @i += 1;
-        END
-        SET @Password = @GeneratedPassword;
+
+
+
+    DECLARE @Lower NVARCHAR(26) = 'abcdefghijklmnopqrstuvwxyz';
+    DECLARE @Upper NVARCHAR(26) = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    DECLARE @Digits NVARCHAR(10) = '0123456789';
+    DECLARE @Special NVARCHAR(20) = '!@#$%^&*()-_=+[]{}';
+    DECLARE @AllChars NVARCHAR(200) = @Lower + @Upper + @Digits + @Special;
+    DECLARE @CharLength INT = LEN(@AllChars);
+    DECLARE @GeneratedPassword NVARCHAR(128) = '';
+    
+    -- Ensure at least one character from each category
+    SET @GeneratedPassword += SUBSTRING(@Lower, CAST(RAND() * LEN(@Lower) + 1 AS INT), 1);
+    SET @GeneratedPassword += SUBSTRING(@Upper, CAST(RAND() * LEN(@Upper) + 1 AS INT), 1);
+    SET @GeneratedPassword += SUBSTRING(@Digits, CAST(RAND() * LEN(@Digits) + 1 AS INT), 1);
+    SET @GeneratedPassword += SUBSTRING(@Special, CAST(RAND() * LEN(@Special) + 1 AS INT), 1);
+
+-- Fill the rest of the password
+WHILE LEN(@GeneratedPassword) < 18
+BEGIN
+    SET @GeneratedPassword += SUBSTRING(@AllChars, CAST(RAND() * @CharLength + 1 AS INT), 1);
+END
+
+SET @Password = @GeneratedPassword;
     END
 
     -- Validate password complexity if SQL login and not hashed
@@ -77,8 +90,13 @@ BEGIN
     DECLARE @DBNameCursor NVARCHAR(100);
     DECLARE db_cursor CURSOR FOR
     SELECT name FROM sys.databases
-    WHERE (@DBName IS NOT NULL AND name = @DBName)
-       OR (@DBName IS NULL AND (@IncludeSystemDBs = 1 OR database_id > 4));
+    WHERE (
+        EXISTS (
+            SELECT 1 FROM STRING_SPLIT(@DBNames, ',') 
+            WHERE LTRIM(RTRIM(value)) = sys.databases.name
+        )
+        OR ((@DBNames IS NULL OR @DBNames = '') AND (@IncludeSystemDBs = 1 OR database_id > 4))
+    );
 
     OPEN db_cursor;
     FETCH NEXT FROM db_cursor INTO @DBNameCursor;
