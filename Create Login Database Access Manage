@@ -47,7 +47,7 @@ BEGIN
         END
 
         SET @Password = @GeneratedPassword;
-        PRINT 'Generated Password: ' + @Password;
+        PRINT '--Generated Password: ' + @Password;
     END
 
     -- Validate password complexity only for SQL logins and if not hashed
