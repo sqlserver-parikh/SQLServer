@@ -130,6 +130,26 @@ INTO #DbSizeInfo
 FROM sys.master_files
 GROUP BY db_name(database_id);
 
+SELECT
+    at.transaction_id,
+    at.name AS transaction_name,
+    at.transaction_begin_time,
+    at.transaction_type,
+    at.transaction_state,
+    s.session_id,
+    s.login_name,
+    r.status,
+    r.command,
+    r.cpu_time,
+    r.total_elapsed_time,
+    t.text AS sql_text, s.database_id
+INTO #OpenTran
+FROM sys.dm_tran_active_transactions at
+JOIN sys.dm_tran_session_transactions st ON at.transaction_id = st.transaction_id
+JOIN sys.dm_exec_sessions s ON st.session_id = s.session_id
+JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t;
+
 -- Gather transaction log file size and auto-growth specs for each database
 EXEC master.sys.sp_MSforeachdb '
     USE [?];
@@ -234,7 +254,9 @@ BEGIN
             ELSE
                 (
                     SELECT CONVERT(VARCHAR(5), fi.VlfCount) + ' - ' + log_reuse_wait_desc + '('
-                        + CONVERT(VARCHAR(128), LogBackupDate) + ')'
+                        + CONVERT(VARCHAR(128), LogBackupDate) + ')' + 
+                        
+                    isnull( ( SELECT TOP 1 ISNULL(', (Tran Time:-' + convert(varchar(128),transaction_begin_time ,121),'') FROM #OpenTran OT WHERE  OT.database_id = x.database_id ORDER BY transaction_begin_time ASC) + ')','')
                     FROM sys.databases x
                         LEFT JOIN #BackupInfo bkup ON x.name = bkup.DbName
                     WHERE x.database_id = f.database_id
