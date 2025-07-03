@@ -1,0 +1,937 @@
+CREATE OR ALTER PROCEDURE [dbo].[usp_PartitionMaintenance] 
+    @TableName VARCHAR(128) = '', 
+    @CleanupOlderThan VARCHAR(10) = '3m',  -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y')
+    @NextPartitionAfter VARCHAR(10) = '6m', -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y', '-3m')
+    @Execute BIT = 0,                       -- 0=Print commands only, 1=Execute commands
+    @FileGroupName VARCHAR(128) = 'PRIMARY', -- Target filegroup for new partitions
+    @PartitionALIGNEDIndex BIT = 0,         -- 1=Show partition-aligned indexes report
+    @AllPartitionTablesInfo BIT = 1,        -- 1=Show detailed partition information
+    @Cleanup BIT = 0,						-- 1=Enable cleanup of old partitions, 0=Skip cleanup
+	@MergeRange BIT = 0,					--1= Enable merge ranges, best option to keep 0 and clean up, sometimes if multiple tables with one scheme/function than mergerage will block.
+    @SlidingWindow BIT = 0                 -- 1=Enable creation of new partition boundaries, 0=Skip new boundaries
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    /*
+    PARAMETER DESCRIPTION:
+    ---------------------
+    @TableName: Specific table to maintain partitions for. Use '%' or '' for all partitioned tables.
+    
+    @CleanupOlderThan: Age threshold for removing old partitions. Format is number followed by unit:
+                       - '30d' = 30 days
+                       - '6m' = 6 months
+                       - '1y' = 1 year
+                       Partitions older than this threshold will be switched out and removed.
+    
+    @NextPartitionAfter: When to create the next partition boundary. Format is number followed by unit:
+                        - '30d' = 30 days in the future
+                        - '6m' = 6 months in the future
+                        - '1y' = 1 year in the future
+                        - '-3m' = 3 months in the past
+                        This controls how far in advance/past to prepare partitions.
+    
+    @Execute: Controls whether commands are executed or only printed:
+              - 0 = Print all commands that would be executed (safe mode)
+              - 1 = Execute all commands
+    
+    @FileGroupName: The filegroup where new partitions will be stored.
+    
+    @PartitionALIGNEDIndex: Controls whether to show partition-aligned indexes report:
+                            - 0 = Don't show report
+                            - 1 = Show report
+    
+    @AllPartitionTablesInfo: Controls whether to show detailed partition information:
+                             - 0 = Don't show detailed info
+                             - 1 = Show detailed partition information
+                             
+    @Cleanup: Controls whether old partitions are cleaned up:
+              - 0 = Skip cleanup of old partitions
+              - 1 = Clean up old partitions based on @CleanupOlderThan
+              
+    @SlidingWindow: Controls whether new partition boundaries are created:
+                    - 0 = Skip creation of new partition boundaries
+                    - 1 = Create new partition boundaries based on @NextPartitionAfter
+    */
+    
+    -- Handle table name parameters
+    SET @TableName = ISNULL(@TableName, '%');
+    IF @TableName = ''
+        SET @TableName = '%';
+    
+    -- Parse time parameter for cleanup
+    DECLARE @CleanupValue INT;
+    DECLARE @CleanupUnit CHAR(1);
+    DECLARE @CleanupDate DATE;
+    
+    -- Extract numeric value and unit
+    SET @CleanupValue = CAST(LEFT(@CleanupOlderThan, LEN(@CleanupOlderThan)-1) AS INT);
+    SET @CleanupUnit = LOWER(RIGHT(@CleanupOlderThan, 1));
+    
+    -- Calculate cleanup date based on unit
+    IF @CleanupUnit = 'd'
+        SET @CleanupDate = DATEADD(DAY, -@CleanupValue, GETDATE());
+    ELSE IF @CleanupUnit = 'm'
+        SET @CleanupDate = DATEADD(MONTH, -@CleanupValue, GETDATE());
+    ELSE IF @CleanupUnit = 'y'
+        SET @CleanupDate = DATEADD(YEAR, -@CleanupValue, GETDATE());
+    ELSE
+    BEGIN
+        RAISERROR('Invalid @CleanupOlderThan format. Use {number}{unit} where unit is d=days, m=months, y=years. Examples: 30d, 6m, 1y', 16, 1);
+        RETURN;
+    END
+    
+    -- Parse time parameter for next partition
+    DECLARE @NextValue INT;
+    DECLARE @NextUnit CHAR(1);
+    DECLARE @IsNegative BIT = 0;
+    DECLARE @NextPartitionDate DATE;
+    DECLARE @TempNextPartitionAfter VARCHAR(10) = @NextPartitionAfter;
+    
+    -- Check if the value is negative
+    IF LEFT(@NextPartitionAfter, 1) = '-'
+    BEGIN
+        SET @IsNegative = 1;
+        SET @TempNextPartitionAfter = SUBSTRING(@NextPartitionAfter, 2, LEN(@NextPartitionAfter) - 1);
+    END
+    
+    -- Extract numeric value and unit
+    SET @NextValue = CAST(LEFT(@TempNextPartitionAfter, LEN(@TempNextPartitionAfter)-1) AS INT);
+    SET @NextUnit = LOWER(RIGHT(@TempNextPartitionAfter, 1));
+    
+    -- Handle negative values
+    IF @IsNegative = 1
+        SET @NextValue = -@NextValue;
+    
+    -- Calculate next partition date based on unit
+    IF @NextUnit = 'd'
+        SET @NextPartitionDate = DATEADD(DAY, @NextValue, GETDATE());
+    ELSE IF @NextUnit = 'm'
+        SET @NextPartitionDate = DATEADD(MONTH, @NextValue, GETDATE());
+    ELSE IF @NextUnit = 'y'
+        SET @NextPartitionDate = DATEADD(YEAR, @NextValue, GETDATE());
+    ELSE
+    BEGIN
+        RAISERROR('Invalid @NextPartitionAfter format. Use {number}{unit} where unit is d=days, m=months, y=years. Examples: 30d, 6m, 1y, -3m', 16, 1);
+        RETURN;
+    END
+    
+    -- Print parameters for reference
+    PRINT '-- Partition Maintenance Parameters:';
+    PRINT '-- TableName: ' + @TableName;
+    PRINT '-- Cleanup Enabled: ' + CASE WHEN @Cleanup = 1 THEN 'YES' ELSE 'NO' END;
+    PRINT '-- CleanupOlderThan: ' + @CleanupOlderThan + ' (Date: ' + CONVERT(VARCHAR(10), @CleanupDate, 120) + ')';
+    PRINT '-- SlidingWindow Enabled: ' + CASE WHEN @SlidingWindow = 1 THEN 'YES' ELSE 'NO' END;
+    PRINT '-- NextPartitionAfter: ' + @NextPartitionAfter + ' (Date: ' + CONVERT(VARCHAR(10), @NextPartitionDate, 120) + ')';
+    PRINT '-- FileGroupName: ' + @FileGroupName;
+    PRINT '-- Execute: ' + CASE WHEN @Execute = 1 THEN 'YES' ELSE 'NO - Commands will be printed only' END;
+    PRINT '';
+        
+    -- Variable declarations
+    DECLARE @BOUNDARYvalue SQL_VARIANT; 
+    DECLARE @partition_number INT;
+    DECLARE @sql NVARCHAR(MAX);
+    DECLARE @fname VARCHAR(128);
+    DECLARE @sname VARCHAR(128);
+    DECLARE @rows BIGINT;
+    DECLARE @boundary VARCHAR(MAX);
+    DECLARE @ErrorMsg NVARCHAR(4000);
+    DECLARE @FileGroupExists BIT = 0;
+    DECLARE @SwitchoutTableName VARCHAR(128);
+    DECLARE @CreateSwitchoutTableSql NVARCHAR(MAX);
+    DECLARE @DropCount INT;
+    DECLARE @FGName NVARCHAR(128);
+    DECLARE @TableToDrop VARCHAR(128);
+    DECLARE @DropTableName VARCHAR(128);
+    DECLARE @CurrentTableName VARCHAR(128) = '';  -- Added to track current table being processed
+    DECLARE @BoundaryAlreadyExists BIT = 0;       -- Flag to track if boundary already exists
+    DECLARE @TableCompression VARCHAR(128);        -- Added to track table compression
+    DECLARE @SwitchoutCompression VARCHAR(128);    -- Added to track switchout table compression
+    
+    -- Create table variable to track switchout tables
+    DECLARE @SwitchoutTableList TABLE (TableName VARCHAR(128));
+     
+    -- Check if the file group exists
+    SELECT @FileGroupExists = 1
+    FROM sys.filegroups
+    WHERE name = @FileGroupName;
+    
+    IF @FileGroupExists = 0
+    BEGIN
+        -- Get list of filegroups
+        PRINT 'ERROR: Filegroup [' + @FileGroupName + '] does not exist. Available filegroups:';
+        
+        -- List filegroups individually
+        DECLARE @FGCursor CURSOR;
+        
+        SET @FGCursor = CURSOR FOR
+            SELECT name FROM sys.filegroups ORDER BY name;
+            
+        OPEN @FGCursor;
+        FETCH NEXT FROM @FGCursor INTO @FGName;
+        
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            PRINT '  - [' + @FGName + ']';
+            FETCH NEXT FROM @FGCursor INTO @FGName;
+        END;
+        
+        CLOSE @FGCursor;
+        DEALLOCATE @FGCursor;
+            
+        RAISERROR('Cannot proceed with invalid filegroup.', 16, 1);
+        RETURN;
+    END
+    
+    -- Begin main procedure logic with proper error handling
+    BEGIN TRY
+        -- Create a temporary table to store partition function info
+        CREATE TABLE #PartitionFunctions (
+            SchemeID INT,
+            SchemeName NVARCHAR(128),
+            FunctionID INT,
+            FunctionName NVARCHAR(128),
+            IsDateBased BIT
+        );
+        
+        -- Populate the temp table, determining date-based functions
+        INSERT INTO #PartitionFunctions (SchemeID, SchemeName, FunctionID, FunctionName, IsDateBased)
+        SELECT DISTINCT 
+            s.data_space_id,
+            s.name,
+            f.function_id,
+            f.name,
+            CASE 
+                WHEN EXISTS (
+                    SELECT 1 
+                    FROM sys.partition_range_values r 
+                    WHERE r.function_id = f.function_id 
+                    AND SQL_VARIANT_PROPERTY(r.value, 'BaseType') IN 
+                        ('date', 'datetime', 'datetime2', 'datetimeoffset', 'smalldatetime')
+                ) THEN 1
+                ELSE 0
+            END
+        FROM sys.partition_schemes s
+        JOIN sys.partition_functions f ON s.function_id = f.function_id;
+            
+        -- Process partition schemes for future/past partition boundaries if enabled
+        IF @SlidingWindow = 1
+        BEGIN
+            PRINT '-- Starting sliding window operations (creating partition boundaries for ' + CONVERT(VARCHAR(10), @NextPartitionDate, 120) + ')';
+            
+            IF @TableName = '%'
+            BEGIN
+                -- Process all partition schemes and functions in the database
+                DECLARE @AllPartitionCursor CURSOR;
+                DECLARE @CurrSchemeID INT, @CurrScheme VARCHAR(128), @CurrFunctionID INT, @CurrFunction VARCHAR(128), @IsDateBased BIT;
+                
+                SET @AllPartitionCursor = CURSOR FOR
+                    SELECT SchemeID, SchemeName, FunctionID, FunctionName, IsDateBased
+                    FROM #PartitionFunctions;
+                    
+                OPEN @AllPartitionCursor;
+                FETCH NEXT FROM @AllPartitionCursor INTO @CurrSchemeID, @CurrScheme, @CurrFunctionID, @CurrFunction, @IsDateBased;
+                
+                WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    -- Check if partition function is date-based
+                    IF @IsDateBased = 1
+                    BEGIN
+                        -- Check if the boundary already exists
+                        SET @BoundaryAlreadyExists = 0;
+                        
+                        -- Check if boundary already exists for this function
+                        BEGIN TRY
+                            -- This dynamic SQL will set @BoundaryAlreadyExists to 1 if the boundary exists
+                            DECLARE @CheckBoundarySql NVARCHAR(MAX);
+                            SET @CheckBoundarySql = N'
+                            SELECT @BoundaryExists = CASE WHEN EXISTS (
+                                SELECT 1 
+                                FROM sys.partition_range_values v
+                                WHERE v.function_id = ' + CAST(@CurrFunctionID AS VARCHAR(10)) + '
+                                AND CONVERT(DATE, v.value) = ''' + CONVERT(VARCHAR(10), @NextPartitionDate, 120) + '''
+                            ) THEN 1 ELSE 0 END;';
+                            
+                            EXEC sp_executesql @CheckBoundarySql, N'@BoundaryExists BIT OUTPUT', @BoundaryAlreadyExists OUTPUT;
+                        END TRY
+                        BEGIN CATCH
+                            PRINT '-- Error checking for existing boundary: ' + ERROR_MESSAGE();
+                            SET @BoundaryAlreadyExists = 0; -- Assume it doesn't exist if there's an error
+                        END CATCH
+                        
+                        IF @BoundaryAlreadyExists = 1
+                        BEGIN
+                            PRINT '-- Boundary for ' + CONVERT(VARCHAR(10), @NextPartitionDate, 120) + 
+                                ' already exists in function [' + @CurrFunction + ']. Skipping creation.';
+                        END
+                        ELSE
+                        BEGIN
+                            -- Generate and execute/print ALTER statements for each scheme
+                            SET @sql = 'ALTER PARTITION SCHEME [' + @CurrScheme + '] NEXT USED [' + @FileGroupName + ']';
+                            IF @Execute = 1
+                                EXEC sp_executesql @sql;
+                            ELSE
+                                PRINT @sql;
+                                
+                            SET @sql = 'ALTER PARTITION FUNCTION [' + @CurrFunction + ']() SPLIT RANGE (''' + 
+                                    CONVERT(VARCHAR(23), @NextPartitionDate, 121) + ''')';
+                            IF @Execute = 1
+                                EXEC sp_executesql @sql;
+                            ELSE
+                                PRINT @sql;
+                        END
+                    END
+                    ELSE
+                    BEGIN
+                        -- Print a warning instead of processing non-date functions
+                        PRINT 'WARNING: Partition function [' + @CurrFunction + 
+                            '] is not date-based. Skipping.';
+                        
+                        -- Display the first 5 partition range values using system tables to avoid SQL_VARIANT
+                        PRINT 'Sample range values (displaying as strings):';
+                        
+                        EXEC('
+                        SELECT TOP 5 ''  - '' + CAST(CONVERT(NVARCHAR(100), r.value) AS NVARCHAR(255)) 
+                        FROM sys.partition_range_values r
+                        WHERE r.function_id = ' + @CurrFunctionID + '
+                        ORDER BY r.boundary_id
+                        FOR XML PATH('''')');
+                    END
+                    
+                    FETCH NEXT FROM @AllPartitionCursor INTO @CurrSchemeID, @CurrScheme, @CurrFunctionID, @CurrFunction, @IsDateBased;
+                END;
+                
+                CLOSE @AllPartitionCursor;
+                DEALLOCATE @AllPartitionCursor;
+            END
+            ELSE
+            BEGIN
+                -- Process specific table
+                DECLARE @TableSchemeID INT, @TableScheme VARCHAR(128), @TableFunctionID INT, @TableFunction VARCHAR(128), @TableIsDateBased BIT;
+                
+                -- Get table's partition info from our temp table
+                SELECT @TableSchemeID = pf.SchemeID,
+                    @TableScheme = pf.SchemeName,
+                    @TableFunctionID = pf.FunctionID,
+                    @TableFunction = pf.FunctionName,
+                    @TableIsDateBased = pf.IsDateBased
+                FROM sys.tables tab
+                INNER JOIN sys.indexes i ON tab.object_id = i.object_id AND i.index_id <= 1
+                INNER JOIN #PartitionFunctions pf ON i.data_space_id = pf.SchemeID
+                WHERE tab.name = @TableName;
+                
+                IF @TableScheme IS NOT NULL AND @TableFunction IS NOT NULL
+                BEGIN
+                    IF @TableIsDateBased = 1
+                    BEGIN
+                        -- Check if the boundary already exists
+                        SET @BoundaryAlreadyExists = 0;
+                        
+                        -- Check if boundary already exists for this function
+                        BEGIN TRY
+                            -- This dynamic SQL will set @BoundaryAlreadyExists to 1 if the boundary exists
+                            DECLARE @CheckTableBoundarySql NVARCHAR(MAX);
+                            SET @CheckTableBoundarySql = N'
+                            SELECT @BoundaryExists = CASE WHEN EXISTS (
+                                SELECT 1 
+                                FROM sys.partition_range_values v
+                                WHERE v.function_id = ' + CAST(@TableFunctionID AS VARCHAR(10)) + '
+                                AND CONVERT(DATE, v.value) = ''' + CONVERT(VARCHAR(10), @NextPartitionDate, 120) + '''
+                            ) THEN 1 ELSE 0 END;';
+                            
+                            EXEC sp_executesql @CheckTableBoundarySql, N'@BoundaryExists BIT OUTPUT', @BoundaryAlreadyExists OUTPUT;
+                        END TRY
+                        BEGIN CATCH
+                            PRINT '-- Error checking for existing boundary: ' + ERROR_MESSAGE();
+                            SET @BoundaryAlreadyExists = 0; -- Assume it doesn't exist if there's an error
+                        END CATCH
+                        
+                        IF @BoundaryAlreadyExists = 1
+                        BEGIN
+                            PRINT '-- Boundary for ' + CONVERT(VARCHAR(10), @NextPartitionDate, 120) + 
+                                ' already exists in function [' + @TableFunction + ']. Skipping creation.';
+                        END
+                        ELSE
+                        BEGIN
+                            SET @sql = 'ALTER PARTITION SCHEME [' + @TableScheme + '] NEXT USED [' + @FileGroupName + ']';
+                            IF @Execute = 1
+                                EXEC sp_executesql @sql;
+                            ELSE
+                                PRINT @sql;
+                                
+                            SET @sql = 'ALTER PARTITION FUNCTION [' + @TableFunction + ']() SPLIT RANGE (''' + 
+                                    CONVERT(VARCHAR(23), @NextPartitionDate, 121) + ''')';
+                            IF @Execute = 1
+                                EXEC sp_executesql @sql;
+                            ELSE
+                                PRINT @sql;
+                        END
+                    END
+                    ELSE
+                    BEGIN
+                        -- Display error for specific table with non-date partition type
+                        PRINT 'ERROR: Table [' + @TableName + '] uses partition function [' + @TableFunction + 
+                            '] which is not date-based.';
+                            
+                        -- Display the first 5 partition range values using system tables to avoid SQL_VARIANT
+                        PRINT 'Sample range values (displaying as strings):';
+                        
+                        EXEC('
+                        SELECT TOP 5 ''  - '' + CAST(CONVERT(NVARCHAR(100), r.value) AS NVARCHAR(255)) 
+                        FROM sys.partition_range_values r
+                        WHERE r.function_id = ' + @TableFunctionID + '
+                        ORDER BY r.boundary_id
+                        FOR XML PATH('''')');
+                        
+                        RAISERROR('Cannot perform date-based partition operation on non-date partition function.', 16, 1);
+                    END
+                END
+                ELSE
+                BEGIN
+                    PRINT 'Table ' + @TableName + ' is not partitioned or not found.';
+                END
+            END
+        END
+        ELSE
+        BEGIN
+            PRINT '-- Sliding window operations skipped (@SlidingWindow = 0)';
+        END
+        
+        -- Clean up temp table
+        DROP TABLE #PartitionFunctions;
+        
+        -- Exit if only partition reports are needed (no action needed)
+        IF @Execute = 0 AND @AllPartitionTablesInfo = 0 AND @PartitionALIGNEDIndex = 0 AND @Cleanup = 0
+            RETURN;
+        
+        -- Partition maintenance logic for cleanup if enabled
+IF @Cleanup = 1
+BEGIN
+    PRINT '';
+    PRINT '-- Starting cleanup of old partitions (older than ' + CONVERT(VARCHAR(10), @CleanupDate, 120) + ')';
+    
+    -- Create a table to store the partitions to process
+    CREATE TABLE #PartitionsToProcess (
+        RowId INT IDENTITY(1,1),
+        TableName VARCHAR(128),
+        BoundaryValue SQL_VARIANT,
+        PartitionFunctionName VARCHAR(128),
+        PartitionSchemeName VARCHAR(128),
+        RowCnt BIGINT,
+        PartitionNumber INT,
+        DataCompression VARCHAR(50),
+        FileGroupName VARCHAR(128)
+    );
+    
+    -- Populate the table with partitions that need processing
+    INSERT INTO #PartitionsToProcess (TableName, BoundaryValue, PartitionFunctionName, PartitionSchemeName, RowCnt, PartitionNumber, DataCompression, FileGroupName)
+    SELECT DISTINCT 
+        t.name, 
+        r.value, 
+        f.name, 
+        s.name, 
+        p.rows, 
+        p.partition_number,
+        p.data_compression_desc,
+        fg.name
+    FROM sys.tables AS t
+        INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
+        INNER JOIN sys.partitions AS p ON i.object_id = p.object_id AND i.index_id = p.index_id
+        INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
+        INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
+        INNER JOIN sys.allocation_units AS au ON p.hobt_id = au.container_id
+        INNER JOIN sys.filegroups AS fg ON au.data_space_id = fg.data_space_id
+        LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id AND r.boundary_id = p.partition_number
+    WHERE 1 = 1
+        AND t.name LIKE @TableName
+        AND i.type <= 1
+        AND p.partition_number > 1  -- Exclude partition 1
+        AND r.value IS NOT NULL
+        AND r.value < @CleanupDate
+        AND p.partition_number < (
+            SELECT MAX(p2.partition_number) 
+            FROM sys.partitions p2 
+            INNER JOIN sys.indexes i2 ON p2.object_id = i2.object_id AND p2.index_id = i2.index_id
+            WHERE i2.object_id = i.object_id AND i2.index_id <= 1
+        )  -- Exclude the last partition
+    ORDER BY t.name, partition_number;
+    
+    -- Process partitions using cursor
+    DECLARE @PartitionCursor CURSOR;
+    
+    SET @PartitionCursor = CURSOR FOR
+        SELECT 
+            TableName,
+            BoundaryValue,
+            PartitionFunctionName,
+            PartitionSchemeName,
+            RowCnt,
+            PartitionNumber,
+            DataCompression,
+            FileGroupName
+        FROM #PartitionsToProcess;
+    
+    DECLARE @PartitionsProcessed INT = 0;
+    
+    OPEN @PartitionCursor;
+    FETCH NEXT FROM @PartitionCursor INTO 
+        @TableName,
+        @BOUNDARYvalue,
+        @fname,
+        @sname,
+        @rows,
+        @partition_number,
+        @TableCompression,
+        @FileGroupName;
+    
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @PartitionsProcessed = @PartitionsProcessed + 1;
+            PRINT '';
+            PRINT '-- Processing partition #' + CAST(@partition_number AS VARCHAR(10)) + 
+                  ' for table [' + @TableName + '] with boundary: ' + 
+                  CONVERT(VARCHAR(23), @BOUNDARYvalue, 121) +
+                  ' on filegroup: ' + @FileGroupName;
+            
+            -- Create unique switchout table name for this partition
+            SET @SwitchoutTableName = @TableName + '_switchout_p' + CAST(@partition_number AS VARCHAR(10));
+            
+            -- Add to tracking list
+            INSERT INTO @SwitchoutTableList (TableName)
+            VALUES (@SwitchoutTableName);
+            
+            -- Create switchout table if it doesn't exist
+            IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = @SwitchoutTableName)
+            BEGIN
+                -- Create table schema script
+                DECLARE @SchemaScript NVARCHAR(MAX) = '';
+                SET @SchemaScript = 'CREATE TABLE ' + QUOTENAME(@SwitchoutTableName) + ' (';
+                
+                -- Add columns
+                SELECT @SchemaScript = @SchemaScript + 
+                    CASE WHEN columns.column_id > 1 THEN ', ' ELSE '' END +
+                    QUOTENAME(columns.name) + ' ' +
+                    types.name + 
+                    CASE 
+                        WHEN types.name IN ('varchar', 'nvarchar', 'char', 'nchar') 
+                            THEN '(' + CASE WHEN columns.max_length = -1 THEN 'MAX' ELSE CAST(
+                                CASE WHEN types.name IN ('nvarchar', 'nchar') 
+                                    THEN columns.max_length/2 
+                                    ELSE columns.max_length 
+                                END AS VARCHAR(10)) 
+                            END + ')'
+                        WHEN types.name IN ('decimal', 'numeric') 
+                            THEN '(' + CAST(columns.precision AS VARCHAR(10)) + ', ' + CAST(columns.scale AS VARCHAR(10)) + ')'
+                        ELSE ''
+                    END +
+                    CASE WHEN columns.is_nullable = 0 THEN ' NOT NULL' ELSE ' NULL' END
+                FROM sys.columns
+                JOIN sys.types ON columns.system_type_id = types.system_type_id AND columns.user_type_id = types.user_type_id
+                WHERE object_id = OBJECT_ID(@TableName)
+                ORDER BY column_id;
+                
+                SET @SchemaScript = @SchemaScript + ') ON ' + QUOTENAME(@FileGroupName);
+                
+                -- Add compression if applicable
+                IF @TableCompression != 'NONE'
+                BEGIN
+                    SET @SchemaScript = @SchemaScript + ' WITH (DATA_COMPRESSION = ' + @TableCompression + ')';
+                END
+                
+                PRINT '-- Creating switchout table: ' + @SwitchoutTableName + ' on filegroup: ' + @FileGroupName;
+                IF @Execute = 1
+                BEGIN
+                    EXEC sp_executesql @SchemaScript;
+                END
+                ELSE
+                    PRINT @SchemaScript;
+                
+                -- Add primary key/clustered index
+                DECLARE @PrimaryKeyScript NVARCHAR(MAX) = '';
+                SELECT @PrimaryKeyScript = 'ALTER TABLE ' + QUOTENAME(@SwitchoutTableName) + 
+                    ' ADD CONSTRAINT ' + QUOTENAME('PK_' + @SwitchoutTableName) + 
+                    ' PRIMARY KEY ' + CASE WHEN indexes.type_desc = 'CLUSTERED' THEN 'CLUSTERED' ELSE 'NONCLUSTERED' END + ' ('
+                FROM sys.indexes
+                WHERE object_id = OBJECT_ID(@TableName) AND is_primary_key = 1;
+                
+                IF @PrimaryKeyScript <> ''
+                BEGIN
+                    -- Add columns to PK constraint
+                    SELECT @PrimaryKeyScript = @PrimaryKeyScript + 
+                        CASE WHEN index_columns.key_ordinal > 1 THEN ', ' ELSE '' END +
+                        QUOTENAME(columns.name) + 
+                        CASE WHEN index_columns.is_descending_key = 1 THEN ' DESC' ELSE ' ASC' END
+                    FROM sys.index_columns
+                    JOIN sys.columns ON index_columns.object_id = columns.object_id AND index_columns.column_id = columns.column_id
+                    JOIN sys.indexes ON index_columns.object_id = indexes.object_id AND index_columns.index_id = indexes.index_id
+                    WHERE indexes.object_id = OBJECT_ID(@TableName) AND indexes.is_primary_key = 1
+                    ORDER BY index_columns.key_ordinal;
+                    
+                    SET @PrimaryKeyScript = @PrimaryKeyScript + ')';
+                    
+                    IF @TableCompression != 'NONE'
+                    BEGIN
+                        SET @PrimaryKeyScript = @PrimaryKeyScript + ' WITH (DATA_COMPRESSION = ' + @TableCompression + ')';
+                    END
+                    
+                    PRINT '-- Adding primary key to switchout table';
+                    IF @Execute = 1
+                    BEGIN
+                        BEGIN TRY
+                            EXEC sp_executesql @PrimaryKeyScript;
+                        END TRY
+                        BEGIN CATCH
+                            PRINT '-- Warning: Could not add primary key: ' + ERROR_MESSAGE();
+                        END CATCH
+                    END
+                    ELSE
+                        PRINT @PrimaryKeyScript;
+                END
+            END
+            ELSE
+            BEGIN
+                PRINT '-- Truncating existing switchout table: ' + @SwitchoutTableName;
+                IF @Execute = 1
+                BEGIN
+                    SET @sql = 'TRUNCATE TABLE ' + QUOTENAME(@SwitchoutTableName);
+                    EXEC sp_executesql @sql;
+                END
+            END
+            
+            -- Switch partition
+            SET @sql = 'ALTER TABLE ' + QUOTENAME(@TableName) + ' SWITCH PARTITION ' + 
+                       CONVERT(VARCHAR(6), @partition_number) + ' TO ' + 
+                       QUOTENAME(@SwitchoutTableName) + ';';
+            IF @Execute = 1
+            BEGIN
+                PRINT '-- Switching partition #' + CAST(@partition_number AS VARCHAR(10)) + ' to ' + @SwitchoutTableName;
+                BEGIN TRY
+                    EXEC sp_executesql @sql;
+                    PRINT '-- Switch operation succeeded.';
+                END TRY
+                BEGIN CATCH
+                    PRINT '-- ERROR during partition switch: ' + ERROR_MESSAGE();
+                    PRINT '-- Skipping boundary merge and table drop for this partition.';
+                    GOTO DropSwitchoutTable;
+                END CATCH
+            END
+            ELSE
+                PRINT '-- Will switch partition: ' + CHAR(13) + CHAR(10) + @sql;
+            
+            -- Merge range if partition is empty
+            IF @rows = 0 OR @Execute = 1
+            BEGIN
+                IF(SQL_VARIANT_PROPERTY(@BOUNDARYvalue, 'basetype') = 'datetimeoffset')
+                    SET @boundary = FORMAT(CAST(@BOUNDARYvalue AS DATETIMEOFFSET(7)), 'yyyy-MM-dd HH:mm:ss.fffffff zzz');
+                ELSE
+                    SET @boundary = CONVERT(VARCHAR(23), @BOUNDARYvalue, 121);
+                
+                SET @sql = 'ALTER PARTITION FUNCTION ' + QUOTENAME(@fname) + '() MERGE RANGE (''' + @boundary + '''); -- ' + @TableName;
+                
+                IF @Execute = 1
+                BEGIN
+                    PRINT '-- Merging partition boundary';
+                    BEGIN TRY
+                        IF @MergeRange = 1
+                        BEGIN
+                            EXEC sp_executesql @sql;
+                            PRINT '-- Merge operation succeeded.';
+                        END
+                        ELSE
+                        BEGIN
+                            PRINT @sql;
+                            PRINT '-- MergeRange is 0 so just printing merge command';
+                        END
+                    END TRY
+                    BEGIN CATCH
+                        PRINT '-- ERROR during partition merge: ' + ERROR_MESSAGE();
+                    END CATCH
+                END
+                ELSE
+                    PRINT '-- Will merge boundary: ' + CHAR(13) + CHAR(10) + @sql;
+            END
+            
+DropSwitchoutTable:
+            -- Drop switchout table
+            PRINT '-- Dropping switchout table: ' + @SwitchoutTableName;
+            SET @sql = 'DROP TABLE ' + QUOTENAME(@SwitchoutTableName);
+            IF @Execute = 1
+            BEGIN
+                BEGIN TRY
+                    IF EXISTS (SELECT 1 FROM sys.tables WHERE name = @SwitchoutTableName)
+                    BEGIN
+                        EXEC sp_executesql @sql;
+                        PRINT '-- Switchout table dropped successfully.';
+                    END
+                END TRY
+                BEGIN CATCH
+                    PRINT '-- Error dropping switchout table: ' + ERROR_MESSAGE();
+                END CATCH
+            END
+            ELSE
+                PRINT '-- Will drop switchout table: ' + CHAR(13) + CHAR(10) + @sql;
+            
+        END TRY
+        BEGIN CATCH
+            PRINT '-- ERROR during partition processing:';
+            PRINT '-- ' + ERROR_MESSAGE();
+            PRINT '-- Command that failed: ' + ISNULL(@sql, 'N/A');
+        END CATCH;
+        
+        FETCH NEXT FROM @PartitionCursor INTO 
+            @TableName,
+            @BOUNDARYvalue,
+            @fname,
+            @sname,
+            @rows,
+            @partition_number,
+            @TableCompression,
+            @FileGroupName;
+    END
+    
+    CLOSE @PartitionCursor;
+    DEALLOCATE @PartitionCursor;
+    
+    -- Clean up temp table
+    DROP TABLE #PartitionsToProcess;
+    
+    IF @PartitionsProcessed = 0
+        PRINT '-- No partitions found that are older than ' + CONVERT(VARCHAR(10), @CleanupDate, 120);
+END
+ELSE
+BEGIN
+    PRINT '';
+    PRINT '-- Cleanup operations skipped (@Cleanup = 0)';
+END        
+        -- If we're not executing, just print the info about switchout tables that would be created/dropped
+        IF @Execute = 0 AND @Cleanup = 1
+        BEGIN
+            -- Print the drop commands
+            SELECT @DropCount = COUNT(*) FROM @SwitchoutTableList;
+            
+            IF @DropCount > 0
+            BEGIN
+                PRINT '';
+                PRINT '-- The following switchout tables would be created and then dropped when @Execute = 1:';
+                
+                DECLARE @PrintTableCursor CURSOR;
+                SET @PrintTableCursor = CURSOR FOR
+                    SELECT TableName FROM @SwitchoutTableList;
+                    
+                OPEN @PrintTableCursor;
+                FETCH NEXT FROM @PrintTableCursor INTO @DropTableName;
+                
+                WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    PRINT '-- ' + @DropTableName;
+                    FETCH NEXT FROM @PrintTableCursor INTO @DropTableName;
+                END
+                
+                CLOSE @PrintTableCursor;
+                DEALLOCATE @PrintTableCursor;
+            END
+        END
+
+        -- Display partition information if requested
+        IF @AllPartitionTablesInfo = 1
+        BEGIN
+            PRINT '';
+            PRINT '-- Partition information for tables matching [' + @TableName + ']';
+            SELECT DISTINCT 
+                t.name TName, 
+                f.name PFName, 
+                S.name PSName, 
+                r.value PSRange, 
+                SQL_VARIANT_PROPERTY(r.value, 'BaseType') AS 'Base Type', 
+                SQL_VARIANT_PROPERTY(r.value, 'Precision') AS 'Precision', 
+                SQL_VARIANT_PROPERTY(r.value, 'Scale') AS 'Scale', 
+                c.name PartitionColumn, 
+                rows RowsCount, 
+                p.partition_number, 
+                p.data_compression_desc
+            FROM sys.tables AS t
+                INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
+                INNER JOIN sys.partitions AS p ON i.object_id = p.object_id
+                                                AND i.index_id = p.index_id
+                INNER JOIN sys.partition_schemes AS s ON i.data_space_id = s.data_space_id
+                INNER JOIN sys.partition_functions AS f ON s.function_id = f.function_id
+                LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id
+                                                                    AND r.boundary_id = p.partition_number
+                LEFT JOIN sys.index_columns AS ic ON ic.[object_id] = i.[object_id]
+                                                    AND ic.index_id = i.index_id
+                                                    AND ic.partition_ordinal >= 1
+                LEFT JOIN sys.columns AS c ON t.[object_id] = c.[object_id]
+                                            AND ic.column_id = c.column_id
+            WHERE 1 = 1
+                AND i.type <= 1
+                AND t.name LIKE @TableName
+            ORDER BY t.name, 
+                    partition_number;
+        END;
+
+        -- Check for aligned indexes if requested
+        IF @PartitionALIGNEDIndex = 1
+        BEGIN
+            PRINT '';
+            PRINT '-- Partition alignment report for indexes';
+            SELECT i.[name] AS IndexName
+                ,SUM(s.[used_page_count]) * 8 AS IndexSizeKB INTO #temp
+            FROM sys.dm_db_partition_stats AS s
+            INNER JOIN sys.indexes AS i ON s.[object_id] = i.[object_id]
+                AND s.[index_id] = i.[index_id]
+            GROUP BY i.[name]
+            ORDER BY i.[name]
+            ;WITH CTE_PartCount
+                AS (SELECT P.object_id, 
+                            P.index_id, 
+                            COUNT(P.partition_number) AS PartitionCount
+                    FROM sys.partitions AS P
+                    GROUP BY P.object_id, 
+                            P.index_id),
+                CTE_Objects
+                AS (SELECT O.object_id, 
+                            O.name AS ObjectName, 
+                            S.name AS SchemaName, 
+                            I.index_id, 
+                            I.name AS IndexName, 
+                            I.type_desc AS IndexType
+                    FROM sys.objects AS O
+                        INNER JOIN sys.schemas AS S ON S.schema_id = O.schema_id
+                        INNER JOIN sys.indexes AS I ON I.object_id = O.object_id
+                    WHERE O.is_ms_shipped = 0
+                        AND O.type_desc = 'USER_TABLE'),
+                CTE_Summary
+                AS (SELECT O.object_id, 
+                            O.ObjectName, 
+                            O.SchemaName, 
+                            O.IndexName, 
+                            O.IndexType, 
+                            PC.PartitionCount, 
+                            TablePartCount = FIRST_VALUE(PC.PartitionCount) OVER(PARTITION BY O.object_id
+                            ORDER BY O.object_id, 
+                                    O.index_id)
+                    FROM CTE_Objects AS O
+                        LEFT OUTER JOIN CTE_PartCount AS PC ON PC.object_id = O.object_id
+                                                                AND PC.index_id = O.index_id)
+                SELECT S.object_id, 
+                        S.SchemaName, 
+                        S.ObjectName, 
+                        S.IndexName, 
+                        T.IndexSizeKB,
+                        S.IndexType, 
+                        S.PartitionCount, 
+                        IsPartitioned = CASE
+                                            WHEN S.TablePartCount <> 1
+                                            THEN 'YES'
+                                            ELSE 'NO'
+                                        END, 
+                        IsAligned = CASE
+                                        WHEN S.TablePartCount = S.PartitionCount
+                                        THEN 'ALIGNED'
+                                        ELSE ''
+                                    END
+                FROM CTE_Summary AS S
+                INNER JOIN #temp T ON S.IndexName = T.IndexName
+                WHERE S.TablePartCount <> 1
+                ORDER BY IsAligned;
+            
+            DROP TABLE #temp;
+        END;
+    END TRY
+    -- FIX #3: Added comprehensive error handling with cleanup
+    BEGIN CATCH
+        -- Get error details
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+        DECLARE @ErrorSeverity INT = ERROR_SEVERITY();
+        DECLARE @ErrorState INT = ERROR_STATE();
+        DECLARE @ErrorLine INT = ERROR_LINE();
+        
+        PRINT '';
+        PRINT '-- ERROR OCCURRED at line ' + CAST(@ErrorLine AS VARCHAR(10)) + ': ' + @ErrorMessage;
+        
+        -- Cleanup all switchout tables
+        IF @Execute = 1
+        BEGIN
+            PRINT '';
+            PRINT '-- EMERGENCY CLEANUP: Removing switchout tables after error';
+            
+            -- Clean up any specifically tracked switchout tables
+            IF EXISTS (SELECT 1 FROM @SwitchoutTableList)
+            BEGIN
+                DECLARE @EmergencyCleanupCursor CURSOR;
+                DECLARE @EmergencyTableName VARCHAR(128);
+                
+                SET @EmergencyCleanupCursor = CURSOR FOR
+                    SELECT TableName FROM @SwitchoutTableList;
+                    
+                OPEN @EmergencyCleanupCursor;
+                FETCH NEXT FROM @EmergencyCleanupCursor INTO @EmergencyTableName;
+                
+                WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    BEGIN TRY
+                        IF EXISTS (SELECT 1 FROM sys.tables WHERE name = @EmergencyTableName)
+                        BEGIN
+                            PRINT '-- Dropping tracked switchout table: ' + @EmergencyTableName;
+                            DECLARE @DropEmergencySql NVARCHAR(MAX) = 'DROP TABLE [' + @EmergencyTableName + ']';
+                            EXEC sp_executesql @DropEmergencySql;
+                        END
+                    END TRY
+                    BEGIN CATCH
+                        PRINT '-- Failed to drop ' + @EmergencyTableName + ': ' + ERROR_MESSAGE();
+                    END CATCH
+                    
+                    FETCH NEXT FROM @EmergencyCleanupCursor INTO @EmergencyTableName;
+                END
+                
+                CLOSE @EmergencyCleanupCursor;
+                DEALLOCATE @EmergencyCleanupCursor;
+            END
+            
+            -- Also check for any _switchout tables that might exist and weren't tracked
+            DECLARE @AdditionalCleanupCursor CURSOR;
+            DECLARE @AdditionalTableName VARCHAR(128);
+            
+            SET @AdditionalCleanupCursor = CURSOR FOR
+                SELECT name FROM sys.tables WHERE name LIKE '%_switchout';
+                
+            OPEN @AdditionalCleanupCursor;
+            FETCH NEXT FROM @AdditionalCleanupCursor INTO @AdditionalTableName;
+            
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                BEGIN TRY
+                    PRINT '-- Dropping untracked switchout table: ' + @AdditionalTableName;
+                    DECLARE @DropAdditionalSql NVARCHAR(MAX) = 'DROP TABLE [' + @AdditionalTableName + ']';
+                    EXEC sp_executesql @DropAdditionalSql;
+                END TRY
+                BEGIN CATCH
+                    PRINT '-- Failed to drop ' + @AdditionalTableName + ': ' + ERROR_MESSAGE();
+                END CATCH
+                
+                FETCH NEXT FROM @AdditionalCleanupCursor INTO @AdditionalTableName;
+            END
+            
+            CLOSE @AdditionalCleanupCursor;
+            DEALLOCATE @AdditionalCleanupCursor;
+        END
+        
+        -- Clean up any temp tables that might still exist
+        IF OBJECT_ID('tempdb..#PartitionFunctions') IS NOT NULL
+            DROP TABLE #PartitionFunctions;
+            
+        IF OBJECT_ID('tempdb..#PartitionsToProcess') IS NOT NULL
+            DROP TABLE #PartitionsToProcess;
+            
+        IF OBJECT_ID('tempdb..#UniqueTables') IS NOT NULL
+            DROP TABLE #UniqueTables;
+            
+        IF OBJECT_ID('tempdb..#temp') IS NOT NULL
+            DROP TABLE #temp;
+            
+        -- Re-throw the original error with additional context
+        RAISERROR('Partition maintenance failed: %s (Line: %d)', @ErrorSeverity, @ErrorState, @ErrorMessage, @ErrorLine);
+    END CATCH;
+END
+GO
