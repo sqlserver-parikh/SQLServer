@@ -2,7 +2,7 @@ USE tempdb
 GO
 CREATE OR ALTER PROCEDURE usp_DiskDBSpaceReport
 (    
-    @Disk NVARCHAR(256) = NULL,   -- Specific disk or mount point to filter
+    @Disk NVARCHAR(256) = '',   -- Specific disk or mount point to filter
     @DBName NVARCHAR(128) = null,   -- Specific database name to filter
     @LowDiskPct DECIMAL(5,2) = 100, -- Show drives below this free space percentage
     @BackupLookBackDays int = 30 --How far back backup should be checked.
@@ -267,7 +267,7 @@ BEGIN
         CONVERT(DECIMAL(20, 2), ((f.size / 128.0) / HD.DbSizeMb) * 100) AS Pct2DbSize,
         CAST(f.size / 128.0 - (d.SpaceUsed / 128.0) AS DECIMAL(15, 2)) AS FileSpaceFreeMb,
 		   CASE
-            WHEN f.type_desc = 'Log' THEN CONVERT(VARCHAR(15),DLS.log_since_last_log_backup_mb)
+            WHEN f.type_desc = 'Log' THEN ISNULL('LogSizeSinceLogBackup:'+ CONVERT(VARCHAR(15),DLS.log_since_last_log_backup_mb),'') + ISNULL('ActiveLogSize:' + convert(varchar(20), DLS.active_log_size_mb),'')
 			WHEN f.type_desc = 'Rows' THEN 'Data File'
             ELSE f.type_desc
         END AS LogSizeSinceLastLogBackupMB,
@@ -392,3 +392,4 @@ END;
 GO
 
 EXEC usp_DiskDBSpaceReport;
+
