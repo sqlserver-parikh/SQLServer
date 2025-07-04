@@ -6,6 +6,7 @@ IF OBJECT_ID('dbo.usp_ConfigureDatabase') IS NOT NULL
 GO
 
 CREATE PROCEDURE dbo.usp_ConfigureDatabase
+    @ChangeDBOwner bit = 0,                          -- Do we need to change DBOwner or not, if 0 then @DBOwner parameter is ignores.
     @DBOwner NVARCHAR(128) = 'sa',                  -- Database owner login (e.g., 'sa', 'MyLogin'). Must be a valid SQL Server login.
     @CompatibilityLevel INT = NULL,                 -- Compatibility level: NULL (match master database), 160 (SQL Server 2022), 150 (SQL Server 2019), 140 (SQL Server 2017), 130 (SQL Server 2016), 120 (SQL Server 2014), 110 (SQL Server 2012), 100 (SQL Server 2008). Affects query optimizer behavior.
     @DBName NVARCHAR(MAX) = NULL,                  -- Comma-separated database names to include/exclude (e.g., 'db1,db2,-db3,-db4'). NULL processes all user databases (excludes system databases).
@@ -42,11 +43,14 @@ BEGIN
     DECLARE @currentIsPercentGrowth BIT;
 
     -- Validate inputs
+    IF @ChangeDBOwner = 1
+    BEGIN
     IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @DBOwner)
     BEGIN
         SET @errorMsg = 'Invalid @DBOwner: ''' + @DBOwner + ''' is not a valid login. Specify a valid SQL Server login (e.g., ''sa'', ''MyLogin'').';
         RAISERROR(@errorMsg, 16, 1);
         RETURN;
+    END;
     END;
 
     IF @CompatibilityLevel IS NOT NULL AND CHARINDEX(CAST(@CompatibilityLevel AS NVARCHAR(3)), @validCompatibilityLevels) = 0
@@ -157,7 +161,7 @@ BEGIN
     FETCH NEXT FROM db_cursor INTO @name;
 
     IF @PrintOnly = 1
-        PRINT '---- Please execute the following commands to apply changes. Rollback commands (prefixed with --) can be copied and executed by replacing -- with empty string.';
+        PRINT '---- Please execute the following commands to apply changes. Rollback commands.'
     ELSE
         PRINT '---- Executing the following commands. Rollback commands (prefixed with --) can be copied and executed by replacing -- with empty string.';
 
@@ -228,6 +232,8 @@ BEGIN
             DEALLOCATE filenames;
 
             -- Database owner
+            IF @ChangeDBOwner = 1
+            BEGIN
             IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @name AND SUSER_SNAME(owner_sid) <> @DBOwner)
             BEGIN
                 SELECT @currentOwner = SUSER_SNAME(owner_sid) FROM sys.databases WHERE name = @name;
@@ -237,6 +243,7 @@ BEGIN
                 PRINT @command;
                 IF @PrintOnly = 0
                     EXEC sp_executesql @command;
+            END;
             END;
 
             -- Recovery model
