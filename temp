@@ -1,13 +1,13 @@
 CREATE OR ALTER PROCEDURE [dbo].[usp_PartitionMaintenance] 
-    @TableName VARCHAR(128) = '', 
+    @TableName VARCHAR(128) = 'tbl_CarDetectorData', 
     @CleanupOlderThan VARCHAR(10) = '3m',  -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y')
     @NextPartitionAfter VARCHAR(10) = '6m', -- Format: {number}{unit} where unit is d=days, m=months, y=years (e.g., '30d', '6m', '1y', '-3m')
     @Execute BIT = 0,                       -- 0=Print commands only, 1=Execute commands
     @FileGroupName VARCHAR(128) = 'PRIMARY', -- Target filegroup for new partitions
     @PartitionALIGNEDIndex BIT = 0,         -- 1=Show partition-aligned indexes report
     @AllPartitionTablesInfo BIT = 1,        -- 1=Show detailed partition information
-    @Cleanup BIT = 0,						-- 1=Enable cleanup of old partitions, 0=Skip cleanup
-	@MergeRange BIT = 0,					--1= Enable merge ranges, best option to keep 0 and clean up, sometimes if multiple tables with one scheme/function than mergerage will block.
+    @Cleanup BIT = 1,						-- 1=Enable cleanup of old partitions, 0=Skip cleanup
+	@MergeRange BIT = 1,					--1= Enable merge ranges, best option to keep 0 and clean up, sometimes if multiple tables with one scheme/function than mergerage will block.
     @SlidingWindow BIT = 0                 -- 1=Enable creation of new partition boundaries, 0=Skip new boundaries
 AS
 BEGIN
@@ -492,7 +492,7 @@ BEGIN
             PRINT '-- Processing partition #' + CAST(@partition_number AS VARCHAR(10)) + 
                   ' for table [' + @TableName + '] with boundary: ' + 
                   CONVERT(VARCHAR(23), @BOUNDARYvalue, 121) +
-                  ' on filegroup: ' + @FileGroupName;
+                  ' on filegroup: ' + @FileGroupName + ', RowCount: ' + convert(varchar(15),isnull( @rows,0));
             
             -- Create unique switchout table name for this partition
             SET @SwitchoutTableName = @TableName + '_switchout_p' + CAST(@partition_number AS VARCHAR(10));
@@ -600,9 +600,11 @@ BEGIN
             END
             
             -- Switch partition
+            IF @rows <> 0
             SET @sql = 'ALTER TABLE ' + QUOTENAME(@TableName) + ' SWITCH PARTITION ' + 
                        CONVERT(VARCHAR(6), @partition_number) + ' TO ' + 
                        QUOTENAME(@SwitchoutTableName) + ';';
+            ELSE SET @sql = ''
             IF @Execute = 1
             BEGIN
                 PRINT '-- Switching partition #' + CAST(@partition_number AS VARCHAR(10)) + ' to ' + @SwitchoutTableName;
@@ -627,8 +629,10 @@ BEGIN
                 ELSE
                     SET @boundary = CONVERT(VARCHAR(23), @BOUNDARYvalue, 121);
                 
+                IF @MergeRange = 1
                 SET @sql = 'ALTER PARTITION FUNCTION ' + QUOTENAME(@fname) + '() MERGE RANGE (''' + @boundary + '''); -- ' + @TableName;
-                
+                ELSE 
+                SET @sql = ''
                 IF @Execute = 1
                 BEGIN
                     PRINT '-- Merging partition boundary';
