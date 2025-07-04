@@ -1,218 +1,351 @@
-DECLARE @command NVARCHAR(MAX);
-DECLARE @name SYSNAME;
-DECLARE @filename NVARCHAR(MAX);
-DECLARE @defaultsize INT= 256; --All files will be set to 256MB initial size if its less than 256MB
-DECLARE @defaultgrowth INT= 128; --All files will be set to 128MB growth if its less than 128MB
-DECLARE @printonly BIT= 1;
-DECLARE db_cursor CURSOR
-FOR SELECT name
-    FROM sys.databases
-    WHERE database_id <> 2
-          AND (SUSER_SNAME(owner_sid) NOT LIKE 'sa'
-               OR (recovery_model_desc <> 'FULL')
-               OR page_verify_option_desc <> 'CHECKSUM'
-               OR compatibility_level <>
-(
-    SELECT compatibility_level
-    FROM sys.databases
-    WHERE NAME = 'master'
-)
-               OR DATABASE_ID IN
-(
-    SELECT database_id
-    FROM sys.master_files
-    WHERE is_percent_growth = 1
-          OR growth < (@defaultgrowth * 128)
-          OR size < (@defaultsize * 128)
-));
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @name;
-WHILE @@FETCH_STATUS = 0
+USE tempdb;
+GO
+
+IF OBJECT_ID('dbo.usp_ConfigureDatabase') IS NOT NULL
+    DROP PROCEDURE dbo.usp_ConfigureDatabase;
+GO
+
+CREATE PROCEDURE dbo.usp_ConfigureDatabase
+    @DBOwner NVARCHAR(128) = 'sa',                  -- Database owner login (e.g., 'sa', 'MyLogin'). Must be a valid SQL Server login.
+    @CompatibilityLevel INT = NULL,                 -- Compatibility level: NULL (match master database), 160 (SQL Server 2022), 150 (SQL Server 2019), 140 (SQL Server 2017), 130 (SQL Server 2016), 120 (SQL Server 2014), 110 (SQL Server 2012), 100 (SQL Server 2008). Affects query optimizer behavior.
+    @DBName NVARCHAR(MAX) = NULL,                  -- Comma-separated database names to include/exclude (e.g., 'db1,db2,-db3,-db4'). NULL processes all user databases (excludes system databases).
+    @PageVerify NVARCHAR(20) = 'CHECKSUM',         -- Page verification: CHECKSUM (recommended, detects corruption), TORN_PAGE_DETECTION (basic integrity check), NONE (no verification, not recommended).
+    @AutoShrink BIT = 0,                           -- Auto-shrink: 0 (OFF, recommended to avoid performance issues), 1 (ON, shrinks database automatically, may cause fragmentation).
+    @AutoClose BIT = 0,                            -- Auto-close: 0 (OFF, recommended for performance), 1 (ON, closes database when not in use, suitable for small databases).
+    @DefaultFileSizeMB INT = 256,                  -- Minimum data file size in MB (e.g., 256). Must be positive. Only applied if greater than current size.
+    @DefaultFileGrowthMB INT = 128,                -- Data file growth increment in MB (e.g., 128). Must be positive, avoids percentage-based growth.
+    @DefaultLogSizeMB INT = 256,                   -- Minimum log file size in MB (e.g., 256). Must be positive. Only applied if greater than current size.
+    @DefaultLogFileGrowthMB INT = 128,             -- Log file growth increment in MB (e.g., 128). Must be positive, avoids percentage-based growth.
+    @FixOrphanUsers BIT = 0,                       -- Fix orphaned users: 1 (attempt to map users to logins, default), 0 (skip orphaned user fixes).
+    @PrintOnly BIT = 1                             -- 1 (print commands only for review), 0 (execute commands).
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @command NVARCHAR(MAX);
+    DECLARE @rollbackCommand NVARCHAR(MAX);
+    DECLARE @name SYSNAME;
+    DECLARE @filename NVARCHAR(MAX);
+    DECLARE @fileType INT;                         -- 0 = data file, 1 = log file
+    DECLARE @masterCompatibilityLevel INT;
+    DECLARE @errorMsg NVARCHAR(4000);
+    DECLARE @sqlVersion NVARCHAR(128) = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128));
+    DECLARE @validCompatibilityLevels NVARCHAR(MAX) = '100,110,120,130,140,150,160'; -- Supported levels: 100 (SQL 2008), 110 (SQL 2012), 120 (SQL 2014), 130 (SQL 2016), 140 (SQL 2017), 150 (SQL 2019), 160 (SQL 2022)
+    DECLARE @dbTable TABLE (DBName SYSNAME, Include BIT);
+    DECLARE @currentOwner NVARCHAR(128);
+    DECLARE @currentCompatibilityLevel INT;
+    DECLARE @currentPageVerify NVARCHAR(20);
+    DECLARE @currentAutoShrink BIT;
+    DECLARE @currentAutoClose BIT;
+    DECLARE @currentFileSizePages INT;
+    DECLARE @currentFileGrowthPages INT;
+    DECLARE @currentIsPercentGrowth BIT;
+
+    -- Validate inputs
+    IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @DBOwner)
     BEGIN
-        IF @printonly = 0
-            BEGIN
-                PRINT '--BELOW COMMANDS ARE EXECUTED';
-            END;
+        SET @errorMsg = 'Invalid @DBOwner: ''' + @DBOwner + ''' is not a valid login. Specify a valid SQL Server login (e.g., ''sa'', ''MyLogin'').';
+        RAISERROR(@errorMsg, 16, 1);
+        RETURN;
+    END;
+
+    IF @CompatibilityLevel IS NOT NULL AND CHARINDEX(CAST(@CompatibilityLevel AS NVARCHAR(3)), @validCompatibilityLevels) = 0
+    BEGIN
+        SET @errorMsg = 'Invalid @CompatibilityLevel: ''' + CAST(@CompatibilityLevel AS NVARCHAR(3)) + '''. Supported levels: 160 (SQL Server 2022), 150 (SQL Server 2019), 140 (SQL Server 2017), 130 (SQL Server 2016), 120 (SQL Server 2014), 110 (SQL Server 2012), 100 (SQL Server 2008). Use NULL to match master database.';
+        RAISERROR(@errorMsg, 16, 1);
+        RETURN;
+    END;
+
+    IF @PageVerify NOT IN ('CHECKSUM', 'TORN_PAGE_DETECTION', 'NONE')
+    BEGIN
+        SET @errorMsg = 'Invalid @PageVerify: ''' + @PageVerify + '''. Valid options: CHECKSUM (recommended, detects corruption), TORN_PAGE_DETECTION (basic integrity check), NONE (no verification, not recommended).';
+        RAISERROR(@errorMsg, 16, 1);
+        RETURN;
+    END;
+
+    IF @DefaultFileSizeMB <= 0
+    BEGIN
+        SET @errorMsg = 'Invalid @DefaultFileSizeMB: ''' + CAST(@DefaultFileSizeMB AS NVARCHAR(10)) + '''. Must be a positive integer (e.g., 256).';
+        RAISERROR(@errorMsg, 16, 1);
+        RETURN;
+    END;
+
+    IF @DefaultFileGrowthMB <= 0
+    BEGIN
+        SET @errorMsg = 'Invalid @DefaultFileGrowthMB: ''' + CAST(@DefaultFileGrowthMB AS NVARCHAR(10)) + '''. Must be a positive integer (e.g., 128).';
+        RAISERROR(@errorMsg, 16, 1);
+        RETURN;
+    END;
+
+    IF @DefaultLogSizeMB <= 0
+    BEGIN
+        SET @errorMsg = 'Invalid @DefaultLogSizeMB: ''' + CAST(@DefaultLogSizeMB AS NVARCHAR(10)) + '''. Must be a positive integer (e.g., 256).';
+        RAISERROR(@errorMsg, 16, 1);
+        RETURN;
+    END;
+
+    IF @DefaultLogFileGrowthMB <= 0
+    BEGIN
+        SET @errorMsg = 'Invalid @DefaultLogFileGrowthMB: ''' + CAST(@DefaultLogFileGrowthMB AS NVARCHAR(10)) + '''. Must be a positive integer (e.g., 128).';
+        RAISERROR(@errorMsg, 16, 1);
+        RETURN;
+    END;
+
+    -- Get master database compatibility level
+    SELECT @masterCompatibilityLevel = compatibility_level 
+    FROM sys.databases 
+    WHERE name = 'master';
+
+    -- Set default compatibility level to master's if not specified
+    IF @CompatibilityLevel IS NULL
+        SET @CompatibilityLevel = @masterCompatibilityLevel;
+
+    -- Parse @DBName into table for include/exclude logic
+    IF @DBName IS NOT NULL
+    BEGIN
+        DECLARE @dbList NVARCHAR(MAX) = @DBName;
+        DECLARE @dbNameItem NVARCHAR(128);
+        DECLARE @include BIT;
+
+        WHILE LEN(@dbList) > 0
+        BEGIN
+            SET @dbNameItem = LEFT(@dbList, CHARINDEX(',', @dbList + ',') - 1);
+            SET @dbList = STUFF(@dbList, 1, LEN(@dbNameItem) + 1, '');
+            SET @dbNameItem = LTRIM(RTRIM(@dbNameItem));
+            SET @include = CASE WHEN LEFT(@dbNameItem, 1) = '-' THEN 0 ELSE 1 END;
+            SET @dbNameItem = REPLACE(@dbNameItem, '-', '');
+
+            IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @dbNameItem AND database_id > 4)
+                INSERT INTO @dbTable (DBName, Include) VALUES (@dbNameItem, @include);
             ELSE
+                PRINT '---- Warning: Database ''' + @dbNameItem + ''' does not exist or is a system database and will be skipped.';
+        END;
+    END
+    ELSE
+    BEGIN
+        -- Include all user databases (exclude system databases)
+        INSERT INTO @dbTable (DBName, Include)
+        SELECT name, 1 
+        FROM sys.databases 
+        WHERE database_id > 4;
+    END;
+
+    -- Cursor for databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD
+    FOR SELECT d.name
+        FROM sys.databases d
+        INNER JOIN @dbTable dt ON d.name = dt.DBName
+        WHERE dt.Include = 1
+        AND (
+            SUSER_SNAME(d.owner_sid) <> @DBOwner
+            OR d.compatibility_level <> @CompatibilityLevel
+            OR d.page_verify_option_desc <> @PageVerify
+            OR d.is_auto_shrink_on = ~@AutoShrink
+            OR d.is_auto_close_on = ~@AutoClose
+            OR d.recovery_model_desc <> 'FULL'
+            OR EXISTS (
+                SELECT 1 
+                FROM sys.master_files mf 
+                WHERE mf.database_id = d.database_id 
+                AND (mf.is_percent_growth = 1 
+                     OR mf.growth < (CASE mf.type WHEN 0 THEN @DefaultFileGrowthMB ELSE @DefaultLogFileGrowthMB END * 128) 
+                     OR mf.size < (CASE mf.type WHEN 0 THEN @DefaultFileSizeMB ELSE @DefaultLogSizeMB END * 128))
+            )
+        );
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @name;
+
+    IF @PrintOnly = 1
+        PRINT '---- Please execute the following commands to apply changes. Rollback commands (prefixed with --) can be copied and executed by replacing -- with empty string.';
+    ELSE
+        PRINT '---- Executing the following commands. Rollback commands (prefixed with --) can be copied and executed by replacing -- with empty string.';
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            -- File size and growth settings (data and log files)
+            DECLARE filenames CURSOR LOCAL FAST_FORWARD
+            FOR SELECT name, type, size, growth, is_percent_growth
+                FROM sys.master_files
+                WHERE database_id = DB_ID(@name)
+                AND (is_percent_growth = 1
+                     OR growth < (CASE type WHEN 0 THEN @DefaultFileGrowthMB ELSE @DefaultLogFileGrowthMB END * 128)
+                     OR size < (CASE type WHEN 0 THEN @DefaultFileSizeMB ELSE @DefaultLogSizeMB END * 128));
+
+            OPEN filenames;
+            FETCH NEXT FROM filenames INTO @filename, @fileType, @currentFileSizePages, @currentFileGrowthPages, @currentIsPercentGrowth;
+
+            WHILE @@FETCH_STATUS = 0
             BEGIN
-                PRINT '--Please execute below commands if you want to proceed with change;';
+                SET @command = NULL;
+                SET @rollbackCommand = NULL;
+                DECLARE @targetSizeMB INT = CASE @fileType WHEN 0 THEN @DefaultFileSizeMB ELSE @DefaultLogSizeMB END;
+                DECLARE @targetGrowthMB INT = CASE @fileType WHEN 0 THEN @DefaultFileGrowthMB ELSE @DefaultLogFileGrowthMB END;
+                DECLARE @currentSizeMB INT = @currentFileSizePages / 128;
+
+                -- Only generate rollback for size if size is being changed
+                IF @currentSizeMB < @targetSizeMB
+                    SET @rollbackCommand = '-- DBCC SHRINKFILE (N''' + @filename + ''', ' + CAST(@currentSizeMB AS NVARCHAR(10)) + ');';
+                -- Generate rollback for growth if growth is being changed
+                IF @currentIsPercentGrowth = 1 OR (@currentFileGrowthPages / 128) < @targetGrowthMB
+                BEGIN
+                    IF @rollbackCommand IS NULL
+                        SET @rollbackCommand = '-- ALTER DATABASE [' + @name + '] MODIFY FILE ( NAME = N''' + @filename + ''', FILEGROWTH = ' + 
+                            CASE @currentIsPercentGrowth 
+                                WHEN 1 THEN CAST(@currentFileGrowthPages AS NVARCHAR(10)) + ' PERCENT'
+                                ELSE CAST(@currentFileGrowthPages / 128 AS NVARCHAR(10)) + 'MB' 
+                            END + ' );';
+                    ELSE
+                        SET @rollbackCommand = @rollbackCommand + CHAR(13) + CHAR(10) + 
+                            '-- ALTER DATABASE [' + @name + '] MODIFY FILE ( NAME = N''' + @filename + ''', FILEGROWTH = ' + 
+                            CASE @currentIsPercentGrowth 
+                                WHEN 1 THEN CAST(@currentFileGrowthPages AS NVARCHAR(10)) + ' PERCENT'
+                                ELSE CAST(@currentFileGrowthPages / 128 AS NVARCHAR(10)) + 'MB' 
+                            END + ' );';
+                END;
+
+                IF @currentSizeMB < @targetSizeMB AND (@currentIsPercentGrowth = 1 OR (@currentFileGrowthPages / 128) < @targetGrowthMB)
+                    SET @command = 'ALTER DATABASE [' + @name + '] MODIFY FILE ( NAME = N''' + @filename + ''', SIZE = ' + CAST(@targetSizeMB AS NVARCHAR(10)) + 'MB, FILEGROWTH = ' + CAST(@targetGrowthMB AS NVARCHAR(10)) + 'MB );';
+                ELSE IF @currentIsPercentGrowth = 1 OR (@currentFileGrowthPages / 128) < @targetGrowthMB
+                    SET @command = 'ALTER DATABASE [' + @name + '] MODIFY FILE ( NAME = N''' + @filename + ''', FILEGROWTH = ' + CAST(@targetGrowthMB AS NVARCHAR(10)) + 'MB );';
+                ELSE IF @currentSizeMB < @targetSizeMB
+                    SET @command = 'ALTER DATABASE [' + @name + '] MODIFY FILE ( NAME = N''' + @filename + ''', SIZE = ' + CAST(@targetSizeMB AS NVARCHAR(10)) + 'MB );';
+
+                IF @command IS NOT NULL
+                BEGIN
+                    IF @rollbackCommand IS NOT NULL
+                        PRINT @rollbackCommand;
+                    PRINT @command;
+                    IF @PrintOnly = 0
+                        EXEC sp_executesql @command;
+                END;
+
+                FETCH NEXT FROM filenames INTO @filename, @fileType, @currentFileSizePages, @currentFileGrowthPages, @currentIsPercentGrowth;
             END;
-        DECLARE filenames CURSOR
-        FOR SELECT name
-            FROM sys.master_files
-            WHERE database_id = DB_ID(@name)
-                  AND (is_percent_growth = 1
-                       OR growth < (@defaultgrowth * 128)
-                       OR size < (@defaultsize * 128));
-        OPEN filenames;
-        FETCH NEXT FROM filenames INTO @filename;
-        WHILE @@FETCH_STATUS = 0
+
+            CLOSE filenames;
+            DEALLOCATE filenames;
+
+            -- Database owner
+            IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @name AND SUSER_SNAME(owner_sid) <> @DBOwner)
             BEGIN
-                IF EXISTS
-(
-    SELECT 1
-    FROM sys.master_files
-    WHERE database_id = DB_ID(@name)
-          AND name = @filename
-          AND (size < (@defaultsize * 128)
-               AND growth < (@defaultgrowth * 128))
-)
-                    BEGIN
-                        SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', SIZE = '+CONVERT(VARCHAR(5), @defaultsize)+'MB , FILEGROWTH = '+CONVERT(VARCHAR(5), @defaultgrowth)+'MB )';
-                    END;
-                    ELSE
-                IF EXISTS
-(
-    SELECT 1
-    FROM sys.master_files
-    WHERE database_id = DB_ID(@name)
-          AND name = @filename
-          AND (is_percent_growth = 1
-               OR (growth < (@defaultgrowth * 128)))
-)
-                    BEGIN
-                        SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', FILEGROWTH = '+CONVERT(VARCHAR(5), @defaultgrowth)+'MB )';
-                    END;
-                    ELSE
-                IF EXISTS
-(
-    SELECT 1
-    FROM sys.master_files
-    WHERE database_id = DB_ID(@name)
-          AND name = @filename
-          AND (is_percent_growth = 1
-               OR (size < (@defaultsize * 128)))
-)
-                    BEGIN
-                        SET @command = 'ALTER DATABASE ['+@name+'] MODIFY FILE ( NAME = N'''+@filename+''', SIZE = '+CONVERT(VARCHAR(5), @defaultsize)+'MB )';
-                    END;
-                IF @printonly = 1
-                    BEGIN
-                        PRINT @command;
-                    END;
-                    ELSE
-                    BEGIN
-                        PRINT @command;
-                        EXEC sp_executesql
-                             @command;
-                    END;
-                FETCH NEXT FROM filenames INTO @filename;
-            END;
-        IF EXISTS
-(
-    SELECT 1
-    FROM sys.databases
-    WHERE name = @name
-          AND SUSER_SNAME(owner_sid) <> 'sa'
-)
-            BEGIN
-                SET @command = 'ALTER AUTHORIZATION ON DATABASE ::['+@name+'] TO [sa];';
+                SELECT @currentOwner = SUSER_SNAME(owner_sid) FROM sys.databases WHERE name = @name;
+                SET @rollbackCommand = '-- ALTER AUTHORIZATION ON DATABASE::[' + @name + '] TO [' + ISNULL(@currentOwner, 'sa') + '];';
+                SET @command = 'ALTER AUTHORIZATION ON DATABASE::[' + @name + '] TO [' + @DBOwner + '];';
+                PRINT @rollbackCommand;
                 PRINT @command;
-                EXEC sp_executesql
-                     @command;
+                IF @PrintOnly = 0
+                    EXEC sp_executesql @command;
             END;
-        IF EXISTS
-(
-    SELECT 1
-    FROM sys.databases
-    WHERE name = @name
-          AND recovery_model_desc <> 'FULL'
-)
+
+            -- Recovery model
+            IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @name AND recovery_model_desc <> 'FULL')
             BEGIN
-                SET @command = 'ALTER DATABASE ['+@name+'] SET RECOVERY FULL WITH NO_WAIT;';
-                IF @printonly = 1
-                    BEGIN
-                        PRINT @command;
-                    END;
-                    ELSE
-                    BEGIN
-                        PRINT @command;
-                        EXEC sp_executesql
-                             @command;
-                    END;
-            END;
-        IF EXISTS
-(
-    SELECT 1
-    FROM sys.databases
-    WHERE name = @name
-          AND page_verify_option_desc <> 'CHECKSUM'
-)
-            BEGIN
-                SET @command = 'ALTER DATABASE ['+@name+'] SET PAGE_VERIFY CHECKSUM  WITH NO_WAIT;';
+                DECLARE @currentRecoveryModel NVARCHAR(60);
+                SELECT @currentRecoveryModel = recovery_model_desc FROM sys.databases WHERE name = @name;
+                SET @rollbackCommand = '-- ALTER DATABASE [' + @name + '] SET RECOVERY ' + @currentRecoveryModel + ' WITH NO_WAIT;';
+                SET @command = 'ALTER DATABASE [' + @name + '] SET RECOVERY FULL WITH NO_WAIT;';
+                PRINT @rollbackCommand;
                 PRINT @command;
-                EXEC sp_executesql
-                     @command;
+                IF @PrintOnly = 0
+                    EXEC sp_executesql @command;
             END;
-        IF EXISTS
-(
-    SELECT 1
-    FROM sys.databases
-    WHERE name = @name
-          AND compatibility_level <>
-(
-    SELECT compatibility_level
-    FROM sys.databases
-    WHERE NAME = 'master'
-)
-)
+
+            -- Page verify
+            IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @name AND page_verify_option_desc <> @PageVerify)
             BEGIN
-                SELECT @command = 'ALTER DATABASE ['+@name+'] SET COMPATIBILITY_LEVEL = '+CONVERT(VARCHAR(3), compatibility_level)+';'
-                FROM sys.databases
-                WHERE name = 'master';
-                IF @printonly = 1
-                    BEGIN
-                        PRINT @command;
-                    END;
-                    ELSE
-                    BEGIN
-                        PRINT @command;
-                        EXEC sp_executesql
-                             @command;
-                    END;
+                SELECT @currentPageVerify = page_verify_option_desc FROM sys.databases WHERE name = @name;
+                SET @rollbackCommand = '-- ALTER DATABASE [' + @name + '] SET PAGE_VERIFY ' + @currentPageVerify + ' WITH NO_WAIT;';
+                SET @command = 'ALTER DATABASE [' + @name + '] SET PAGE_VERIFY ' + @PageVerify + ' WITH NO_WAIT;';
+                PRINT @rollbackCommand;
+                PRINT @command;
+                IF @PrintOnly = 0
+                    EXEC sp_executesql @command;
             END;
-        SET @command = N'USE ['+@name+']; DECLARE @userid VARCHAR(255);
-CREATE TABLE #OrphanUsers
-(UserName VARCHAR(100),
- USID     NVARCHAR(255)
-);
-INSERT INTO #OrphanUsers
-EXEC sp_change_users_login
-     ''report'';
-DECLARE FixUser CURSOR
-FOR SELECT UserName
-    FROM #OrphanUsers;
+
+            -- Auto shrink
+            IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @name AND is_auto_shrink_on = ~@AutoShrink)
+            BEGIN
+                SELECT @currentAutoShrink = is_auto_shrink_on FROM sys.databases WHERE name = @name;
+                SET @rollbackCommand = '-- ALTER DATABASE [' + @name + '] SET AUTO_SHRINK ' + CASE @currentAutoShrink WHEN 1 THEN 'ON' ELSE 'OFF' END + ';';
+                SET @command = 'ALTER DATABASE [' + @name + '] SET AUTO_SHRINK ' + CASE @AutoShrink WHEN 1 THEN 'ON' ELSE 'OFF' END + ';';
+                PRINT @rollbackCommand;
+                PRINT @command;
+                IF @PrintOnly = 0
+                    EXEC sp_executesql @command;
+            END;
+
+            -- Auto close
+            IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @name AND is_auto_close_on = ~@AutoClose)
+            BEGIN
+                SELECT @currentAutoClose = is_auto_close_on FROM sys.databases WHERE name = @name;
+                SET @rollbackCommand = '-- ALTER DATABASE [' + @name + '] SET AUTO_CLOSE ' + CASE @currentAutoClose WHEN 1 THEN 'ON' ELSE 'OFF' END + ';';
+                SET @command = 'ALTER DATABASE [' + @name + '] SET AUTO_CLOSE ' + CASE @AutoClose WHEN 1 THEN 'ON' ELSE 'OFF' END + ';';
+                PRINT @rollbackCommand;
+                PRINT @command;
+                IF @PrintOnly = 0
+                    EXEC sp_executesql @command;
+            END;
+
+            -- Compatibility level
+            IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @name AND compatibility_level <> @CompatibilityLevel)
+            BEGIN
+                SELECT @currentCompatibilityLevel = compatibility_level FROM sys.databases WHERE name = @name;
+                SET @rollbackCommand = '-- ALTER DATABASE [' + @name + '] SET COMPATIBILITY_LEVEL = ' + CAST(@currentCompatibilityLevel AS NVARCHAR(3)) + ';';
+                SET @command = 'ALTER DATABASE [' + @name + '] SET COMPATIBILITY_LEVEL = ' + CAST(@CompatibilityLevel AS NVARCHAR(3)) + ';';
+                PRINT @rollbackCommand;
+                PRINT @command;
+                IF @PrintOnly = 0
+                    EXEC sp_executesql @command;
+            END;
+
+            -- Fix orphaned users (no rollback, as specified)
+            IF @FixOrphanUsers = 1
+            BEGIN
+                SET @command = N'USE [' + @name + ']; 
+DECLARE @userid VARCHAR(255);
+CREATE TABLE #OrphanUsers (UserName VARCHAR(100), USID NVARCHAR(255));
+INSERT INTO #OrphanUsers EXEC sp_change_users_login ''report'';
+DECLARE FixUser CURSOR LOCAL FAST_FORWARD
+FOR SELECT UserName FROM #OrphanUsers;
 OPEN FixUser;
 FETCH NEXT FROM FixUser INTO @userid;
 WHILE @@FETCH_STATUS = 0
+BEGIN
     BEGIN TRY
-        EXEC sp_change_users_login
-             ''update_one'',
-             @userid,
-             @userid;
-        PRINT ''--User ''+@userid+'' is mapped;'';
-        FETCH NEXT FROM FixUser INTO @userid;
+        EXEC sp_change_users_login ''update_one'', @userid, @userid;
+        PRINT ''---- User '' + @userid + '' is mapped in database [' + @name + '];'';
     END TRY
     BEGIN CATCH
-        PRINT ''DROP user ''+@userid+'';'';
-        FETCH NEXT FROM FixUser INTO @userid;
+        PRINT ''---- DROP USER '' + @userid + '' in database [' + @name + '];'';
     END CATCH;
+    FETCH NEXT FROM FixUser INTO @userid;
+END;
 CLOSE FixUser;
 DEALLOCATE FixUser;
-DROP TABLE #OrphanUsers; '+CHAR(13)+CHAR(10)+'GO';
-        IF @printonly = 1
-            BEGIN
+DROP TABLE #OrphanUsers;';
+                PRINT '---- Note: No rollback commands generated for orphaned user fixes, as they are not required.';
                 PRINT @command;
+                IF @PrintOnly = 0
+                    EXEC sp_executesql @command;
             END;
-            ELSE
-            BEGIN
-                PRINT @command;
-                EXEC sp_executesql
-                     @command;
-            END;
-        CLOSE filenames;
-        DEALLOCATE filenames;
+
+        END TRY
+        BEGIN CATCH
+            SET @errorMsg = '---- Error processing database [' + @name + ']: ' + ERROR_MESSAGE();
+            PRINT @errorMsg;
+        END CATCH;
+
         FETCH NEXT FROM db_cursor INTO @name;
     END;
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+
+    IF @PrintOnly = 1
+        PRINT '---- End of commands. Review and execute manually if needed. Use rollback commands (prefixed with --) by replacing -- with empty string for restoration.';
+    ELSE
+        PRINT '---- All commands executed successfully. Save rollback commands (prefixed with --) for potential restoration by replacing -- with empty string.';
+END;
+GO
