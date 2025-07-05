@@ -3,7 +3,7 @@ GO
 CREATE OR ALTER PROCEDURE usp_DiskDBSpaceReport
 (    
     @Disk NVARCHAR(256) = '',   -- Specific disk or mount point to filter
-    @DBName NVARCHAR(128) = null,   -- Specific database name to filter
+    @DBName NVARCHAR(128) = '',   -- Specific database name to filter
     @LowDiskPct DECIMAL(5,2) = 100, -- Show drives below this free space percentage
     @BackupLookBackDays int = 30 --How far back backup should be checked.
 )
@@ -16,8 +16,9 @@ SET NOCOUNT ON;
         RAISERROR('Parameter @LowDiskPct must be between 0 and 100', 16, 1);
         RETURN;
     END
-
-    IF @Disk IS NOT NULL AND @Disk NOT IN (
+	IF @Disk = ''
+	SET @Disk = NULL 
+    IF (@Disk IS NOT NULL) AND @Disk NOT IN (
         SELECT DISTINCT volume_mount_point
         FROM sys.master_files AS f
         CROSS APPLY sys.dm_os_volume_stats(f.database_id, f.file_id)
@@ -26,8 +27,9 @@ SET NOCOUNT ON;
         RAISERROR('Invalid disk drive specified', 16, 1);
         RETURN;
     END
-
-    IF @DBName IS NOT NULL AND NOT EXISTS (
+	IF @DBName = ''
+	SET @DBName = NULL
+    IF (@DBName IS NOT NULL) AND NOT EXISTS (
         SELECT 1 FROM sys.databases WHERE name = @DBName
     )
     BEGIN
@@ -267,7 +269,7 @@ BEGIN
         CONVERT(DECIMAL(20, 2), ((f.size / 128.0) / HD.DbSizeMb) * 100) AS Pct2DbSize,
         CAST(f.size / 128.0 - (d.SpaceUsed / 128.0) AS DECIMAL(15, 2)) AS FileSpaceFreeMb,
 		   CASE
-            WHEN f.type_desc = 'Log' THEN ISNULL('LogSizeSinceLogBackup:'+ CONVERT(VARCHAR(15),DLS.log_since_last_log_backup_mb),'') + ISNULL('ActiveLogSize:' + convert(varchar(20), DLS.active_log_size_mb),'')
+            WHEN f.type_desc = 'Log' THEN ISNULL('LogSizeSinceLogBackup:'+ CONVERT(VARCHAR(18),convert(decimal(12,2),DLS.log_since_last_log_backup_mb)),'') + ISNULL('ActiveLogSize:' + convert(varchar(20), convert(decimal(12,2), DLS.active_log_size_mb)),'')
 			WHEN f.type_desc = 'Rows' THEN 'Data File'
             ELSE f.type_desc
         END AS LogSizeSinceLastLogBackupMB,
@@ -392,4 +394,3 @@ END;
 GO
 
 EXEC usp_DiskDBSpaceReport;
-
