@@ -1,16 +1,17 @@
 USE master;
 GO
--- This must be ran on master, I am dropping procedure after creating it. This is required to address Audit log not able to write on security log.
--- Create stored procedure to read or set the EventSourceFlags registry key
+-- This must be run on master. Drops procedure after execution.
+-- Sets EventSourceFlags registry key to enable audit events to write to the Windows Security log.
+-- See: https://support.microsoft.com/en-us/topic/kb4052136-fix-sql-server-audit-events-don-t-write-to-the-security-log-d9708450-6981-2fab-4e58-5f09d561110e
 CREATE OR ALTER PROCEDURE usp_ManageAuditEventSourceFlags
     @AuditName NVARCHAR(128) = 'SqlThreatDetection_Audit', -- Name of the server audit
-    @Action NVARCHAR(10) = 'set',                        -- Action: 'READ' or 'SET'
-    @RestartAudit bit = 0,
-	@ValueData INT = 1                                    -- Value to set (used only if @Action = 'SET')
+    @Action bit = 1,                                       -- Action: 0 (read) or 1 (write)
+    @RestartAudit bit = 0,                                 -- Whether to restart audit
+    @Execute bit = 1                                       -- 0: print commands, 1: execute commands
 AS
 BEGIN
     SET NOCOUNT ON;
---https://support.microsoft.com/en-us/topic/kb4052136-fix-sql-server-audit-events-don-t-write-to-the-security-log-d9708450-6981-2fab-4e58-5f09d561110e
+
     DECLARE @InstanceName NVARCHAR(128);
     DECLARE @RegistryPath NVARCHAR(512);
     DECLARE @ValueName NVARCHAR(512) = 'EventSourceFlags';
@@ -33,13 +34,16 @@ BEGIN
     -- Construct the registry path dynamically
     SET @RegistryPath = N'SYSTEM\CurrentControlSet\Services\EventLog\Security\MSSQL$' + @InstanceName + '$Audit';
 
-    -- Validate audit name
-    IF NOT EXISTS (SELECT 1 FROM sys.server_audits WHERE name = @AuditName)
+    -- Validate audit name only if restarting audit
+    IF @Action = 1 AND @RestartAudit = 1
     BEGIN
-        SET @ErrorMessage = 'The specified audit ''' + @AuditName + ''' does not exist on the server. Use sys.server_audits to view available audits.';
-        RAISERROR (@ErrorMessage, 16, 1);
-        SELECT -1 AS RegistryValue, @ErrorMessage AS ErrorMessage;
-        RETURN;
+        IF NOT EXISTS (SELECT 1 FROM sys.server_audits WHERE name = @AuditName)
+        BEGIN
+            SET @ErrorMessage = 'The specified audit ''' + @AuditName + ''' does not exist on the server. Use sys.server_audits to view available audits.';
+            RAISERROR (@ErrorMessage, 16, 1);
+            SELECT -1 AS RegistryValue, @ErrorMessage AS ErrorMessage;
+            RETURN;
+        END;
     END;
 
     -- Read the current registry value
@@ -61,12 +65,13 @@ BEGIN
             SET @RegistryValue = -1; -- Key exists but no value set
     END TRY
     BEGIN CATCH
-        -- If the key doesn't exist, set @RegistryValue to -1 and proceed to create it if action is SET
         SET @RegistryValue = -1;
+        SET @ErrorMessage = 'Failed to read registry key ''' + @RegistryPath + '''. Error: ' + ERROR_MESSAGE();
+        RAISERROR (@ErrorMessage, 10, 1); -- Warning level, does not terminate
     END CATCH;
 
-    -- If action is READ, return the current value
-    IF UPPER(@Action) = 'READ'
+    -- If action is read, return the current value
+    IF @Action = 0
     BEGIN
         SELECT @RegistryValue AS RegistryValue, 
                CASE WHEN @RegistryValue = -1 THEN 'Registry key does not exist or has no value.' 
@@ -74,62 +79,94 @@ BEGIN
         RETURN;
     END;
 
-    -- If action is SET, proceed to set the registry value if needed
-    IF UPPER(@Action) = 'SET'
+    -- If action is write, proceed only if execute is 1
+    IF @Action = 1
     BEGIN
-        -- Validate @ValueData
-        IF @ValueData NOT IN (0, 1)
-        BEGIN
-            SET @ErrorMessage = 'Invalid @ValueData specified: ' + CAST(@ValueData AS NVARCHAR(10)) + '. Must be 0 or 1.';
-            RAISERROR (@ErrorMessage, 16, 1);
-            SELECT -1 AS RegistryValue, @ErrorMessage AS ErrorMessage;
+        -- Show current value when not executing
+        IF @Execute = 0
+        BEGIN 
+            SELECT @RegistryValue AS RegistryValue, 
+                   CASE WHEN @RegistryValue = -1 THEN 'Registry key does not exist or has no value.' 
+                        ELSE 'Current registry value.' END AS Message;
+            -- Print commands that would be executed
+            IF @RegistryValue = -1 OR @RegistryValue != 1
+            BEGIN
+                SET @SqlStmt = N'EXEC @ReturnCode = master.dbo.xp_regwrite 
+                    @rootkey = N''HKEY_LOCAL_MACHINE'',
+                    @key = N''' + @RegistryPath + ''',
+                    @value_name = N''' + @ValueName + ''',
+                    @type = N''REG_DWORD'',
+                    @value = 1;';
+                PRINT @SqlStmt;
+
+                IF @RestartAudit = 1
+                BEGIN
+                    SET @SqlStmt = N'ALTER SERVER AUDIT [' + @AuditName + '] WITH (STATE = OFF);';
+                    PRINT @SqlStmt;
+                    SET @SqlStmt = N'ALTER SERVER AUDIT [' + @AuditName + '] WITH (STATE = ON);';
+                    PRINT @SqlStmt;
+                END;
+            END
+            ELSE
+            BEGIN
+                SELECT @RegistryValue AS RegistryValue, 
+                       'Registry key already set to 1. No changes needed.' AS Message;
+            END;
             RETURN;
         END;
 
-        -- Set the value if it doesn't exist or is different
-        IF @RegistryValue = -1 OR @RegistryValue != @ValueData
+        -- Execute changes only if @Execute = 1
+        IF @RegistryValue = -1 OR @RegistryValue != 1
         BEGIN
             -- Set or create the registry key using xp_regwrite
+            SET @SqlStmt = N'EXEC @ReturnCode = master.dbo.xp_regwrite 
+                @rootkey = N''HKEY_LOCAL_MACHINE'',
+                @key = N''' + @RegistryPath + ''',
+                @value_name = N''' + @ValueName + ''',
+                @type = N''REG_DWORD'',
+                @value = 1;';
+            PRINT @SqlStmt;
             BEGIN TRY
-                EXEC @ReturnCode = master.dbo.xp_regwrite 
-                    @rootkey = N'HKEY_LOCAL_MACHINE',
-                    @key = @RegistryPath,
-                    @value_name = @ValueName,
-                    @type = N'REG_DWORD',
-                    @value = @ValueData;
+                EXEC sp_executesql @SqlStmt, N'@ReturnCode INT OUTPUT', @ReturnCode OUTPUT;
 
                 IF @ReturnCode = 0
                 BEGIN
                     -- Update the registry value
-                    SET @RegistryValue = @ValueData;
+                    SET @RegistryValue = 1;
 
                     -- Restart the server audit to apply changes
-                    BEGIN TRY
-                        -- Construct and execute dynamic SQL to stop the audit
-                        SET @SqlStmt = N'ALTER SERVER AUDIT [' + @AuditName + '] WITH (STATE = OFF);';
-						IF @RestartAudit = 0
-							PRINT @SqlStmt
-							ELSE EXEC sp_executesql @SqlStmt;
+                    IF @RestartAudit = 1
+                    BEGIN
+                        BEGIN TRY
+                            -- Construct and execute dynamic SQL to stop the audit
+                            SET @SqlStmt = N'ALTER SERVER AUDIT [' + @AuditName + '] WITH (STATE = OFF);';
+                            PRINT @SqlStmt;
+                            EXEC sp_executesql @SqlStmt;
 
-                        -- Construct and execute dynamic SQL to start the audit
-                        SET @SqlStmt = N'ALTER SERVER AUDIT [' + @AuditName + '] WITH (STATE = ON);';
-                        IF @RestartAudit = 0
-							PRINT @SqlStmt
-							ELSE EXEC sp_executesql @SqlStmt;
+                            -- Construct and execute dynamic SQL to start the audit
+                            SET @SqlStmt = N'ALTER SERVER AUDIT [' + @AuditName + '] WITH (STATE = ON);';
+                            PRINT @SqlStmt;
+                            EXEC sp_executesql @SqlStmt;
 
+                            SELECT @RegistryValue AS RegistryValue, 
+                                   'Registry key set to 1 and audit ''' + @AuditName + ''' restarted.' AS Message;
+                        END TRY
+                        BEGIN CATCH
+                            SET @ErrorMessage = 'Failed to restart audit ''' + @AuditName + '''. Registry key was set to 1, but audit restart failed. Error: ' + ERROR_MESSAGE();
+                            RAISERROR (@ErrorMessage, 16, 1);
+                            SELECT @RegistryValue AS RegistryValue, @ErrorMessage AS ErrorMessage;
+                            RETURN;
+                        END CATCH;
+                    END
+                    ELSE
+                    BEGIN
                         SELECT @RegistryValue AS RegistryValue, 
-                               'Registry key set to ' + CAST(@ValueData AS NVARCHAR(10)) + ' and audit ''' + @AuditName + ''' restarted.' AS Message;
-                    END TRY
-                    BEGIN CATCH
-                        SET @ErrorMessage = 'Failed to restart audit ''' + @AuditName + '''. Registry key was set to ' + CAST(@ValueData AS NVARCHAR(10)) + ', but audit restart failed. Error: ' + ERROR_MESSAGE();
-                        RAISERROR (@ErrorMessage, 16, 1);
-                        SELECT @RegistryValue AS RegistryValue, @ErrorMessage AS ErrorMessage;
-                        RETURN;
-                    END CATCH;
+                               'Registry key set to 1. Audit not restarted as @RestartAudit = 0.' AS Message;
+                    END;
                 END
                 ELSE
                 BEGIN
-                    SET @ErrorMessage = 'Failed to set registry key ''' + @RegistryPath + ''' with value ' + CAST(@ValueData AS NVARCHAR(10)) + '. Return code: ' + CAST(@ReturnCode AS NVARCHAR(10));
+                    SET @ErrorMessage = 'Failed to set registry key ''' + @RegistryPath + ''' with value 1. Return code: ' + CAST(@ReturnCode AS NVARCHAR(10));
                     RAISERROR (@ErrorMessage, 16, 1);
                     SELECT -1 AS RegistryValue, @ErrorMessage AS ErrorMessage;
                     RETURN;
@@ -145,14 +182,14 @@ BEGIN
         ELSE
         BEGIN
             SELECT @RegistryValue AS RegistryValue, 
-                   'Registry key already set to ' + CAST(@RegistryValue AS NVARCHAR(10)) + '. No changes made.' AS Message;
+                   'Registry key already set to 1. No changes made.' AS Message;
         END
     END
     ELSE
     BEGIN
-        SET @ErrorMessage = 'Invalid action specified: ''' + @Action + '''. Must be ''READ'' or ''SET''.';
+        SET @ErrorMessage = 'Invalid action specified: ''' + CAST(@Action AS NVARCHAR(10)) + '''. Must be 0 (read) or 1 (write).';
         RAISERROR (@ErrorMessage, 16, 1);
-        SELECT -1 AS RegistryValue, @ErrorMessage AS ErrorMessage;
+        SELECT -1 AS RegistryValue, @ErrorMessage AS errorMessage;
         RETURN;
     END
 END;
