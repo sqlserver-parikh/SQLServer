@@ -1,97 +1,124 @@
 USE TEMPDB
 GO
+
 CREATE OR ALTER PROCEDURE usp_FixOrphanUsers
     @DatabaseName NVARCHAR(255) = '',
-    @PrintOnly BIT = 1
+    @PrintOnly BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    DECLARE @userid VARCHAR(255);
-    DECLARE @dbname VARCHAR(128);
-    DECLARE @script NVARCHAR(MAX);
+    DECLARE @userid NVARCHAR(128);
+    DECLARE @dbname NVARCHAR(128);
+    DECLARE @sql NVARCHAR(MAX);
 
-    CREATE TABLE #OrphanUsers
-    (
-        DBName   VARCHAR(128),
-        UserName VARCHAR(128),
-        UserSID  NVARCHAR(255)
+    -- Table to collect orphaned users
+    IF OBJECT_ID('tempdb..#OrphanUsers') IS NOT NULL DROP TABLE #OrphanUsers;
+    CREATE TABLE #OrphanUsers (
+        DBName   NVARCHAR(128),
+        UserName NVARCHAR(128)
     );
 
-  IF @DatabaseName IS NULL OR @DatabaseName = ''
-  BEGIN
-        INSERT INTO #OrphanUsers
-		EXEC sp_MSforeachdb
-        'IF DATABASEPROPERTYEX(''?'', ''IsReadOnly'') = 0 AND DATABASEPROPERTYEX(''?'', ''Status'') = ''ONLINE''
-         BEGIN
-             SELECT ''?'' AS DBName, name, sid 
-             FROM [?]..sysusers
-             WHERE issqluser = 1
-               AND (sid IS NOT NULL AND sid <> 0x0)
-               AND (LEN(sid) <= 16)
-               AND SUSER_SNAME(sid) IS NULL
-             ORDER BY name
-         END';
-    END
-    ELSE
-    BEGIN
-        SET @script = 'USE ' + QUOTENAME(@DatabaseName) + '; ' +
-                      'INSERT INTO #OrphanUsers (DBName, UserName, UserSID) ' +
-                      'SELECT ''' + @DatabaseName + ''', name, sid ' +
-                      'FROM sysusers ' +
-                      'WHERE issqluser = 1 ' +
-                      'AND (sid IS NOT NULL AND sid <> 0x0) ' +
-                      'AND (LEN(sid) <= 16) ' +
-                      'AND SUSER_SNAME(sid) IS NULL ' +
-                      'ORDER BY name;';
-        EXEC sp_executesql @script;
-    END
+    -- Cursor for databases
+    DECLARE db_cursor CURSOR FOR
+        SELECT name
+        FROM sys.databases
+        WHERE
+            state_desc = 'ONLINE'
+            AND is_read_only = 0
+            AND database_id > 4 -- Exclude system DBs
+            AND (@DatabaseName = '' OR name = @DatabaseName);
 
-    DECLARE FixUser CURSOR FOR
-    SELECT UserName, DBName
-    FROM #OrphanUsers;
-
-    OPEN FixUser;
-    FETCH NEXT FROM FixUser INTO @userid, @dbname;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @dbname;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
+        SET @sql = N'
+            INSERT INTO #OrphanUsers (DBName, UserName)
+            SELECT
+                N''' + REPLACE(@dbname, '''', '''''') + N''' AS DBName,
+                name AS UserName
+            FROM ' + QUOTENAME(@dbname) + N'.sys.database_principals
+            WHERE type IN (''S'', ''U'')
+              AND authentication_type IN (1, 2) -- SQL or Windows users
+              AND sid IS NOT NULL AND sid <> 0x0
+              AND SUSER_SNAME(sid) IS NULL
+              AND name NOT IN (''dbo'', ''guest'', ''INFORMATION_SCHEMA'', ''sys'')
+        ';
+        EXEC sp_executesql @sql;
+        
+        FETCH NEXT FROM db_cursor INTO @dbname;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+
+    -- Cursor for orphaned users
+    DECLARE user_cursor CURSOR FOR
+        SELECT UserName, DBName FROM #OrphanUsers;
+
+    OPEN user_cursor;
+    FETCH NEXT FROM user_cursor INTO @userid, @dbname;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        -- If login exists, fix orphan
         IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @userid)
         BEGIN
-            SET @script = 'USE ' + QUOTENAME(@dbname) + ';' + CHAR(10) +
-                          'EXEC sp_change_users_login ''update_one'', ''' + @userid + ''', ''' + @userid + ''';';
+            SET @sql = N'USE ' + QUOTENAME(@dbname) + N';
+                IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N''' + REPLACE(@userid, '''', '''''') + N''')
+                BEGIN
+                    ALTER USER ' + QUOTENAME(@userid) + N' WITH LOGIN = ' + QUOTENAME(@userid) + N';
+                END
+            ';
             IF @PrintOnly = 1
-            BEGIN
-                PRINT @script;
-            END
+                PRINT @sql;
             ELSE
-            BEGIN
-                EXEC sp_executesql @script;
-                PRINT @script;
-            END
+                BEGIN TRY
+                    EXEC sp_executesql @sql;
+                    PRINT @sql;
+                END TRY
+                BEGIN CATCH
+                    PRINT 'Error: ' + ERROR_MESSAGE();
+                END CATCH
         END
         ELSE
         BEGIN
-            IF EXISTS (SELECT name FROM sys.schemas WHERE principal_id = USER_ID(@userid))
+            -- Drop user if no login exists, handle schema ownership
+            SET @sql = N'
+            USE ' + QUOTENAME(@dbname) + N';
+            DECLARE @schema NVARCHAR(128);
+            SELECT @schema = name FROM sys.schemas WHERE principal_id = USER_ID(N''' + REPLACE(@userid, '''', '''''') + N''');
+            IF @schema IS NOT NULL
             BEGIN
-                SET @script = 'USE ' + QUOTENAME(@dbname) + ';' + CHAR(10) +
-                              'DROP USER ' + QUOTENAME(@userid) + ';' + CHAR(10);
-                IF @PrintOnly = 1
-                BEGIN
-                    PRINT @script;
-                END
-                ELSE
-                BEGIN
-                    EXEC sp_executesql @script;
-                    PRINT @script;
-                END
+                DECLARE @auth_sql NVARCHAR(200);
+                SET @auth_sql = N''ALTER AUTHORIZATION ON SCHEMA '' + QUOTENAME(@schema) + N'' TO dbo;'';
+                EXEC sp_executesql @auth_sql;
             END
+            IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N''' + REPLACE(@userid, '''', '''''') + N''')
+            BEGIN
+                DROP USER ' + QUOTENAME(@userid) + N';
+            END
+            ';
+            IF @PrintOnly = 1
+                PRINT @sql;
+            ELSE
+                BEGIN TRY
+                    EXEC sp_executesql @sql;
+                    PRINT @sql;
+                END TRY
+                BEGIN CATCH
+                    PRINT 'Error: ' + ERROR_MESSAGE();
+                END CATCH
         END
 
-        FETCH NEXT FROM FixUser INTO @userid, @dbname;
+        FETCH NEXT FROM user_cursor INTO @userid, @dbname;
     END
 
-    CLOSE FixUser;
-    DEALLOCATE FixUser;
+    CLOSE user_cursor;
+    DEALLOCATE user_cursor;
+
     DROP TABLE #OrphanUsers;
 END
+GO
