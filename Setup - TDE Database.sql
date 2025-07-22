@@ -5,8 +5,8 @@ CREATE OR ALTER PROCEDURE dbo.usp_EnableTDE
     @DatabaseName NVARCHAR(128) = NULL,
     @CertificateName NVARCHAR(128) = 'TDE_Certificate',
     @EncryptionAlgorithm NVARCHAR(32) = 'AES_256',
-    @MasterKeyPassword NVARCHAR(128) = NULL,
-    @BackupCertificate BIT = 0,
+    @MKCertPassword NVARCHAR(128) = 'StrongPassword:-)',
+    @BackupCertificate BIT = 1,
     @BackupPath NVARCHAR(256) = NULL,
     @PrintOnly BIT = 1
 AS
@@ -29,7 +29,7 @@ BEGIN
     DECLARE @Timestamp NVARCHAR(20);
 
     BEGIN TRY
-        -- Validate input parameters
+        -- Only require @DatabaseName if not just doing a backup
         IF @BackupCertificate = 0
         BEGIN
             IF @DatabaseName IS NULL OR @DatabaseName = ''
@@ -45,11 +45,14 @@ BEGIN
             END
         END
 
-
-        IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @DatabaseName)
+        -- Only check database existence if @DatabaseName is provided
+        IF @DatabaseName IS NOT NULL AND @DatabaseName <> ''
         BEGIN
-            RAISERROR('Specified database does not exist.', 16, 1);
-            RETURN;
+            IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @DatabaseName)
+            BEGIN
+                RAISERROR('Specified database does not exist.', 16, 1);
+                RETURN;
+            END
         END
 
         IF @EncryptionAlgorithm NOT IN ('AES_128', 'AES_192', 'AES_256', 'TRIPLE_DES_3KEY')
@@ -64,11 +67,11 @@ BEGIN
         -- Check if certificate exists
         SET @CertificateExists = (SELECT COUNT(*) FROM master.sys.certificates WHERE name = @CertificateName);
 
-        -- Validate MasterKeyPassword when required
+        -- Validate MKCertPassword when required
         IF (@MasterKeyExists = 0 OR @CertificateExists = 0 OR @BackupCertificate = 1)
-            AND (@MasterKeyPassword IS NULL OR @MasterKeyPassword = '')
+            AND (@MKCertPassword IS NULL OR @MKCertPassword = '')
         BEGIN
-            RAISERROR('MasterKeyPassword is required when creating a master key, certificate, or backing up the certificate.', 16, 1);
+            RAISERROR('MKCertPassword is required when creating a master key, certificate, or backing up the certificate.', 16, 1);
             RETURN;
         END
 
@@ -76,7 +79,7 @@ BEGIN
         IF @MasterKeyExists = 0
         BEGIN
             SET @SQL = 'USE master;' + CHAR(10) +
-                       'CREATE MASTER KEY ENCRYPTION BY PASSWORD = ''' + @MasterKeyPassword + ''';' + CHAR(10) +
+                       'CREATE MASTER KEY ENCRYPTION BY PASSWORD = ''' + @MKCertPassword + ''';' + CHAR(10) +
                        'WAITFOR DELAY ''00:00:05'';';
             IF @PrintOnly = 1
                 PRINT @SQL + CHAR(10);
@@ -123,7 +126,7 @@ BEGIN
             SET @SQL = 'USE master; BACKUP CERTIFICATE ' + QUOTENAME(@CertificateName) + CHAR(10) +
                        'TO FILE = ''' + @BackupFileCert + ''' ' + CHAR(10) +
                        'WITH PRIVATE KEY (FILE = ''' + @BackupFileKey + ''', ' + CHAR(10) +
-                       'ENCRYPTION BY PASSWORD = ''' + @MasterKeyPassword + ''');' + CHAR(10) +
+                       'ENCRYPTION BY PASSWORD = ''' + @MKCertPassword + ''');' + CHAR(10) +
                        'WAITFOR DELAY ''00:00:05'';';
             IF @PrintOnly = 1
                 PRINT @SQL + CHAR(10);
@@ -131,24 +134,28 @@ BEGIN
                 EXEC sp_executesql @SQL;
         END
 
-        -- Create DEK and enable TDE
-        IF NOT EXISTS (SELECT 1 FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID(@DatabaseName))
+        -- Only do TDE steps if @DatabaseName is provided
+        IF @DatabaseName IS NOT NULL AND @DatabaseName <> ''
         BEGIN
-            SET @SQL = 'USE ' + QUOTENAME(@DatabaseName) + ';' + CHAR(10) +
-                       'WAITFOR DELAY ''00:00:05'';' + CHAR(10) +
-                       'CREATE DATABASE ENCRYPTION KEY WITH ALGORITHM = ' + @EncryptionAlgorithm + CHAR(10) +
-                       'ENCRYPTION BY SERVER CERTIFICATE ' + QUOTENAME(@CertificateName) + ';' + CHAR(10) +
-                       'WAITFOR DELAY ''00:00:05'';' + CHAR(10) +
-                       'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + ' SET ENCRYPTION ON;' + CHAR(10) +
-                       'WAITFOR DELAY ''00:00:05'';';
-            IF @PrintOnly = 1
-                PRINT @SQL + CHAR(10);
+            -- Create DEK and enable TDE
+            IF NOT EXISTS (SELECT 1 FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID(@DatabaseName))
+            BEGIN
+                SET @SQL = 'USE ' + QUOTENAME(@DatabaseName) + ';' + CHAR(10) +
+                           'WAITFOR DELAY ''00:00:05'';' + CHAR(10) +
+                           'CREATE DATABASE ENCRYPTION KEY WITH ALGORITHM = ' + @EncryptionAlgorithm + CHAR(10) +
+                           'ENCRYPTION BY SERVER CERTIFICATE ' + QUOTENAME(@CertificateName) + ';' + CHAR(10) +
+                           'WAITFOR DELAY ''00:00:05'';' + CHAR(10) +
+                           'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + ' SET ENCRYPTION ON;' + CHAR(10) +
+                           'WAITFOR DELAY ''00:00:05'';';
+                IF @PrintOnly = 1
+                    PRINT @SQL + CHAR(10);
+                ELSE
+                    EXEC sp_executesql @SQL;
+            END
             ELSE
-                EXEC sp_executesql @SQL;
-        END
-        ELSE
-        BEGIN
-            PRINT 'TDE is already enabled on database ' + @DatabaseName + '.' + CHAR(10);
+            BEGIN
+                PRINT 'TDE is already enabled on database ' + @DatabaseName + '.' + CHAR(10);
+            END
         END
     END TRY
     BEGIN CATCH
