@@ -28,7 +28,7 @@ CREATE OR ALTER PROCEDURE dbo.usp_ManageTDE
 
     -- Control flags
     @Print BIT = 1,
-    @Execute BIT = 1,
+    @Execute BIT = 0,
     @WaitForCompletion BIT = 0,
     @MaxWaitMinutes INT = 60
 AS
@@ -109,7 +109,7 @@ BEGIN
 
             IF @FinalBackupDirectory IS NOT NULL AND @FinalBackupDirectory <> ''
             BEGIN
-                PRINT '--' + @FinalBackupDirectory
+                PRINT '' 
             END
             ELSE
             BEGIN
