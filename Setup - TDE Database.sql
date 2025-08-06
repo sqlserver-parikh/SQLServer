@@ -2,6 +2,7 @@ USE tempdb;
 GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_ManageTDE
+    -- Core Parameters - NOTE: Default values below are for example/testing purposes.
     @DatabaseName NVARCHAR(128) = 'TDETest',
     @TDEAction NVARCHAR(10) = 'enable', -- Valid Actions: 'Enable', 'Disable', 'Status', 'DropDEK'
     @CertificateName NVARCHAR(128) = 'TDE Certificate',
@@ -21,15 +22,15 @@ CREATE OR ALTER PROCEDURE dbo.usp_ManageTDE
     @DropCertificate BIT = 0,
 
     -- File paths for backup/restore operations
-    @BackupDirectory NVARCHAR(256) = 'F:\data', -- If NULL, will use a valid default location.
+    @BackupDirectory NVARCHAR(256) = 'F:\data',
     @RestoreCertFilePath NVARCHAR(256) = '',
     @RestorePrivateKeyFilePath NVARCHAR(256) = '',
     @RestoreDecryptionPrivateKeyPassword NVARCHAR(128) = '',
 
     -- Control flags
     @Print BIT = 1,
-    @Execute BIT = 0,
-    @WaitForCompletion BIT = 0,
+    @Execute BIT = 1,
+    @WaitForCompletion BIT = 1,
     @MaxWaitMinutes INT = 60
 AS
 BEGIN
@@ -80,7 +81,7 @@ BEGIN
             IF (SELECT COUNT(*) FROM master.sys.certificates WHERE name = @CertificateName) > 0 BEGIN PRINT '--Certificate ''' + @CertificateName + ''' already exists.'; END
             ELSE
             BEGIN
-                IF @RestoreCertFilePath = '' OR @RestorePrivateKeyFilePath = '' OR @RestoreDecryptionPrivateKeyPassword = '' BEGIN RAISERROR('CertFilePath, PrivateKeyFilePath, and PrivateKeyPassword are required for restore.', 16, 1); RETURN; END
+                IF @RestoreCertFilePath = '' OR @RestorePrivateKeyFilePath = '' OR @RestoreDecryptionPrivateKeyPassword = '' BEGIN RAISERROR('RestoreCertFilePath, RestorePrivateKeyFilePath, and RestoreDecryptionPrivateKeyPassword are required.', 16, 1); RETURN; END
                 SET @SQL = 'USE master; CREATE CERTIFICATE ' + QUOTENAME(@CertificateName) + ' FROM FILE = ''' + REPLACE(@RestoreCertFilePath, '''', '''''') + ''' WITH PRIVATE KEY (FILE = ''' + REPLACE(@RestorePrivateKeyFilePath, '''', '''''') + ''', DECRYPTION BY PASSWORD = ''' + REPLACE(@RestoreDecryptionPrivateKeyPassword, '''', '''''') + ''');';
                 IF @Print = 1 PRINT 'Restoring Certificate:' + CHAR(10) + @SQL + CHAR(10);
                 IF @Execute = 1 BEGIN EXEC sp_executesql @SQL; PRINT 'Certificate ''' + @CertificateName + ''' restored successfully.'; END
@@ -105,28 +106,12 @@ BEGIN
             IF @CertificateBackupPassword IS NULL BEGIN RAISERROR('@CertificateBackupPassword is required for backup.', 16, 1); RETURN; END
             
             DECLARE @FinalBackupDirectory NVARCHAR(256) = @BackupDirectory;
-            DECLARE @DirExists INT = 0;
-
-            IF @FinalBackupDirectory IS NOT NULL AND @FinalBackupDirectory <> ''
+            
+            IF @FinalBackupDirectory IS NULL OR @FinalBackupDirectory = ''
             BEGIN
-                PRINT '' 
-            END
-            ELSE
-            BEGIN
-                PRINT '--@BackupDirectory not specified, attempting to find a valid location.';
+                PRINT '--@BackupDirectory not specified, finding instance default backup location.';
                 EXEC master.dbo.xp_instance_regread N'HKEY_LOCAL_MACHINE', N'Software\Microsoft\MSSQLServer\MSSQLServer', N'BackupDirectory', @FinalBackupDirectory OUTPUT;
-                
-                IF @FinalBackupDirectory IS NOT NULL AND @FinalBackupDirectory <> ''
-                BEGIN
-                    EXEC master.dbo.xp_fileexist @FinalBackupDirectory, @DirExists OUTPUT;
-                END
-
-                IF @DirExists = 0
-                BEGIN
-                    PRINT '--Default backup directory is invalid or not found. Falling back to the MASTER database data directory.';
-                    SELECT @FinalBackupDirectory = SUBSTRING(physical_name, 1, LEN(physical_name) - CHARINDEX('\', REVERSE(physical_name))) 
-                    FROM master.sys.master_files WHERE database_id = 1 AND file_id = 1;
-                END
+                IF @FinalBackupDirectory IS NULL OR @FinalBackupDirectory = '' BEGIN RAISERROR('Could not determine a backup directory. Please specify a valid path for the @BackupDirectory parameter.', 16, 1); RETURN; END
             END
 
             PRINT '--Using backup directory: ' + @FinalBackupDirectory;
