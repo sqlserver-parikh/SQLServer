@@ -13,17 +13,17 @@ BEGIN
     IF @DBName = '' SET @DBName = NULL;
 
     -- Cleanup temp tables if they exist
-    DROP TABLE IF EXISTS #AGInfo, #BackupSetIDs, #BackupDetails;
+    DROP TABLE IF EXISTS #AGInfo, #BackupSetIDs, #BackupDetails, #RestoreBase;
 
     -- Backup tracking table
     CREATE TABLE #BackupSetIDs (
         DBName NVARCHAR(128),
         DatabaseGUID UNIQUEIDENTIFIER,
         LastFullBackupID INT,
+        LastFullBackupSetUUID UNIQUEIDENTIFIER, -- Using UUID for the full backup
         LastDifferentialBackupID INT,
         BackupServer NVARCHAR(128),
-        IsInRestorePlan BIT DEFAULT 1,
-        LastLogBackupTime DATETIME -- Tracks latest log backup time per database
+        IsInRestorePlan BIT DEFAULT 1
     );
 
     -- Backup details table
@@ -44,8 +44,7 @@ BEGIN
         BackupPreference NVARCHAR(60) NULL,
         AvailabilityMode NVARCHAR(60) NULL,
         RestoreWarning NVARCHAR(MAX) NULL,
-        IsInRestorePlan BIT DEFAULT 1,
-        EffectiveRestoreTime DATETIME -- Added to store per-database restore time
+        IsInRestorePlan BIT DEFAULT 1
     );
 
     -- AG info table
@@ -97,16 +96,16 @@ BEGIN
     END
 
     -- Get latest full backup
-    INSERT INTO #BackupSetIDs (DBName, DatabaseGUID, LastFullBackupID, BackupServer, LastLogBackupTime)
+    INSERT INTO #BackupSetIDs (DBName, DatabaseGUID, LastFullBackupID, LastFullBackupSetUUID, BackupServer)
     SELECT 
         bs.database_name,
         bs.database_guid,
         bs.backup_set_id,
-        bs.server_name,
-        NULL -- Will update LastLogBackupTime later
+        bs.backup_set_uuid, -- Correctly using backup_set_uuid
+        bs.server_name
     FROM msdb.dbo.backupset bs
     WHERE bs.type = 'D'
-        AND (@PointInTime IS NULL OR bs.backup_finish_date <= @PointInTime)
+        AND bs.backup_finish_date <= ISNULL(@PointInTime, bs.backup_finish_date)
         AND (@DBName IS NULL OR bs.database_name = @DBName)
         AND (@DatabaseGUID IS NULL OR bs.database_guid = @DatabaseGUID)
         AND bs.is_copy_only = 0
@@ -116,42 +115,25 @@ BEGIN
             WHERE bs2.database_name = bs.database_name
                 AND bs2.database_guid = bs.database_guid
                 AND bs2.type = 'D'
-                AND (@PointInTime IS NULL OR bs2.backup_finish_date <= @PointInTime)
+                AND bs2.backup_finish_date <= ISNULL(@PointInTime, bs2.backup_finish_date)
                 AND bs2.is_copy_only = 0
         );
 
-    -- Get latest differential backup
+    -- Get latest differential backup based on the full backup
     UPDATE bsi
     SET LastDifferentialBackupID = (
         SELECT TOP 1 bs.backup_set_id
         FROM msdb.dbo.backupset bs
         WHERE bs.type = 'I'
-            AND (@PointInTime IS NULL OR bs.backup_finish_date <= @PointInTime)
-            AND bs.backup_set_id > bsi.LastFullBackupID
-            AND bs.database_name = bsi.DBName
+            AND bs.backup_finish_date <= ISNULL(@PointInTime, bs.backup_finish_date)
+            -- *** CORRECTION: Using differential_base_guid as reported by user ***
+            AND bs.differential_base_guid = bsi.LastFullBackupSetUUID
             AND bs.database_guid = bsi.DatabaseGUID
             AND bs.is_copy_only = 0
         ORDER BY bs.backup_finish_date DESC
     )
     FROM #BackupSetIDs bsi;
-
-    -- Set LastLogBackupTime per database
-    UPDATE bsi
-    SET LastLogBackupTime = (
-        SELECT MAX(bs.backup_finish_date)
-        FROM msdb.dbo.backupset bs
-        WHERE bs.type = 'L'
-            AND bs.database_name = bsi.DBName
-            AND bs.database_guid = bsi.DatabaseGUID
-            AND bs.backup_finish_date >= (
-                SELECT MIN(backup_start_date)
-                FROM msdb.dbo.backupset
-                WHERE backup_set_id IN (bsi.LastFullBackupID, bsi.LastDifferentialBackupID)
-            )
-            AND (@PointInTime IS NULL OR bs.backup_finish_date <= @PointInTime)
-    )
-    FROM #BackupSetIDs bsi;
-
+    
     -- Insert full and differential backups
     INSERT INTO #BackupDetails
     SELECT 
@@ -171,15 +153,24 @@ BEGIN
         ag.BackupPreference,
         ag.AvailabilityMode,
         NULL,
-        1,
-        CASE WHEN @PointInTime IS NULL THEN bsi.LastLogBackupTime ELSE @PointInTime END
+        1
     FROM msdb.dbo.backupset bs
     JOIN msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
     JOIN #BackupSetIDs bsi ON bs.backup_set_id IN (bsi.LastFullBackupID, bsi.LastDifferentialBackupID)
         AND bs.database_guid = bsi.DatabaseGUID
     LEFT JOIN #AGInfo ag ON bs.database_name = ag.DatabaseName;
 
-    -- Insert log backups
+    -- Determine the end time of the last full or differential restore base.
+    SELECT
+        bsi.DatabaseGUID,
+        MAX(bs.backup_finish_date) AS BaseFinishTime
+    INTO #RestoreBase
+    FROM #BackupSetIDs bsi
+    JOIN msdb.dbo.backupset bs ON bs.database_guid = bsi.DatabaseGUID
+        AND bs.backup_set_id IN (bsi.LastFullBackupID, bsi.LastDifferentialBackupID)
+    GROUP BY bsi.DatabaseGUID;
+
+    -- Select all log backups from the end of our base restore until the point in time.
     INSERT INTO #BackupDetails
     SELECT 
         bs.database_name,
@@ -198,68 +189,87 @@ BEGIN
         ag.BackupPreference,
         ag.AvailabilityMode,
         NULL,
-        1,
-        CASE WHEN @PointInTime IS NULL THEN bsi.LastLogBackupTime ELSE @PointInTime END
+        1
     FROM msdb.dbo.backupset bs
     JOIN msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
     JOIN #BackupSetIDs bsi ON bs.database_name = bsi.DBName AND bs.database_guid = bsi.DatabaseGUID
+    JOIN #RestoreBase rb ON bsi.DatabaseGUID = rb.DatabaseGUID
     LEFT JOIN #AGInfo ag ON bs.database_name = ag.DatabaseName
     WHERE bs.type = 'L'
-        AND bs.backup_finish_date >= (
-            SELECT MIN(backup_start_date)
-            FROM msdb.dbo.backupset
-            WHERE backup_set_id IN (bsi.LastFullBackupID, bsi.LastDifferentialBackupID)
-        )
-        AND (@PointInTime IS NULL OR bs.backup_finish_date <= @PointInTime);
+      AND bs.backup_finish_date > rb.BaseFinishTime
+      AND bs.backup_start_date <= ISNULL(@PointInTime, bs.backup_start_date);
 
     -- Generate restore scripts
     IF @GenerateRestoreScript = 1
     BEGIN
+        -- Aggregate striped backup files into a single RESTORE command
+        ;WITH BackupFileGroups AS (
+            SELECT
+                DBName,
+                DatabaseGUID,
+                BackupSetId,
+                BackupType,
+                BackupStartDate,
+                EndDate,
+                STRING_AGG(
+                    CAST(
+                        CASE
+                            WHEN BackupFileLocation LIKE 'http%' THEN 'URL = N'''
+                            ELSE 'DISK = N'''
+                        END + BackupFileLocation + '''' AS NVARCHAR(MAX)
+                    ),
+                    ',' + CHAR(13) + CHAR(10) + '    '
+                ) WITHIN GROUP (ORDER BY FileNumber) AS DeviceClauses,
+                SUM(BackupSizeMB) AS TotalBackupSizeMB,
+                MAX(ISNULL(RestoreWarning, '')) AS RestoreWarnings
+            FROM
+                #BackupDetails
+            WHERE IsInRestorePlan = 1
+            GROUP BY
+                DBName, DatabaseGUID, BackupSetId, BackupType, BackupStartDate, EndDate
+        )
+        -- Generate the restore script using the aggregated file groups
         SELECT 
-            ROW_NUMBER() OVER (PARTITION BY DatabaseGUID ORDER BY BackupStartDate) AS StepNumber,
-            DBName,
-            DatabaseGUID,
-            CASE BackupType
-                WHEN 'Full' THEN 
-                    'RESTORE DATABASE [' + DBName + '] FROM DISK = N''' + BackupFileLocation + 
-                    ''' WITH FILE = ' + CAST(FileNumber AS VARCHAR(10)) + ', NORECOVERY;'
-                WHEN 'Differential' THEN 
-                    'RESTORE DATABASE [' + DBName + '] FROM DISK = N''' + BackupFileLocation + 
-                    ''' WITH FILE = ' + CAST(FileNumber AS VARCHAR(10)) + ', NORECOVERY;'
-                WHEN 'Log' THEN 
-                    'RESTORE LOG [' + DBName + '] FROM DISK = N''' + BackupFileLocation + 
-                    ''' WITH FILE = ' + CAST(FileNumber AS VARCHAR(10)) + 
-                    CASE 
-                        WHEN EffectiveRestoreTime = EndDate THEN 
-                            ', STOPAT = ''' + CONVERT(VARCHAR(23), EffectiveRestoreTime, 121) + ''''
-                        ELSE ''
-                    END + ', NORECOVERY;'
+            ROW_NUMBER() OVER (PARTITION BY bf.DatabaseGUID ORDER BY bf.BackupStartDate) AS StepNumber,
+            bf.DBName,
+            bf.DatabaseGUID,
+            CASE
+                WHEN bf.BackupType IN ('Full', 'Differential') THEN
+                    'RESTORE DATABASE [' + bf.DBName + '] FROM ' + CHAR(13) + CHAR(10) + '    ' + bf.DeviceClauses + CHAR(13) + CHAR(10) + 'WITH NORECOVERY;'
+                WHEN bf.BackupType = 'Log' THEN
+                    'RESTORE LOG [' + bf.DBName + '] FROM ' + CHAR(13) + CHAR(10) + '    ' + bf.DeviceClauses + CHAR(13) + CHAR(10) +
+                    CASE
+                        WHEN @PointInTime IS NOT NULL AND bf.EndDate >= @PointInTime AND bf.BackupStartDate < @PointInTime THEN
+                            'WITH STOPAT = ''' + CONVERT(VARCHAR(23), @PointInTime, 121) + ''', NORECOVERY;'
+                        ELSE
+                            'WITH NORECOVERY;'
+                    END
             END AS RestoreCommand,
-            BackupType,
-            BackupStartDate,
-            EndDate,
-            BackupSizeMB,
-            ISNULL(RestoreWarning, '') AS RestoreWarnings,
-            CONVERT(VARCHAR(23), EffectiveRestoreTime, 121) AS EffectiveRestoreTime
-        FROM #BackupDetails
-        WHERE IsInRestorePlan = 1
+            bf.BackupType,
+            bf.BackupStartDate,
+            bf.EndDate,
+            bf.TotalBackupSizeMB AS BackupSizeMB,
+            bf.RestoreWarnings,
+            CONVERT(VARCHAR(23), @PointInTime, 121) AS EffectiveRestoreTime
+        FROM BackupFileGroups bf
 
         UNION ALL
 
         -- Final recovery step per database GUID
         SELECT 
             99999,
-            DBName,
-            DatabaseGUID,
-            'RESTORE DATABASE [' + DBName + '] WITH RECOVERY;',
+            -- *** CORRECTION: Qualify columns with the subquery alias 'FinalSteps' ***
+            FinalSteps.DBName,
+            FinalSteps.DatabaseGUID,
+            'RESTORE DATABASE [' + FinalSteps.DBName + '] WITH RECOVERY;',
             'Recovery',
+            GETDATE(),
+            GETDATE(),
             NULL,
             NULL,
-            NULL,
-            NULL,
-            CONVERT(VARCHAR(23), EffectiveRestoreTime, 121)
+            CONVERT(VARCHAR(23), @PointInTime, 121)
         FROM (
-            SELECT DISTINCT DBName, DatabaseGUID, EffectiveRestoreTime
+            SELECT DISTINCT DBName, DatabaseGUID
             FROM #BackupDetails
             WHERE IsInRestorePlan = 1
         ) AS FinalSteps
@@ -298,7 +308,7 @@ BEGIN
                     END
                 ELSE NULL
             END AS AGWarning,
-            CONVERT(VARCHAR(23), bd.EffectiveRestoreTime, 121) AS EffectiveRestoreTime
+            CONVERT(VARCHAR(23), @PointInTime, 121) AS EffectiveRestoreTime
         FROM #BackupDetails bd
         LEFT JOIN #AGInfo ag ON bd.DBName = ag.DatabaseName
         WHERE bd.IsInRestorePlan = 1
@@ -306,6 +316,6 @@ BEGIN
     END
 
     -- Cleanup
-    DROP TABLE IF EXISTS #AGInfo, #BackupSetIDs, #BackupDetails;
+    DROP TABLE IF EXISTS #AGInfo, #BackupSetIDs, #BackupDetails, #RestoreBase;
 END;
 GO
