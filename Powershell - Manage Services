@@ -1,0 +1,121 @@
+# ===================================================================
+#               -- CONFIGURE HERE --
+#  Set the Action, Servers, and Service patterns you want to manage.
+# ===================================================================
+
+# 1. SET THE ACTION: Must be 'Start', 'Stop', or 'Status'
+[ValidateSet('Start', 'Stop', 'Status')]
+[string]$Action = 'Status'
+
+# 2. SET THE SERVERS: Add or remove server names from this list.
+[string[]]$ServerList = @(
+    "Server1", "Server2", "Server3", "Server4"
+)
+
+# 3. SET THE SERVICES: Provide a comma-separated string of service name patterns.
+[string]$ServicePatternsCommaSeparated = "sql*,azure*"
+
+# ===================================================================
+#               -- DO NOT EDIT BELOW THIS LINE --
+# ===================================================================
+
+# --- Script Body ---
+$servicePatterns = $ServicePatternsCommaSeparated.Split(',') | ForEach-Object { $_.Trim() }
+$reportData = @()
+
+Write-Host "PHASE 1: Checking initial status of services matching: $($servicePatterns -join ', ')" -ForegroundColor Cyan
+Write-Host "--------------------------------------------------------------------------------" -ForegroundColor Cyan
+
+foreach ($server in $ServerList) {
+    Write-Host "-> Checking server: $server"
+    try {
+        $services = Get-Service -Name $servicePatterns -ComputerName $server -ErrorAction SilentlyContinue
+        if ($null -eq $services) {
+            Write-Host "  [INFO] No services matching the specified patterns found on $server."
+            continue
+        }
+        foreach ($service in $services) {
+            $reportData += [PSCustomObject]@{
+                ComputerName = $server; ServiceName = $service.Name; DisplayName = $service.DisplayName
+                ServiceObject = $service; StartType = $service.StartType; Status = $service.Status; Remark = ""
+            }
+        }
+    }
+    catch {
+        Write-Warning "  [ERROR] Could not connect to or query services on '$server'. Error: $($_.Exception.Message)"
+        $reportData += [PSCustomObject]@{
+            ComputerName = $server; ServiceName = "N/A"; DisplayName = "N/A"; ServiceObject = $null
+            StartType = "N/A"; Status = "Unreachable"; Remark = "Server could not be contacted."
+        }
+    }
+}
+Write-Host ""
+
+# Phase 2 is only for Start/Stop actions
+if ($Action -eq 'Stop' -or $Action -eq 'Start') {
+    Write-Host "PHASE 2: Taking action ('$($Action.ToUpper())') based on defined criteria..." -ForegroundColor Yellow
+    Write-Host "--------------------------------------------------------------------" -ForegroundColor Yellow
+
+    # Add new properties to the report data object for the detailed report
+    $reportData | Add-Member -MemberType NoteProperty -Name 'InitialStatus' -Value ''
+    $reportData | Add-Member -MemberType NoteProperty -Name 'ActionTaken' -Value ''
+    $reportData | Add-Member -MemberType NoteProperty -Name 'FinalStatus' -Value ''
+
+    foreach ($item in $reportData) {
+        $item.InitialStatus = $item.Status # Preserve the initial status for the report
+        $takeAction = $false
+        $actionVerb = ""
+        $targetStatus = ""
+
+        if ($Action -eq 'Stop') {
+            if ($item.InitialStatus -eq 'Running' -and $item.StartType -eq 'Automatic') {
+                $takeAction = $true; $actionVerb = "Stop"; $targetStatus = "Stopped"
+            }
+        } elseif ($Action -eq 'Start') {
+            if (($item.InitialStatus -eq 'Stopped' -or $item.InitialStatus -eq 'Paused') -and $item.StartType -eq 'Automatic') {
+                $takeAction = $true; $actionVerb = "Start"; $targetStatus = "Running"
+            }
+        }
+
+        if ($takeAction) {
+            $item.ActionTaken = "Attempted $actionVerb"
+            Write-Host "  [ACTION] Preparing to $($actionVerb.ToUpper()) '$($item.DisplayName)' on '$($item.ComputerName)'..."
+            try {
+                if ($Action -eq 'Stop') { $item.ServiceObject | Stop-Service -Force -ErrorAction Stop }
+                else { $item.ServiceObject | Start-Service -ErrorAction Stop }
+                $item.ServiceObject.WaitForStatus($targetStatus, [System.TimeSpan]::new(0, 1, 0))
+                $item.Remark = "Successfully $($targetStatus.ToLower())."
+            } catch [System.ServiceProcess.TimeoutException] {
+                $item.Remark = "Timed out waiting for service to enter '$targetStatus' state."
+                Write-Warning $item.Remark
+            } catch {
+                $item.Remark = "ERROR during $actionVerb action: $($_.Exception.Message)"
+                Write-Warning $item.Remark
+            }
+        } elseif ($item.InitialStatus -ne "Unreachable") {
+            $item.ActionTaken = "None (Conditions not met for $Action)"
+        }
+
+        if ($item.InitialStatus -ne "Unreachable") {
+            try { $item.FinalStatus = (Get-Service -Name $item.ServiceName -ComputerName $item.ComputerName).Status }
+            catch { $item.FinalStatus = "Error / Not Found" }
+        } else {
+            $item.FinalStatus = "Unreachable"
+        }
+    }
+} else {
+    Write-Host "PHASE 2: Action is 'Status'. No changes will be made." -ForegroundColor Cyan
+}
+Write-Host ""
+
+Write-Host "PHASE 3: Final Report for Action '$($Action.ToUpper())'" -ForegroundColor Green
+Write-Host "===========================================================" -ForegroundColor Green
+Write-Host ""
+
+if ($Action -eq 'Status') {
+    # Display a simplified report for status checks
+    $reportData | Select-Object ComputerName, DisplayName, StartType, Status, Remark | Format-Table -AutoSize
+} else {
+    # Display the full detailed report for Start/Stop actions
+    $reportData | Select-Object ComputerName, DisplayName, StartType, InitialStatus, ActionTaken, FinalStatus, Remark | Format-Table -AutoSize
+}
