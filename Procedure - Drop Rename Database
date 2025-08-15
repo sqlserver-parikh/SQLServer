@@ -1,0 +1,172 @@
+USE tempdb;
+GO
+CREATE OR ALTER PROCEDURE dbo.usp_ManageDatabase
+    @dbName sysname = 'test',
+    @action varchar(10) = 'rename',
+    @newName sysname = 'test_new',
+    @execute bit = 0,
+    @print bit = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @sql NVARCHAR(MAX);
+    DECLARE @msg NVARCHAR(MAX);
+
+    -- =================================================================================
+    -- 1. Input Parameter Validation
+    -- =================================================================================
+    IF @execute = 0 AND @print = 0
+    BEGIN
+        SET @print = 1;
+        PRINT '-- INFO: Both @execute and @print were set to 0. Defaulting @print to 1.';
+    END
+
+    IF UPPER(@action) NOT IN ('DROP', 'RENAME')
+    BEGIN
+        RAISERROR ('Invalid @action specified. Must be ''DROP'' or ''RENAME''.', 16, 1);
+        RETURN 1;
+    END
+
+    IF UPPER(@action) = 'RENAME' AND (@newName IS NULL OR LTRIM(RTRIM(@newName)) = '')
+    BEGIN
+        RAISERROR ('@newName must be provided for the RENAME action.', 16, 1);
+        RETURN 1;
+    END
+
+    -- =================================================================================
+    -- 2. Pre-flight Safety Checks
+    -- =================================================================================
+    IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @dbName)
+    BEGIN
+        RAISERROR ('Database ''%s'' does not exist.', 16, 1, @dbName);
+        RETURN 1;
+    END
+
+    IF @dbName IN ('master', 'model', 'msdb', 'tempdb')
+    BEGIN
+        RAISERROR ('Action on system database ''%s'' is not permitted.', 16, 1, @dbName);
+        RETURN 1;
+    END
+    
+    IF UPPER(@action) = 'RENAME' AND EXISTS (SELECT 1 FROM sys.databases WHERE name = @newName)
+    BEGIN
+        RAISERROR ('A database with the name ''%s'' already exists. Cannot rename.', 16, 1, @newName);
+        RETURN 1;
+    END
+
+    -- =================================================================================
+    -- 3. High Availability / Disaster Recovery (HA/DR) Checks
+    -- =================================================================================
+    IF EXISTS (SELECT 1 FROM sys.databases d INNER JOIN sys.dm_hadr_database_replica_states rs ON d.database_id = rs.database_id WHERE d.name = @dbName AND rs.is_local = 1)
+    BEGIN
+        SET @msg = FORMATMESSAGE('Database ''%s'' is part of an Availability Group. Please remove it from the AG before performing this action.', @dbName);
+        RAISERROR (@msg, 16, 1);
+        RETURN 1;
+    END
+
+    IF EXISTS (SELECT 1 FROM sys.database_mirroring WHERE database_id = DB_ID(@dbName) AND mirroring_guid IS NOT NULL)
+    BEGIN
+        SET @msg = FORMATMESSAGE('Database ''%s'' is part of a Database Mirroring session. Please remove mirroring before performing this action.', @dbName);
+        RAISERROR (@msg, 16, 1);
+        RETURN 1;
+    END
+
+    IF EXISTS (SELECT 1 FROM msdb.dbo.log_shipping_primary_databases WHERE primary_database = @dbName) OR EXISTS (SELECT 1 FROM msdb.dbo.log_shipping_secondary_databases WHERE secondary_database = @dbName)
+    BEGIN
+        SET @msg = FORMATMESSAGE('Database ''%s'' is configured for Log Shipping. Please remove the log shipping configuration before performing this action.', @dbName);
+        RAISERROR (@msg, 16, 1);
+        RETURN 1;
+    END
+
+    -- =================================================================================
+    -- 4. Build and Execute the Dynamic SQL
+    -- =================================================================================
+    BEGIN TRY
+        SET @sql = N'
+-- Step 1: Set our session''s deadlock priority high to avoid being the deadlock victim.
+SET DEADLOCK_PRIORITY HIGH;
+
+-- Step 2: Force the database into single-user mode, rolling back other transactions.
+ALTER DATABASE ' + QUOTENAME(@dbName) + N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+';
+
+        IF UPPER(@action) = 'DROP'
+        BEGIN
+            SET @sql = @sql + N'
+-- Step 3: Drop the database.
+DROP DATABASE ' + QUOTENAME(@dbName) + N';
+';
+        END
+        ELSE -- RENAME
+        BEGIN
+            SET @sql = @sql + N'
+-- Step 3: Rename the database.
+ALTER DATABASE ' + QUOTENAME(@dbName) + N' MODIFY NAME = ' + QUOTENAME(@newName) + N';
+
+-- Step 4: Set the newly named database back to multi-user mode.
+ALTER DATABASE ' + QUOTENAME(@newName) + N' SET MULTI_USER;
+';
+        END
+
+        IF @print = 1
+        BEGIN
+            PRINT '-- --- T-SQL to be executed ---';
+            PRINT @sql; -- Print the raw, executable T-SQL
+            PRINT '-- ----------------------------';
+        END
+
+        IF @execute = 1
+        BEGIN
+            PRINT '-- INFO: Executing command...';
+            EXEC sp_executesql @sql;
+            
+            IF UPPER(@action) = 'DROP'
+                PRINT FORMATMESSAGE('-- SUCCESS: Database ''%s'' has been dropped.', @dbName);
+            ELSE
+                PRINT FORMATMESSAGE('-- SUCCESS: Database ''%s'' has been renamed to ''%s''.', @dbName, @newName);
+        END
+        ELSE
+        BEGIN
+            PRINT '-- INFO: @execute is set to 0. No actions were performed.';
+        END
+
+    END TRY
+    BEGIN CATCH
+        -- =============================================================================
+        -- 5. Error Handling and Recovery (Legacy SQL Server Compatible)
+        -- =============================================================================
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE(), @ErrorSeverity INT = ERROR_SEVERITY(), @ErrorState INT = ERROR_STATE();
+        PRINT '-- ERROR: An error occurred during the operation.';
+        
+        DECLARE @dbInTrouble sysname = @dbName;
+
+        IF UPPER(@action) = 'RENAME' AND NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @dbName) AND EXISTS (SELECT 1 FROM sys.databases WHERE name = @newName)
+        BEGIN
+            SET @dbInTrouble = @newName;
+        END
+
+        IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @dbInTrouble AND user_access_desc = 'SINGLE_USER')
+        BEGIN
+            PRINT '-- INFO: The script failed after setting the database to SINGLE_USER mode.';
+            PRINT '--       Attempting to set database ' + QUOTENAME(@dbInTrouble) + ' back to MULTI_USER mode.';
+            
+            DECLARE @recoverySql NVARCHAR(MAX) = N'ALTER DATABASE ' + QUOTENAME(@dbInTrouble) + N' SET MULTI_USER;';
+            
+            BEGIN TRY
+                EXEC sp_executesql @recoverySql;
+                PRINT '-- SUCCESS: Database ' + QUOTENAME(@dbInTrouble) + ' has been set back to MULTI_USER mode.';
+            END TRY
+            BEGIN CATCH
+                PRINT '-- FATAL: Could not set database ' + QUOTENAME(@dbInTrouble) + ' back to MULTI_USER mode. Manual intervention is required.';
+            END CATCH
+        END
+
+        -- Re-raise the original error to the calling application
+        RAISERROR (@ErrorMessage, @ErrorSeverity, @ErrorState);
+        RETURN 1;
+    END CATCH
+
+    RETURN 0; -- Success
+END
+GO
