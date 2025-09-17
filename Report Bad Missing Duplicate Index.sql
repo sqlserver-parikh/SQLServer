@@ -1,9 +1,9 @@
-USE tempdb;
-GO
-
+use tempdb 
+go
 CREATE OR ALTER PROCEDURE usp_IndexAnalysis
 (
-    @DatabaseName NVARCHAR(128) = 'TEMP', -- Specify the database name
+    @DatabaseName NVARCHAR(128) = 'DBA', -- Specify the database name
+    @TableNameFilter NVARCHAR(128) = NULL, -- filter by table name
     @BADIndex BIT = 1,        -- Set to 1 to include analysis of bad non-clustered indexes
     @MissingIndex BIT = 1,    -- Set to 1 to include analysis of missing indexes
     @IndexFragmentation BIT = 0,  -- This will take a lot of time if DB is big with indexes
@@ -15,6 +15,13 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @sql NVARCHAR(MAX);
+    DECLARE @WhereClause NVARCHAR(MAX) = N'';
+
+    -- Construct the WHERE clause for table name filtering
+    IF @TableNameFilter IS NOT NULL
+    BEGIN
+        SET @WhereClause = N' AND OBJECT_NAME(o.object_id) = @TableNameFilter';
+    END
 
 
     -- Analyze bad non-clustered indexes
@@ -65,12 +72,14 @@ BEGIN
         AND i.[type_desc] = N''NONCLUSTERED''
         AND i.is_primary_key = 0 
         AND i.is_unique_constraint = 0 
-        AND i.is_unique = 0
+        AND i.is_unique = 0'
+        + @WhereClause + ' -- Added table name filter here
         GROUP BY SCHEMA_NAME(o.[schema_id]), OBJECT_NAME(s.[object_id]), trc.TableRowCount, i.name, i.index_id, i.is_disabled, 
                  i.is_hypothetical, i.has_filter, i.fill_factor, s.user_updates, 
                  s.user_seeks, s.user_scans, s.user_lookups
         ORDER BY [Difference] DESC, [Total Writes] DESC, [Total Reads] ASC OPTION (RECOMPILE);';
-        EXEC sp_executesql @sql;
+        
+        EXEC sp_executesql @sql, N'@TableNameFilter NVARCHAR(128)', @TableNameFilter;
     END
 
     -- Analyze missing indexes
@@ -114,9 +123,13 @@ BEGIN
         INNER JOIN sys.dm_db_missing_index_details mid ON mig.index_handle = mid.index_handle
         LEFT JOIN TableRowCounts trc ON mid.object_id = trc.object_id
         WHERE migs.avg_total_user_cost * (migs.avg_user_impact / 100.0) * (migs.user_seeks + migs.user_scans) > 10
-        AND mid.database_id = DB_ID()
+        AND mid.database_id = DB_ID()'
+        -- The missing index view doesn't directly expose object_name for filtering in the main WHERE clause
+        -- We'll add it in a subquery or by joining to sys.objects. For simplicity, let's join sys.objects to the main query.
+        + CASE WHEN @TableNameFilter IS NOT NULL THEN N' AND OBJECT_NAME(mid.object_id) = @TableNameFilter' ELSE N'' END + ' -- Added table name filter here
         ORDER BY migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + migs.user_scans) DESC;';
-        EXEC sp_executesql @sql;
+
+        EXEC sp_executesql @sql, N'@TableNameFilter NVARCHAR(128)', @TableNameFilter;
     END
 
     -- Analyze index fragmentation
@@ -159,9 +172,11 @@ BEGIN
         INNER JOIN sys.objects AS o WITH (NOLOCK) ON i.[object_id] = o.[object_id]
         LEFT JOIN TableRowCounts trc ON ps.object_id = trc.object_id
         WHERE ps.database_id = DB_ID()
-        AND ps.page_count > @PageCount 
+        AND ps.page_count > @PageCount'
+        + @WhereClause + ' -- Added table name filter here
         ORDER BY ps.avg_fragmentation_in_percent DESC OPTION (RECOMPILE);';
-        EXEC sp_executesql @sql, N'@PageCount INT', @PageCount;
+        
+        EXEC sp_executesql @sql, N'@PageCount INT, @TableNameFilter NVARCHAR(128)', @PageCount, @TableNameFilter;
     END
 
     -- Analyze duplicate indexes
@@ -219,6 +234,8 @@ BEGIN
         WHILE @@FETCH_STATUS = 0
         BEGIN
             DECLARE @sqlCmd NVARCHAR(MAX);
+            DECLARE @CurrentTableNameFilter NVARCHAR(128) = @TableNameFilter; -- Pass the filter to inner dynamic SQL
+
             SET @sqlCmd = N''USE ['' + @db + N''];
             
             WITH TableRowCounts AS (
@@ -274,9 +291,11 @@ BEGIN
                               AND c1.indid < c2.indid
                               AND c1.cols = c2.cols
                               AND c1.inc = c2.inc
-            LEFT JOIN TableRowCounts trc ON c1.id = trc.object_id'';
+            LEFT JOIN TableRowCounts trc ON c1.id = trc.object_id
+            WHERE 1=1 ' -- Start with 1=1 to easily append conditions
+            + CASE WHEN @TableNameFilter IS NOT NULL THEN N' AND OBJECT_NAME(c1.id) = @CurrentTableNameFilter' ELSE N'' END + '''; -- Added table name filter here
             
-            EXEC sp_executesql @sqlCmd;
+            EXEC sp_executesql @sqlCmd, N''@CurrentTableNameFilter NVARCHAR(128)'', @CurrentTableNameFilter;
             
             FETCH NEXT FROM db_cursor INTO @db;
         END
@@ -284,7 +303,7 @@ BEGIN
         CLOSE db_cursor;
         DEALLOCATE db_cursor;';
         
-        EXEC sp_executesql @sql;
+        EXEC sp_executesql @sql, N'@TableNameFilter NVARCHAR(128)', @TableNameFilter;
 
         SELECT DBName,
                QUOTENAME(SchemaName) + '.' + QUOTENAME(TableName) AS [TableName],
@@ -300,4 +319,4 @@ BEGIN
     END
 END;
 GO
-usp_IndexAnalysis
+EXEC usp_IndexAnalysis;
