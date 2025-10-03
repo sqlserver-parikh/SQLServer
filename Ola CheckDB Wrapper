@@ -1,0 +1,781 @@
+USE master;
+GO
+
+IF OBJECT_ID('dbo.fn_SplitString', 'TF') IS NOT NULL
+DROP FUNCTION dbo.fn_SplitString;
+GO
+
+CREATE FUNCTION dbo.fn_SplitString
+(
+    @String NVARCHAR(MAX),
+    @Delimiter NVARCHAR(10)
+)
+RETURNS @Results TABLE
+(
+    -- Unique identifier for each item's position in the original string
+    Id INT IDENTITY(1,1) PRIMARY KEY,
+    -- The split string value
+    Value NVARCHAR(MAX)
+)
+AS
+BEGIN
+    -- Declare local variables
+    DECLARE @Xml XML;
+    SET @Xml = CAST('<M>' + REPLACE(@String, @Delimiter, '</M><M>') + '</M>' AS XML);
+
+    INSERT INTO @Results (Value)
+    SELECT
+        T.c.value('.', 'NVARCHAR(MAX)')
+    FROM
+        @Xml.nodes('/M') AS T(c);
+
+    RETURN;
+END;
+GO
+
+USE master;
+GO
+
+IF OBJECT_ID('dbo.usp_RunDatabaseIntegrityCheck', 'P') IS NOT NULL
+DROP PROCEDURE dbo.usp_RunDatabaseIntegrityCheck;
+GO
+CREATE  PROCEDURE dbo.usp_RunDatabaseIntegrityCheck
+    @MinCheckDBDays             INT            = 7   -- "due" if last good CHECKDB is older than this (or never)
+    , @mediumDBMinSizeInGB      INT            = 200  -- Medium DB threshold for NOINDEX (in GB)
+    , @LargeDBMinSizeInGB       INT            = 2048 -- large DB threshold for fast path (in GB)
+    , @Execute                  NVARCHAR(MAX)  = N'Y' -- 'Y' = execute, 'N' = print only
+    , @CPUThreshold             INT            = 40  -- If average CPU is less than this percentage for the past 30 min, then run
+    , @CPUCheckBackTime         INT            = 15   -- How far back CPU should be checked
+    , @CPUCheckMtoS             NVARCHAR(MAX)  = 'Y,Y,Y,Y,Y,N,Y' -- Comma-separated list for Mon, Tue, ..., Sun: 'Y' = enable, 'N' = disable
+    , @RunTimeMtoS              NVARCHAR(MAX)  = null -- Comma-separated list of max *minutes* for Mon, Tue, ..., Sun. Max 12 hours (720 minutes) per day.
+    , @WaitForMin               INT            = 10  -- Wait this many minutes if CPU is high before re-checking for @RetryCPUCheck times.
+    , @RetryCPUCheck            INT            = 5
+    , @SplitGroups              INT            = 7  -- Ignored if @RunTimeMtoS is passed, 7 will make it run in 7 equal groups to complete CheCKDB in 7 runs.
+    , @DatabaseOrder            NVARCHAR(128)   = 'DATABASE_SIZE_ASC' -- Specify the database order (e.g., 'DATABASE_NAME_ASC', 'DATABASE_SIZE_DESC') -- If single database is taking 80% of total CHECKDB run time on server then that database will be always first.
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; -- For reading system views
+
+    -- DECLARATION OF LOCAL VARIABLES
+    DECLARE @RunStartTime         DATETIME       = GETDATE();
+    DECLARE @CurrentDate          DATETIME       = GETDATE();
+    DECLARE @DayOfWeek            INT            = DATEPART(weekday, @CurrentDate); -- 1=Sunday, 2=Monday, ..., 7=Saturday (depends on @@DATEFIRST)
+    DECLARE @DayIndex             INT;                                           -- 1=Monday, 2=Tuesday, ..., 7=Sunday for parameter string parsing
+    DECLARE @ShouldPerformCPUCheck CHAR(1);
+    DECLARE @ConfiguredRunMinutes INT; -- Changed to minutes
+    DECLARE @OverallJobEndTime    DATETIME;
+    DECLARE @AvgCPU               INT;
+    DECLARE @CheckCPUCount        INT;
+    DECLARE @MaxCPUWaitChecks     INT            = @RetryCPUCheck;                               -- Max times to wait for CPU to drop before giving up
+    DECLARE @DelayString          NVARCHAR(8);
+    DECLARE @ErrorMessage         NVARCHAR(4000);
+    DECLARE @MaxAllowedRunMinutes INT            = 720;                               -- Maximum allowed run minutes (12 hours)
+
+    -- Determine DayIndex (1 for Monday, 7 for Sunday) regardless of @@DATEFIRST
+    -- This ensures consistent parsing of @CPUCheckMtoS and @RunTimeMtoS
+    SET @DayIndex = (@DayOfWeek + @@DATEFIRST - 2) % 7 + 1;
+    -- Example: If @@DATEFIRST is 7 (Sunday=1), and @DayOfWeek is 1 (Sunday): (1 + 7 - 2)%7 + 1 = 6%7 + 1 = 7 (Sunday)
+    -- Example: If @@DATEFIRST is 7 (Sunday=1), and @DayOfWeek is 2 (Monday): (2 + 7 - 2)%7 + 1 = 7%7 + 1 = 1 (Monday)
+    -- Example: If @@DATEFIRST is 1 (Monday=1), and @DayOfWeek is 1 (Monday): (1 + 1 - 2)%7 + 1 = 0%7 + 1 = 1 (Monday)
+
+    -- PARAMETER VALIDATION
+    -- @MinCheckDBDays
+    IF @MinCheckDBDays < 0
+    BEGIN
+        SET @ErrorMessage = 'Parameter @MinCheckDBDays cannot be negative. Please provide a non-negative integer.';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    IF @RetryCPUCheck < 0
+    BEGIN
+        SET @ErrorMessage = 'Parameter @@RetryCPUCheck cannot be negative. Please provide a non-negative integer.';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    IF ( @CPUCheckBackTime <= 0 OR @CPUCheckBackTime > 180 )
+    BEGIN
+        SET @ErrorMessage = 'Parameter @@CPUCheckBackTime must be between 0 and 180 mins.';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    -- @mediumDBMinSizeInGB
+    IF @mediumDBMinSizeInGB < 0
+    BEGIN
+        SET @ErrorMessage = 'Parameter @mediumDBMinSizeInGB cannot be negative. Please provide a non-negative integer.';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    -- @LargeDBMinSizeInGB
+    IF @LargeDBMinSizeInGB < 0
+    BEGIN
+        SET @ErrorMessage = 'Parameter @LargeDBMinSizeInGB cannot be negative. Please provide a non-negative integer.';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    -- Ensure @mediumDBMinSizeInGB is less than @LargeDBMinSizeInGB
+    IF @mediumDBMinSizeInGB >= @LargeDBMinSizeInGB
+    BEGIN
+        SET @ErrorMessage = 'Parameter @mediumDBMinSizeInGB must be less than @LargeDBMinSizeInGB.';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    -- @Execute
+    IF UPPER(@Execute) NOT IN ('Y', 'N')
+    BEGIN
+        SET @ErrorMessage = 'Parameter @Execute must be either ''Y'' (execute) or ''N'' (print only).';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    -- @CPUThreshold
+    IF @CPUThreshold < 0 OR @CPUThreshold > 100
+    BEGIN
+        SET @ErrorMessage = 'Parameter @CPUThreshold must be between 0 and 100.';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    -- @DatabaseOrder Validation and Comments
+    -- This section provides detailed comments for each @DatabaseOrder option
+    DECLARE @ValidDatabaseOrders TABLE (OrderOption NVARCHAR(128), Description NVARCHAR(MAX));
+    INSERT INTO @ValidDatabaseOrders (OrderOption, Description) VALUES
+        ('DATABASE_LAST_GOOD_CHECK_ASC', 'Order by the oldest LastGoodCheckDbTime first. Databases never checked or with NULL LastGoodCheckDbTime will appear first. This is the default if @DatabaseOrder is NULL or not recognized.'),
+        ('DATABASE_LAST_GOOD_CHECK_DESC', 'Order by the newest LastGoodCheckDbTime first. Databases never checked or with NULL LastGoodCheckDbTime will appear last.'),
+        ('DATABASE_NAME_ASC', 'Order alphabetically by database name (A-Z).'),
+        ('DATABASE_NAME_DESC', 'Order reverse-alphabetically by database name (Z-A).'),
+        ('DATABASE_SIZE_ASC', 'Order by database size from smallest to largest.'),
+        ('DATABASE_SIZE_DESC', 'Order by database size from largest to smallest.'),
+        ('DATABASE_RUNTIME_DESC', 'Order by the longest estimated runtime from previous CHECKDB operations first. Databases with no previous runtime data will appear last or be ordered by DATABASE_LAST_GOOD_CHECK_ASC.');
+
+    IF NOT EXISTS (SELECT 1 FROM @ValidDatabaseOrders WHERE OrderOption = @DatabaseOrder)
+    BEGIN
+        SET @ErrorMessage = 'Parameter @DatabaseOrder contains an invalid value. Valid options are: ' + CHAR(13) + CHAR(10);
+        SELECT @ErrorMessage = @ErrorMessage + '  - ' + OrderOption + ': ' + Description + CHAR(13) + CHAR(10)
+        FROM @ValidDatabaseOrders;
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+    -- @CPUCheckMtoS
+    -- Split the comma-separated string and validate each value
+    BEGIN TRY
+        SELECT
+            @ShouldPerformCPUCheck = UPPER(LTRIM(RTRIM(fs.Value)))
+        FROM dbo.fn_SplitString(@CPUCheckMtoS, ',') AS fs
+        WHERE fs.Id = @DayIndex;
+
+        -- Validate the parsed 'Y'/'N' value
+        IF @ShouldPerformCPUCheck IS NULL OR @ShouldPerformCPUCheck NOT IN ('Y', 'N')
+        BEGIN
+            SET @ErrorMessage = 'Invalid @CPUCheckMtoS: Configured CPU check for today (' + DATENAME(weekday, @CurrentDate) + ') is ' + ISNULL('''' + @ShouldPerformCPUCheck + '''', 'NULL') + '. Must be ''Y'' or ''N''.';
+            RAISERROR(@ErrorMessage, 16, 1);
+            RETURN;
+        END
+
+        -- Also check if the string has exactly 7 comma-separated values
+        IF (SELECT COUNT(*) FROM dbo.fn_SplitString(@CPUCheckMtoS, ',')) <> 7
+        BEGIN
+            SET @ErrorMessage = 'Parameter @CPUCheckMtoS must be a comma-separated list of exactly 7 ''Y'' or ''N'' values (for Mon-Sun, e.g., ''Y,Y,Y,Y,Y,Y,Y'').';
+            RAISERROR(@ErrorMessage, 16, 1);
+            RETURN;
+        END
+
+        -- Check if any individual value in the string is invalid
+        IF EXISTS (SELECT 1 FROM dbo.fn_SplitString(@CPUCheckMtoS, ',') WHERE UPPER(LTRIM(RTRIM(Value))) NOT IN ('Y', 'N'))
+        BEGIN
+             SET @ErrorMessage = 'Parameter @CPUCheckMtoS contains invalid values. Each day''s CPU check setting must be ''Y'' or ''N''.';
+            RAISERROR(@ErrorMessage, 16, 1);
+            RETURN;
+        END
+
+    END TRY
+    BEGIN CATCH
+        SET @ErrorMessage = 'Error parsing @CPUCheckMtoS parameter: ' + ERROR_MESSAGE();
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END CATCH
+
+-- Create a temporary table to hold the query results
+        IF OBJECT_ID('tempdb..#QueryRunTimeData') IS NOT NULL DROP TABLE #QueryRunTimeData;
+        CREATE TABLE #QueryRunTimeData (
+            DatabaseName SYSNAME,
+            DatabaseSizeGB DECIMAL(10, 2),
+            TimeTakenSeconds BIGINT,
+            LastCheckDBDate DATETIME NULL,
+            LastCheckDBCommand NVARCHAR(MAX),
+            SortFlag INT
+        );
+
+-- Step 1: Get latest successful CHECKDB per database
+WITH LatestCheckDB AS (
+    SELECT
+        DatabaseName,
+        StartTime,
+        EndTime,
+        Command,
+        ROW_NUMBER() OVER (PARTITION BY DatabaseName ORDER BY EndTime DESC) AS rn
+    FROM CommandLog
+    WHERE CommandType = 'dbcc_checkdb'
+      AND ErrorNumber = 0
+)
+  INSERT INTO #QueryRunTimeData (DatabaseName, DatabaseSizeGB, TimeTakenSeconds, LastCheckDBDate, LastCheckDBCommand, SortFlag)
+      
+SELECT
+    DB_NAME(mf.database_id) AS DatabaseName,
+    CAST(SUM(CAST(mf.size AS BIGINT)) * 8 / 1024.0 / 1024.0 AS DECIMAL(10, 2)) AS DatabaseSizeGB,
+    CAST(DATEDIFF(SECOND, lc.StartTime, lc.EndTime) AS BIGINT) AS TimeTakenSeconds,
+    lc.EndTime AS LastCheckDBDate,
+    lc.Command AS LastCheckDBCommand,
+    CASE WHEN lc.StartTime IS NULL THEN 0 ELSE 1 END AS SortFlag
+FROM
+    sys.master_files AS mf
+JOIN sys.databases AS d ON mf.database_id = d.database_id
+LEFT JOIN (
+    SELECT * FROM LatestCheckDB WHERE rn = 1
+) AS lc ON lc.DatabaseName = DB_NAME(d.database_id)
+WHERE
+    d.state_desc <> 'OFFLINE'
+    AND d.is_read_only = 0
+    AND d.user_access_desc IN ('MULTI_USER', 'SINGLE_USER')
+GROUP BY
+    DB_NAME(mf.database_id), lc.EndTime, lc.Command, lc.StartTime
+ORDER BY
+       -- Default order when @DatabaseOrder is NULL or unknown: prioritize by longest unchecked
+       CASE
+           WHEN @DatabaseOrder IS NULL OR @DatabaseOrder = 'DATABASE_LAST_GOOD_CHECK_ASC' THEN  lc.EndTime 
+           WHEN @DatabaseOrder = 'DATABASE_LAST_GOOD_CHECK_DESC' THEN NULL -- Handled by descending on a non-NULL value
+           ELSE NULL -- Default when other conditions don't match or other orderings
+       END ASC,
+       CASE
+           WHEN @DatabaseOrder = 'DATABASE_LAST_GOOD_CHECK_DESC' THEN  lc.EndTime 
+           ELSE NULL
+       END DESC,
+
+       -- Database Name Order
+       CASE WHEN @DatabaseOrder = 'DATABASE_NAME_ASC' THEN  DB_NAME(mf.database_id) ELSE NULL END ASC,
+       CASE WHEN @DatabaseOrder = 'DATABASE_NAME_DESC' THEN  DB_NAME(mf.database_id) ELSE NULL END DESC,
+
+       -- Fallback / Tie-breaker (if multiple rows have the same value for the chosen order)
+        DB_NAME(mf.database_id) ASC -- Ensure a consistent order if all other criteria are equal
+   OPTION (RECOMPILE); -- Use OPTION (RECOMPILE) to help SQL Server optimize for the specific parameter value
+
+
+IF @RunTimeMtoS IS NULL
+    BEGIN
+        PRINT '--- @RunTimeMtoS is NULL. Calculating total runtime and dividing equally for ' + CONVERT(VARCHAR(3),@SplitGroups) + ' group(s)---';
+        DECLARE @TotalTimeTakenSeconds BIGINT = 0;
+        DECLARE @CalculatedDailyRunMinutes INT;
+
+        -- Calculate the total time taken in seconds from the collected data
+        SELECT @TotalTimeTakenSeconds = ISNULL(SUM(TimeTakenSeconds), 0)
+        FROM #QueryRunTimeData
+        WHERE TimeTakenSeconds IS NOT NULL; -- Only sum actual runtimes
+
+        -- Calculate the daily run minutes, ensuring it's an integer and not exceeding MaxAllowedRunMinutes
+        SET @CalculatedDailyRunMinutes = CEILING(CAST(@TotalTimeTakenSeconds AS DECIMAL(18,2)) / @SplitGroups / 60.0); -- Convert to minutes
+
+        IF @CalculatedDailyRunMinutes = 0 
+            SET @CalculatedDailyRunMinutes = 1;
+
+        -- Cap at MaxAllowedRunMinutes
+        SET @CalculatedDailyRunMinutes = CASE WHEN @CalculatedDailyRunMinutes > @MaxAllowedRunMinutes THEN @MaxAllowedRunMinutes ELSE @CalculatedDailyRunMinutes END;
+        SET @CalculatedDailyRunMinutes = CASE WHEN @CalculatedDailyRunMinutes < 0 THEN 0 ELSE @CalculatedDailyRunMinutes END; -- Ensure not negative
+
+        PRINT '  Total estimated runtime for all database checkdb: ' + CAST(@TotalTimeTakenSeconds/60 AS NVARCHAR(50)) + ' minutes.';
+        PRINT '  Calculated equal ' +  CONVERT(VARCHAR(3),@SplitGroups) + ' group(s) runtime minutes: ' + CAST(@CalculatedDailyRunMinutes AS NVARCHAR(50)) + ' minutes.';
+
+        -- Construct the @RunTimeMtoS string for all 7 days
+        SET @RunTimeMtoS = CAST(@CalculatedDailyRunMinutes AS NVARCHAR(50));
+        SET @RunTimeMtoS = @RunTimeMtoS + ',' + CAST(@CalculatedDailyRunMinutes AS NVARCHAR(50));
+        SET @RunTimeMtoS = @RunTimeMtoS + ',' + CAST(@CalculatedDailyRunMinutes AS NVARCHAR(50));
+        SET @RunTimeMtoS = @RunTimeMtoS + ',' + CAST(@CalculatedDailyRunMinutes AS NVARCHAR(50));
+        SET @RunTimeMtoS = @RunTimeMtoS + ',' + CAST(@CalculatedDailyRunMinutes AS NVARCHAR(50));
+        SET @RunTimeMtoS = @RunTimeMtoS + ',' + CAST(@CalculatedDailyRunMinutes AS NVARCHAR(50));
+        SET @RunTimeMtoS = @RunTimeMtoS + ',' + CAST(@CalculatedDailyRunMinutes AS NVARCHAR(50));
+
+    END
+
+    -- Split the comma-separated string and validate each value
+    BEGIN TRY
+        SELECT
+            @ConfiguredRunMinutes = CAST(fs.Value AS INT) -- Changed to minutes
+        FROM dbo.fn_SplitString(@RunTimeMtoS, ',') AS fs
+        WHERE fs.Id = @DayIndex;
+
+        -- Validate the parsed minute value
+        IF @ConfiguredRunMinutes IS NULL OR @ConfiguredRunMinutes < 0 OR @ConfiguredRunMinutes > @MaxAllowedRunMinutes
+        BEGIN
+            SET @ErrorMessage = 'Invalid @RunTimeMtoS: Configured minutes for today (' + DATENAME(weekday, @CurrentDate) + ') is ' + ISNULL(CAST(@ConfiguredRunMinutes AS NVARCHAR(50)), 'NULL') + '. Must be a non-negative integer up to ' + CAST(@MaxAllowedRunMinutes AS NVARCHAR(10)) + ' minutes.';
+            RAISERROR(@ErrorMessage, 16, 1);
+            RETURN;
+        END
+
+        -- Also check if the string has exactly 7 comma-separated values
+        IF (SELECT COUNT(*) FROM dbo.fn_SplitString(@RunTimeMtoS, ',')) <> 7
+        BEGIN
+            SET @ErrorMessage = 'Parameter @RunTimeMtoS must be a comma-separated list of exactly 7 integers (for Mon-Sun, e.g., ''120,120,120,120,120,480,120'').';
+            RAISERROR(@ErrorMessage, 16, 1);
+            RETURN;
+        END
+
+        -- Check if any individual value in the string exceeds the max allowed
+        IF EXISTS (SELECT 1 FROM dbo.fn_SplitString(@RunTimeMtoS, ',') WHERE TRY_CAST(Value AS INT) IS NULL OR TRY_CAST(Value AS INT) < 0 OR TRY_CAST(Value AS INT) > @MaxAllowedRunMinutes)
+        BEGIN
+             SET @ErrorMessage = 'Parameter @RunTimeMtoS contains invalid values. Each day''s run time must be an integer between 0 and ' + CAST(@MaxAllowedRunMinutes AS NVARCHAR(10)) + ' minutes.';
+            RAISERROR(@ErrorMessage, 16, 1);
+            RETURN;
+        END
+
+    END TRY
+    BEGIN CATCH
+        SET @ErrorMessage = 'Error parsing @RunTimeMtoS parameter: ' + ERROR_MESSAGE();
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END CATCH
+
+    -- @WaitForMin
+    IF @WaitForMin < 1 OR @WaitForMin > 60 -- Reasonable range for waiting
+    BEGIN
+        SET @ErrorMessage = 'Parameter @WaitForMin must be between 1 and 60 minutes.';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    -- Set the overall job end time based on the validated configured run minutes
+    SET @OverallJobEndTime    = DATEADD(MINUTE, @ConfiguredRunMinutes, @RunStartTime); -- Changed to MINUTES
+
+    -- LOGGING INITIAL JOB PARAMETERS AND CONFIGURATION
+    PRINT '====================================================================================================';
+    PRINT 'SQL Server Database Integrity Check';
+    PRINT 'Job Started At: ' + CONVERT(VARCHAR(19), @RunStartTime, 120);
+    PRINT 'Current Date: ' + CONVERT(VARCHAR(10), @CurrentDate, 120) + ' (' + DATENAME(weekday, @CurrentDate) + ')';
+    PRINT 'Calculated Day Index (1=Mon, 7=Sun): ' + CAST(@DayIndex AS VARCHAR(1));
+    PRINT '----------------------------------------------------------------------------------------------------';
+    PRINT 'Parameters:';
+    PRINT '  @MinCheckDBDays      : ' + CAST(@MinCheckDBDays AS VARCHAR(5)) + ' days (databases older than this are "due")';
+    PRINT '  @mediumDBMinSizeInGB : ' + CAST(@mediumDBMinSizeInGB AS VARCHAR(10)) + ' GB (threshold for "medium" databases)';
+    PRINT '  @LargeDBMinSizeInGB  : ' + CAST(@LargeDBMinSizeInGB AS VARCHAR(10)) + ' GB (threshold for "large" databases)';
+    PRINT '  @Execute             : ' + @Execute + ' (''Y''=execute commands, ''N''=print commands only)';
+    PRINT '  @CPUThreshold        : ' + CAST(@CPUThreshold AS VARCHAR(3)) + '% (max allowed average CPU)';
+    PRINT '  @CPUCheckMtoS        : ' + @CPUCheckMtoS + ' (CPU check enabled/disabled for Mon-Sun)';
+    PRINT '  @RunTimeMtoS         : ' + @RunTimeMtoS + ' (max minutes for Mon-Sun)'; -- Changed to minutes
+    PRINT '  @WaitForMin          : ' + CAST(@WaitForMin AS VARCHAR(2)) + ' minutes (wait time if CPU is high)';
+    PRINT '  @DatabaseOrder       : ' + @DatabaseOrder + ' (order for processing databases)';
+    PRINT '----------------------------------------------------------------------------------------------------';
+    PRINT 'Derived Configuration for Today:';
+    PRINT '  CPU Check Enabled   : ' + @ShouldPerformCPUCheck;
+    PRINT '  Configured Run Minutes: ' + CAST(@ConfiguredRunMinutes AS VARCHAR(10)) + ' minutes (Max ' + CAST(@MaxAllowedRunMinutes AS NVARCHAR(10)) + ' minutes)'; -- Changed to minutes
+    PRINT '  Overall Job End Time: ' + CONVERT(VARCHAR(19), @OverallJobEndTime, 120);
+    PRINT '====================================================================================================';
+
+    -------------------------------------------------------------------------
+    -- 0.1) Initial CPU Threshold Check before starting any work
+    --      This prevents the job from starting if CPU is already high.
+    -------------------------------------------------------------------------
+    IF @ShouldPerformCPUCheck = 'Y' AND @Execute = 'Y'
+    BEGIN
+        PRINT '--- Initial CPU Check: Ensuring system load is acceptable before starting any CHECKDB operations ---';
+        SET @CheckCPUCount = 0;
+        SET @DelayString = '00:' + RIGHT('0' + CAST(@WaitForMin AS VARCHAR(2)), 2) + ':00'; -- Format for WAITFOR DELAY
+
+        WHILE @CheckCPUCount < @MaxCPUWaitChecks
+        BEGIN
+            -- Get recent CPU utilization from ring buffer (approximating last 30 min)
+            -- This method is robust for retrieving historical CPU data.
+            SELECT @AvgCPU = AVG(SQLProcessUtilization + (100 - SystemIdle - SQLProcessUtilization))
+            FROM (
+                SELECT TOP(@CPUCheckBackTime) -- Adjust TOP(N) based on how frequently scheduler monitor records are generated (usually ~1 min)
+                    SQLProcessUtilization,
+                    SystemIdle
+                FROM (
+                    SELECT
+                        record.value('(./Record/@id)[1]', 'int') AS record_id,
+                        record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') AS [SystemIdle],
+                        record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') AS [SQLProcessUtilization],
+                        [timestamp]
+                    FROM (
+                        SELECT [timestamp], CONVERT(xml, record) AS [record]
+                        FROM sys.dm_os_ring_buffers WITH (NOLOCK)
+                        WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+                        AND record LIKE N'%<SystemHealth>%'
+                    ) AS x
+                ) AS y
+                ORDER BY record_id DESC
+            ) AS CPUData;
+
+            PRINT '  Initial CPU Check Status: Current Avg CPU: ' + ISNULL(CAST(@AvgCPU AS VARCHAR(3)), 'N/A') + '% (Threshold: ' + CAST(@CPUThreshold AS VARCHAR(3)) + '%)';
+
+            IF @AvgCPU IS NULL OR @AvgCPU < @CPUThreshold
+            BEGIN
+                PRINT '  CPU is currently below threshold. Proceeding with integrity check operations.';
+                BREAK; -- Exit loop, CPU is good
+            END
+            ELSE
+            BEGIN
+                SET @CheckCPUCount = @CheckCPUCount + 1;
+                PRINT '  CPU (' + CAST(@AvgCPU AS VARCHAR(3)) + '%) is above threshold. Waiting for ' + CAST(@WaitForMin AS VARCHAR(2)) + ' minutes before re-checking. Attempt ' + CAST(@CheckCPUCount AS VARCHAR(1)) + ' of ' + CAST(@MaxCPUWaitChecks AS VARCHAR(1)) + '.';
+                SET @OverallJobEndTime = DATEADD(MINUTE, @WaitForMin, @OverallJobEndTime);
+
+                WAITFOR DELAY @DelayString;
+            END
+
+            IF @CheckCPUCount >= @MaxCPUWaitChecks
+            BEGIN
+                PRINT '--- Initial CPU Check Failed: Maximum CPU wait attempts reached. Aborting integrity check due to consistently high CPU. ---';
+                RETURN; -- Exit procedure
+            END
+        END
+    END
+    ELSE
+    BEGIN
+        PRINT '--- Initial CPU Check: Skipped as @CPUCheckMtoS is set to ''N'' for today (' + DATENAME(weekday, @CurrentDate) + '). ---';
+    END
+
+    -------------------------------------------------------------------------
+    -- 1) Retrieve "last good CHECKDB" time using DATABASEPROPERTYEX
+    --    This helps identify databases that are due for a check.
+    -------------------------------------------------------------------------
+    IF OBJECT_ID('tempdb..#LastCkTemp') IS NOT NULL DROP TABLE #LastCkTemp;
+    CREATE TABLE #LastCkTemp (
+        DatabaseName SYSNAME,
+        LastKnownGoodDate DATETIME NULL
+    );
+    INSERT INTO #LastCkTemp (DatabaseName, LastKnownGoodDate)
+    SELECT
+        d.name AS DatabaseName,
+        CAST(DATABASEPROPERTYEX(d.name, 'LastGoodCheckDbTime') AS DATETIME) AS LastKnownGoodDate
+    FROM sys.databases AS d WITH (NOLOCK)
+    WHERE d.state_desc = 'ONLINE'
+      AND d.user_access_desc IN ('MULTI_USER', 'SINGLE_USER')
+      AND d.is_read_only = 0
+      AND d.name NOT IN ('master','tempdb','model','msdb') -- Exclude system databases that typically don't need CHECKDB
+    ;
+    PRINT 'Step 1: Identified last good CHECKDB times for user databases.';
+
+    -------------------------------------------------------------------------
+    -- 2) Calculate current sizes (MB) for all user databases
+    --    Used to categorize databases as "small", "medium" or "large" for different CHECKDB modes.
+    -------------------------------------------------------------------------
+    IF OBJECT_ID('tempdb..#AllUserDbSizes') IS NOT NULL DROP TABLE #AllUserDbSizes;
+    CREATE TABLE #AllUserDbSizes (
+        DatabaseName SYSNAME,
+        TotalSizeMB DECIMAL(18,2)
+    );
+    INSERT INTO #AllUserDbSizes (DatabaseName, TotalSizeMB)
+    SELECT
+        d.name AS DatabaseName,
+        CAST(SUM(CAST(mf.size AS BIGINT)) * 8.0 / 1024 AS DECIMAL(18,2)) AS TotalSizeMB -- Convert pages to MB
+    FROM sys.databases AS d WITH (NOLOCK)
+    JOIN sys.master_files AS mf WITH (NOLOCK) ON d.database_id = mf.database_id
+    WHERE d.name NOT IN ('master','model','msdb','tempdb')
+      AND d.state_desc = 'ONLINE'
+      AND d.user_access_desc IN ('MULTI_USER', 'SINGLE_USER')
+      AND d.is_read_only = 0
+    GROUP BY d.name;
+    PRINT 'Step 2: Calculated current sizes for user databases.';
+
+    -------------------------------------------------------------------------
+    -- 3) Build "due" list (based on @MinCheckDBDays), ordered by longest unchecked
+    --    This table will hold the prioritized list of databases to process.
+    -------------------------------------------------------------------------
+    IF OBJECT_ID('tempdb..#DatabasesToProcess') IS NOT NULL DROP TABLE #DatabasesToProcess;
+    CREATE TABLE #DatabasesToProcess (
+        ID INT IDENTITY(1,1) PRIMARY KEY,
+        DatabaseName SYSNAME,
+        RunMode NVARCHAR(20), -- 'Small-FULL', 'Medium-NOINDEX' or 'Large-PHYSICAL_ONLY'
+        LastGoodCheckDbDate DATETIME NULL,
+        EstimatedRunTimeSeconds BIGINT NULL -- Added for ordering by runtime
+    );
+
+INSERT INTO #DatabasesToProcess (DatabaseName, RunMode, LastGoodCheckDbDate, EstimatedRunTimeSeconds)
+SELECT
+    ck.DatabaseName,
+    CASE
+        WHEN sz.TotalSizeMB <= (@mediumDBMinSizeInGB * 1024.0) THEN 'Small-FULL'
+        WHEN sz.TotalSizeMB > (@mediumDBMinSizeInGB * 1024.0) AND sz.TotalSizeMB <= (@LargeDBMinSizeInGB * 1024.0) THEN 'Medium-NOINDEX'
+        ELSE 'Large-PHYSICAL_ONLY'
+    END AS RunMode,
+    ck.LastKnownGoodDate,
+    qr.TimeTakenSeconds AS EstimatedRunTimeSeconds
+FROM #LastCkTemp ck
+JOIN #AllUserDbSizes sz ON sz.DatabaseName = ck.DatabaseName
+LEFT JOIN #QueryRunTimeData qr ON ck.DatabaseName = qr.DatabaseName
+WHERE (ck.LastKnownGoodDate IS NULL OR DATEDIFF(DAY, ck.LastKnownGoodDate, @CurrentDate) >= @MinCheckDBDays)
+ORDER BY
+    -- PRIMARY PRIORITY: Any single database estimated to take longer than the TOTAL CONFIGURED JOB RUN MINUTES.
+    -- These are the critical ones that could overrun the entire window if not run immediately.
+    CASE WHEN ISNULL(qr.TimeTakenSeconds, 0) > ((@ConfiguredRunMinutes * 60)*0.80) THEN 0 ELSE 1 END ASC,
+    -- If multiple such databases exist, break ties by longest runtime first.
+    CASE WHEN ISNULL(qr.TimeTakenSeconds, 0) > (@ConfiguredRunMinutes * 60) THEN ISNULL(qr.TimeTakenSeconds, 0) ELSE NULL END DESC,
+
+    -- SECONDARY PRIORITY: Apply @DatabaseOrder options.
+    -- If @DatabaseOrder is 'DATABASE_RUNTIME_DESC', order by longest estimated runtime first.
+    -- This handles databases that are long, but not necessarily longer than the entire job window.
+    CASE WHEN @DatabaseOrder = 'DATABASE_RUNTIME_DESC' THEN ISNULL(qr.TimeTakenSeconds, 0) ELSE NULL END DESC,
+
+    -- DATABASE_LAST_GOOD_CHECK_ASC (Oldest unchecked first, NULLs first)
+    CASE WHEN @DatabaseOrder = 'DATABASE_LAST_GOOD_CHECK_ASC' THEN ck.LastKnownGoodDate ELSE NULL END ASC,
+    -- DATABASE_LAST_GOOD_CHECK_DESC (Newest checked first, NULLs last)
+    CASE WHEN @DatabaseOrder = 'DATABASE_LAST_GOOD_CHECK_DESC' THEN ck.LastKnownGoodDate ELSE NULL END DESC,
+
+    -- DATABASE_SIZE_ASC (Smallest first)
+    CASE WHEN @DatabaseOrder = 'DATABASE_SIZE_ASC' THEN sz.TotalSizeMB ELSE NULL END ASC,
+    -- DATABASE_SIZE_DESC (Largest first)
+    CASE WHEN @DatabaseOrder = 'DATABASE_SIZE_DESC' THEN sz.TotalSizeMB ELSE NULL END DESC,
+
+    -- DATABASE_NAME_ASC (Alphabetical A-Z)
+    CASE WHEN @DatabaseOrder = 'DATABASE_NAME_ASC' THEN ck.DatabaseName ELSE NULL END ASC,
+    -- DATABASE_NAME_DESC (Reverse Alphabetical Z-A)
+    CASE WHEN @DatabaseOrder = 'DATABASE_NAME_DESC' THEN ck.DatabaseName ELSE NULL END DESC,
+
+    -- FINAL TIE-BREAKER: Use DatabaseName ASC to ensure a consistent, deterministic order if all other criteria are identical.
+    -- This handles cases where two databases have the same last check date, size, or runtime.
+    ck.DatabaseName ASC
+OPTION (RECOMPILE);
+
+--SQL Server optimize for the specific parameter value
+
+    PRINT 'Step 3: Identified databases due for integrity check and categorized them by size.';
+
+    -- Final picked counts for reporting
+    DECLARE @PickedTotal INT = (SELECT COUNT(*) FROM #DatabasesToProcess);
+    DECLARE @PickedSmall INT = (SELECT COUNT(*) FROM #DatabasesToProcess WHERE RunMode = 'Small-FULL');
+    DECLARE @PickedMedium INT = (SELECT COUNT(*) FROM #DatabasesToProcess WHERE RunMode = 'Medium-NOINDEX');
+    DECLARE @PickedLarge INT = (SELECT COUNT(*) FROM #DatabasesToProcess WHERE RunMode = 'Large-PHYSICAL_ONLY');
+
+    -- Pretty header & explanation for the CHECKDB plan
+    PRINT REPLICATE('=', 92);
+    PRINT 'CHECKDB Daily Plan Summary for ' + DATENAME(weekday, @CurrentDate) +
+          ' | Date=' + CONVERT(VARCHAR(19), @CurrentDate, 120);
+    PRINT '--------------------------------------------------------------------------------------------';
+    PRINT 'Strategy: Run CHECKDB for databases not checked in >= ' + CAST(@MinCheckDBDays AS VARCHAR(5)) + ' days.';
+    PRINT '          Prioritize by longest time since last good CHECKDB (NULL dates first).';
+    PRINT '          Small databases (<= ' + CAST(@mediumDBMinSizeInGB AS VARCHAR(10)) + ' GB) will run FULL CHECKDB.';
+    PRINT '          Medium databases ( > ' + CAST(@mediumDBMinSizeInGB AS VARCHAR(10)) + ' GB AND <= ' + CAST(@LargeDBMinSizeInGB AS VARCHAR(10)) + ' GB) will run CHECKDB with NOINDEX.';
+    PRINT '          Large databases ( > ' + CAST(@LargeDBMinSizeInGB AS VARCHAR(10)) + ' GB) will run CHECKDB with PHYSICAL_ONLY + NOINDEX.';
+    PRINT '--------------------------------------------------------------------------------------------';
+    DECLARE @TotalUserDBs INT = (SELECT COUNT(*) FROM #AllUserDbSizes);
+    PRINT 'Inventory   : Total User Databases = ' + CAST(@TotalUserDBs AS VARCHAR(10));
+    PRINT 'Due Filter  : @MinCheckDBDays     = ' + CAST(@MinCheckDBDays AS VARCHAR(5));
+    PRINT 'Picked Up   : Total=' + CAST(@PickedTotal AS VARCHAR(5)) +
+                 ' | Small-FULL=' + CAST(@PickedSmall AS VARCHAR(5)) +
+                 ' | Medium-NOINDEX=' + CAST(@PickedMedium AS VARCHAR(5)) +
+                 ' | Large-PHYSICAL_ONLY=' + CAST(@PickedLarge AS VARCHAR(5));
+    PRINT 'Runtime     : Configured Total Run Minutes = ' + CAST(@ConfiguredRunMinutes AS VARCHAR(10)); -- Changed to minutes
+    PRINT 'CPU Check   : Enabled=' + @ShouldPerformCPUCheck +
+                 ' | Threshold=' + CAST(@CPUThreshold AS VARCHAR(3)) + '%' +
+                 ' | WaitForMin=' + CAST(@WaitForMin AS VARCHAR(2));
+    PRINT REPLICATE('=', 92);
+
+    -- Optional detailed plan preview when not executing
+-- Optional detailed plan preview when not executing
+    BEGIN
+        IF @PickedTotal = 0
+        BEGIN
+            PRINT 'No databases are due for a CHECKDB based on current configuration.';
+        END
+        ELSE
+        BEGIN
+            PRINT '--- Detailed CHECKDB Plan Preview (Order reflects execution sequence) ---';
+            SELECT
+                dp.DatabaseName,
+                RunMode,
+                LastGoodCheckDbDate,
+                DATEADD(SECOND,ISNULL(-qr.TimeTakenSeconds,0),qr.LastCheckDBDate) LastCheckDBStartDate,
+                qr.LastCheckDBDate LastCheckDBEndDate,
+                CAST(sz.TotalSizeMB/1024.0 AS DECIMAL(18,2)) AS SizeGB,
+                ISNULL(dp.EstimatedRunTimeSeconds,0) AS LastRunTimeSec, -- Use dp.EstimatedRunTimeSeconds
+                ISNULL(dp.EstimatedRunTimeSeconds/60,0) AS LastRunTimeMin, -- Use dp.EstimatedRunTimeSeconds
+                @ConfiguredRunMinutes AS JobwillRunForXMins -- Use @ConfiguredRunMinutes for clarity
+            FROM #DatabasesToProcess dp
+            JOIN #AllUserDbSizes sz ON sz.DatabaseName = dp.DatabaseName
+            LEFT JOIN #QueryRunTimeData qr ON dp.DatabaseName = qr.DatabaseName
+            ORDER BY
+                -- PRIMARY PRIORITY: Any single database estimated to take longer than the TOTAL CONFIGURED JOB RUN MINUTES.
+                -- These are the critical ones that could overrun the entire window if not run immediately.
+                CASE WHEN ISNULL(dp.EstimatedRunTimeSeconds, 0) > ((@ConfiguredRunMinutes * 60)*0.80) THEN 0 ELSE 1 END ASC,
+                -- If multiple such databases exist, break ties by longest runtime first.
+                CASE WHEN ISNULL(dp.EstimatedRunTimeSeconds, 0) > (@ConfiguredRunMinutes * 60) THEN ISNULL(dp.EstimatedRunTimeSeconds, 0) ELSE NULL END DESC,
+
+                -- SECONDARY PRIORITY: Apply @DatabaseOrder options.
+                -- If @DatabaseOrder is 'DATABASE_RUNTIME_DESC', order by longest estimated runtime first.
+                -- This handles databases that are long, but not necessarily longer than the entire job window.
+                CASE WHEN @DatabaseOrder = 'DATABASE_RUNTIME_DESC' THEN ISNULL(dp.EstimatedRunTimeSeconds, 0) ELSE NULL END DESC,
+
+                -- DATABASE_LAST_GOOD_CHECK_ASC (Oldest unchecked first, NULLs first)
+                CASE WHEN @DatabaseOrder = 'DATABASE_LAST_GOOD_CHECK_ASC' THEN dp.LastGoodCheckDbDate ELSE NULL END ASC,
+                -- DATABASE_LAST_GOOD_CHECK_DESC (Newest checked first, NULLs last)
+                CASE WHEN @DatabaseOrder = 'DATABASE_LAST_GOOD_CHECK_DESC' THEN dp.LastGoodCheckDbDate ELSE NULL END DESC,
+
+                -- DATABASE_SIZE_ASC (Smallest first)
+                CASE WHEN @DatabaseOrder = 'DATABASE_SIZE_ASC' THEN sz.TotalSizeMB ELSE NULL END ASC,
+                -- DATABASE_SIZE_DESC (Largest first)
+                CASE WHEN @DatabaseOrder = 'DATABASE_SIZE_DESC' THEN sz.TotalSizeMB ELSE NULL END DESC,
+
+                -- DATABASE_NAME_ASC (Alphabetical A-Z)
+                CASE WHEN @DatabaseOrder = 'DATABASE_NAME_ASC' THEN dp.DatabaseName ELSE NULL END ASC,
+                -- DATABASE_NAME_DESC (Reverse Alphabetical Z-A)
+                CASE WHEN @DatabaseOrder = 'DATABASE_NAME_DESC' THEN dp.DatabaseName ELSE NULL END DESC,
+
+                -- FINAL TIE-BREAKER: Use DatabaseName ASC to ensure a consistent, deterministic order if all other criteria are identical.
+                dp.DatabaseName ASC
+            OPTION (RECOMPILE);
+        END
+    END
+    -------------------------------------------------------------------------
+    -- 6) Execute Ola Hallengren's DatabaseIntegrityCheck (one by one with CPU/Time checks)
+    --    This section iterates through the prioritized list and executes CHECKDB.
+    -------------------------------------------------------------------------
+    IF @Execute = 'Y'
+    BEGIN
+        PRINT '--- Initiating CHECKDB Execution for Due Databases ---';
+        DECLARE @CurrentDB SYSNAME;
+        DECLARE @CurrentRunMode NVARCHAR(20);
+        DECLARE @CurrentID INT = 1;
+        DECLARE @TotalDBsToProcess INT = (SELECT COUNT(*) FROM #DatabasesToProcess);
+
+        IF @TotalDBsToProcess = 0
+        BEGIN
+            PRINT 'No databases are due for CHECKDB. Exiting execution phase.';
+        END
+
+        WHILE @CurrentID <= @TotalDBsToProcess
+        BEGIN
+            -- Check if the overall job time limit has been reached *before* processing the next database.
+            IF GETDATE() > @OverallJobEndTime
+            BEGIN
+                PRINT 'Job Time Limit Reached: ' + CAST(@ConfiguredRunMinutes AS VARCHAR(2)) + ' hours have passed. Stopping further CHECKDB execution.';
+                BREAK;
+            END
+
+            SELECT
+                @CurrentDB = DatabaseName,
+                @CurrentRunMode = RunMode
+            FROM #DatabasesToProcess
+            WHERE ID = @CurrentID;
+
+            -- Safety check: if @CurrentDB is NULL, something went wrong with the #DatabasesToProcess table.
+            IF @CurrentDB IS NULL
+            BEGIN
+                PRINT 'WARNING: Database entry not found for ID ' + CAST(@CurrentID AS VARCHAR(5)) + '. Skipping and moving to next (if any).';
+                GOTO NextDatabase; -- Jump to the next iteration
+            END
+
+            -- Re-check CPU *before* running each database's CHECKDB if configured for today.
+            -- This ensures that a single large CHECKDB doesn't start if the CPU spikes.
+            IF @ShouldPerformCPUCheck = 'Y' AND @Execute = 'Y'
+            BEGIN
+                DECLARE @InnerCheckCPUCount INT = 0;
+                PRINT '  --- Pre-CHECKDB CPU Check for ' + QUOTENAME(@CurrentDB) + ' ---';
+                WHILE @InnerCheckCPUCount < @MaxCPUWaitChecks
+                BEGIN
+                    -- Get recent CPU utilization (approximating last 30 min)
+                    SELECT @AvgCPU = AVG(SQLProcessUtilization + (100 - SystemIdle - SQLProcessUtilization))
+                    FROM (
+                        SELECT TOP(@CPUCheckBackTime)
+                            SQLProcessUtilization,
+                            SystemIdle
+                        FROM (
+                            SELECT record.value('(./Record/@id)[1]', 'int') AS record_id,
+                                    record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') AS [SystemIdle],
+                                    record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') AS [SQLProcessUtilization],
+                                    [timestamp]
+                            FROM (
+                                SELECT [timestamp], CONVERT(xml, record) AS [record]
+                                FROM sys.dm_os_ring_buffers WITH (NOLOCK)
+                                WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+                                AND record LIKE N'%<SystemHealth>%'
+                            ) AS x
+                        ) AS y
+                        ORDER BY record_id DESC
+                    ) AS CPUData;
+
+                    PRINT '    CPU Check for ' + QUOTENAME(@CurrentDB) + ': Current Avg CPU: ' + ISNULL(CAST(@AvgCPU AS VARCHAR(3)), 'N/A') + '% (Threshold: ' + CAST(@CPUThreshold AS VARCHAR(3)) + '%)';
+
+                    IF @AvgCPU IS NULL OR @AvgCPU < @CPUThreshold
+                    BEGIN
+                        PRINT '    CPU is below threshold. Proceeding with CHECKDB for ' + QUOTENAME(@CurrentDB) + '.';
+                        BREAK; -- Exit inner CPU loop, CPU is good
+                    END
+                    ELSE
+                    BEGIN
+                        SET @InnerCheckCPUCount = @InnerCheckCPUCount + 1;
+                        PRINT '    CPU (' + CAST(@AvgCPU AS VARCHAR(3)) + '%) is above threshold. Waiting for ' + CAST(@WaitForMin AS VARCHAR(2)) + ' minutes before re-checking for ' + QUOTENAME(@CurrentDB) + '. Attempt ' + CAST(@InnerCheckCPUCount AS VARCHAR(1)) + ' of ' + CAST(@MaxCPUWaitChecks AS VARCHAR(1)) + '.';
+                        SET @OverallJobEndTime = DATEADD(MINUTE, @WaitForMin, @OverallJobEndTime);
+                        WAITFOR DELAY @DelayString; -- Re-use @DelayString from initial CPU check
+                    END
+
+                    IF @InnerCheckCPUCount >= @MaxCPUWaitChecks
+                    BEGIN
+                        PRINT '  --- Pre-CHECKDB CPU Check Failed for ' + QUOTENAME(@CurrentDB) + ': Maximum CPU wait attempts reached. Skipping this database. ---';
+                        GOTO NextDatabase; -- Jump to the next database without processing the current one
+                    END
+                END -- End of inner CPU check WHILE loop
+            END -- End of IF @ShouldPerformCPUCheck = 'Y'
+
+            -- Execute CHECKDB for the current database using Ola Hallengren's procedure
+            PRINT '--- Executing CHECKDB for database: ' + QUOTENAME(@CurrentDB) + ' (Mode: ' + @CurrentRunMode + ') at ' + CONVERT(VARCHAR(19), GETDATE(), 120) + ' ---';
+
+            BEGIN TRY
+                IF @CurrentRunMode = 'Small-FULL'
+                BEGIN
+
+                    EXEC dbo.DatabaseIntegrityCheck
+                        @Databases                  = @CurrentDB,
+                        @CheckCommands              = 'CHECKDB',
+                        @PhysicalOnly               = 'N', -- Full CHECKDB
+                        @NoIndex                    = 'N', -- Full CHECKDB
+                        @LogToTable                 = 'Y', -- Log results to Ola's logging table
+                        @Execute                    = 'Y'; -- Always 'Y' here since we are in the @Execute = 'Y' block
+                END
+                ELSE IF @CurrentRunMode = 'Medium-NOINDEX'
+                BEGIN
+                    EXEC dbo.DatabaseIntegrityCheck
+                        @Databases                  = @CurrentDB,
+                        @CheckCommands              = 'CHECKDB',
+                        @PhysicalOnly               = 'N', -- Still a full check, but skips index integrity (faster)
+                        @NoIndex                    = 'Y',
+                        @LogToTable                 = 'Y',
+                        @Execute                    = 'Y';
+                END
+                ELSE IF @CurrentRunMode = 'Large-PHYSICAL_ONLY'
+                BEGIN
+                    EXEC dbo.DatabaseIntegrityCheck
+                        @Databases                  = @CurrentDB,
+                        @CheckCommands              = 'CHECKDB',
+                        @PhysicalOnly               = 'Y', -- Faster, checks physical consistency
+                        @NoIndex                    = 'Y', -- Faster, skips index checks (less thorough)
+                        @LogToTable                 = 'Y',
+                        @Execute                    = 'Y';
+                END
+                PRINT '--- Finished CHECKDB for database: ' + QUOTENAME(@CurrentDB) + ' at ' + CONVERT(VARCHAR(19), GETDATE(), 120) + ' ---';
+            END TRY
+            BEGIN CATCH
+                SET @ErrorMessage = 'ERROR executing CHECKDB for ' + QUOTENAME(@CurrentDB) + ': ' + ERROR_MESSAGE();
+                PRINT @ErrorMessage;
+                -- Log the error, but continue to the next database if possible
+            END CATCH
+
+            NextDatabase:
+            SET @CurrentID = @CurrentID + 1;
+        END -- End of WHILE loop for databases
+    END -- End of IF @Execute = 'Y'
+
+    -------------------------------------------------------------------------
+    -- 7) Cleanup temporary tables
+    -------------------------------------------------------------------------
+    IF OBJECT_ID('tempdb..#DatabasesToProcess') IS NOT NULL DROP TABLE #DatabasesToProcess;
+    IF OBJECT_ID('tempdb..#AllUserDbSizes') IS NOT NULL DROP TABLE #AllUserDbSizes;
+    IF OBJECT_ID('tempdb..#LastCkTemp') IS NOT NULL DROP TABLE #LastCkTemp;
+    IF OBJECT_ID('tempdb..#QueryRunTimeData') IS NOT NULL DROP TABLE #QueryRunTimeData;
+    PRINT '====================================================================================================';
+    PRINT 'Job Finished At: ' + CONVERT(VARCHAR(19), GETDATE(), 120);
+    PRINT '====================================================================================================';
+END
+GO
