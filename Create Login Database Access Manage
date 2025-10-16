@@ -3,7 +3,7 @@ GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_GrantAccess
     -- General & Action Parameters
-    @UserName NVARCHAR(128) = 'username',
+    @UserName NVARCHAR(128) = 'UserName',
     @Print BIT = 1,
     @Execute BIT = 0,
 
@@ -14,7 +14,7 @@ CREATE OR ALTER PROCEDURE dbo.usp_GrantAccess
     @SID VARBINARY(85) = NULL,
 
     -- Database & Schema Scope
-    @DBNames NVARCHAR(MAX) = 'db1, db2, db3', --pass null for all dbs
+    @DBNames NVARCHAR(MAX) = '', --pass null for all dbs
     @ExcludeDBs NVARCHAR(MAX) = NULL,
     @IncludeSystemDBs BIT = 0,
     @Schema NVARCHAR(128) = NULL,
@@ -59,7 +59,8 @@ BEGIN
                     FOR XML PATH('')
                 )
         );
-        IF @Print = 1 PRINT '-- INFO: A strong password has been generated for ' + QUOTENAME(@UserName) + '.';
+		IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @UserName)
+        IF @Print = 1  PRINT '/* INFO: A strong password has been generated for ' + CHAR(10) + (@UserName) + CHAR(10) + @Password + CHAR(10) + '*/'
     END
 
     -- Validate the password (either supplied or generated) if it's not a hashed password
@@ -89,7 +90,8 @@ BEGIN
                 SET @SQL = N'CREATE LOGIN ' + QUOTENAME(@UserName) + N' FROM WINDOWS;';
             END
 
-            IF @Print = 1 PRINT @SQL;
+            IF @Print = 1 
+			PRINT @SQL;
             IF @Execute = 1 EXEC sp_executesql @SQL;
         END
 
