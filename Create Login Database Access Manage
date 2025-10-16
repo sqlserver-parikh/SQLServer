@@ -3,7 +3,7 @@ GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_GrantAccess
     -- General & Action Parameters
-    @UserName NVARCHAR(128) = 'test',
+    @UserName NVARCHAR(128) = 'username',
     @Print BIT = 1,
     @Execute BIT = 0,
 
@@ -14,18 +14,18 @@ CREATE OR ALTER PROCEDURE dbo.usp_GrantAccess
     @SID VARBINARY(85) = NULL,
 
     -- Database & Schema Scope
-    @DBNames NVARCHAR(MAX) = '',
+    @DBNames NVARCHAR(MAX) = 'db1, db2, db3', --pass null for all dbs
     @ExcludeDBs NVARCHAR(MAX) = NULL,
     @IncludeSystemDBs BIT = 0,
     @Schema NVARCHAR(128) = NULL,
 
     -- Permission Flags
     @GrantRead BIT = 1,
-    @GrantWrite BIT = 1,
-    @GrantExecute BIT = 1,
+    @GrantWrite BIT = 0,
+    @GrantExecute BIT = 0,
     @GrantViewDefinition BIT = 0,
     @GrantViewServerState BIT = 0,
-    @CustomRoles NVARCHAR(MAX) = NULL
+    @CustomRoles NVARCHAR(MAX) = 'db_ddladmin'
 
 AS
 BEGIN
@@ -121,10 +121,10 @@ BEGIN
                        N'ELSE' + CHAR(13) + CHAR(10) +
                        N'    ALTER USER ' + QUOTENAME(@UserName) + N' WITH LOGIN = ' + QUOTENAME(@UserName) + N';';
 
-            IF @GrantRead = 1 SET @SQL += IIF(@Schema IS NULL, N' ALTER ROLE db_datareader ADD MEMBER ' + QUOTENAME(@UserName) + N';', N' GRANT SELECT ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';');
-            IF @GrantWrite = 1 SET @SQL += IIF(@Schema IS NULL, N' ALTER ROLE db_datawriter ADD MEMBER ' + QUOTENAME(@UserName) + N';', N' GRANT INSERT, UPDATE, DELETE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';');
-            IF @GrantExecute = 1 SET @SQL += IIF(@Schema IS NULL, N' GRANT EXECUTE TO ' + QUOTENAME(@UserName) + N';', N' GRANT EXECUTE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';');
-            IF @GrantViewDefinition = 1 SET @SQL += IIF(@Schema IS NULL, N' GRANT VIEW DEFINITION TO ' + QUOTENAME(@UserName) + N';', N' GRANT VIEW DEFINITION ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';');
+            IF @GrantRead = 1 SET @SQL += IIF(@Schema IS NULL, CHAR(10) + N' ALTER ROLE db_datareader ADD MEMBER ' + QUOTENAME(@UserName) + N';', N' GRANT SELECT ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';');
+            IF @GrantWrite = 1 SET @SQL += IIF(@Schema IS NULL, CHAR(10) + N' ALTER ROLE db_datawriter ADD MEMBER ' + QUOTENAME(@UserName) + N';', N' GRANT INSERT, UPDATE, DELETE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';');
+            IF @GrantExecute = 1 SET @SQL += IIF(@Schema IS NULL, CHAR(10) + N' GRANT EXECUTE TO ' + QUOTENAME(@UserName) + N';', N' GRANT EXECUTE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';');
+            IF @GrantViewDefinition = 1 SET @SQL += IIF(@Schema IS NULL, CHAR(10) + N' GRANT VIEW DEFINITION TO ' + QUOTENAME(@UserName) + N';', N' GRANT VIEW DEFINITION ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';');
 
             IF @CustomRoles IS NOT NULL AND LTRIM(RTRIM(@CustomRoles)) <> ''
             BEGIN
@@ -136,7 +136,7 @@ BEGIN
                 FETCH NEXT FROM @RolesCursor INTO @Role;
                 WHILE @@FETCH_STATUS = 0
                 BEGIN
-                    SET @SQL += N' ALTER ROLE ' + QUOTENAME(@Role) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N';';
+                    SET @SQL += CHAR(10) + N' ALTER ROLE ' + QUOTENAME(@Role) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N';';
                     FETCH NEXT FROM @RolesCursor INTO @Role;
                 END
                 CLOSE @RolesCursor;
