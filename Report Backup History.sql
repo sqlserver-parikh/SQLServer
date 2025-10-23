@@ -2,9 +2,9 @@ USE tempdb
 GO
 CREATE OR ALTER PROCEDURE usp_BackupReport
 (
-    @DbNames NVARCHAR(MAX) = '' -- NULL: All DBs
-  , @BackupType CHAR(1) = NULL   -- D: Full, L: Log, I: Incremental, NULL: All backup types
-  , @LookBackDays INT = 7  -- Must be > 0
+    @DbNames NVARCHAR(MAX) = NULL -- NULL: All DBs
+  , @BackupType CHAR(1) = 'L'   -- D: Full, L: Log, I: Incremental, NULL: All backup types
+  , @LookBackDays INT = 14  -- Must be > 0
   , @MinBackupSizeMB INT = 0 -- 0 will show all backups 1024 will show all backups > than 1GB in size
   , @BackupGrowthReport BIT = 0 --If this is 1 then only @dbname parameter is used others are not used
 )
@@ -55,6 +55,7 @@ BEGIN
           , T3.backup_start_date                                                                                                     AS Bkp_StartDate
           , T3.backup_finish_date                                                                                                    AS Bkp_FinishDate
           , DATEDIFF(SS, T3.backup_start_date, T3.backup_finish_date)                                                                AS Bkp_Time_Sec
+		  , CONVERT(VARCHAR(8), DATEADD(s, DATEDIFF(SS, T3.backup_start_date, T3.backup_finish_date), 0), 108)						 AS [Bkp_Time_HH:MM:SS]
           , T3.type                                                                                                                  AS Bkp_Type
           , (T3.backup_size / 1048576.0)                                                                                             AS BackupSizeMB
           , (T3.compressed_backup_size / 1048576.0)                                                                                  AS CompressedBackupSizeMB
@@ -401,6 +402,7 @@ ORDER BY
 			, LBS.AvgBackupSpeedMBps AvgLogBackupMBPS
 			  , LBS.LogBackupCount
 			  , lbs.TotalTimeSpentSeconds LogBackupTime
+			  , CONVERT(VARCHAR(8), DATEADD(s, lbs.TotalTimeSpentSeconds, 0), 108) AS [LogBackupTime_HH:MM:SS]
 			 , @LookBackDays LookBack
              , [0]
              , [-1]
