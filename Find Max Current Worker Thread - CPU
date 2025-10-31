@@ -1,34 +1,135 @@
-DECLARE @LogicalCPUs INT;
-DECLARE @MaxWorkerThreads INT;
-DECLARE @current_workers_count INT;
- 
--- Get the number of logical CPUs
-SELECT @LogicalCPUs = cpu_count
-FROM sys.dm_os_sys_info;
- 
--- Calculate the maximum number of worker threads
-IF @LogicalCPUs <= 4
-    SET @MaxWorkerThreads = 512;
-ELSE IF @LogicalCPUs > 4 AND @LogicalCPUs <= 64
-    SET @MaxWorkerThreads = 512 + (@LogicalCPUs - 4) * 16;
-ELSE
-    SET @MaxWorkerThreads = 512 + (@LogicalCPUs - 4) * 32;
-
-
-SELECT @current_workers_count = active_worker_count
-FROM sys.dm_os_nodes WITH (NOLOCK) 
-WHERE node_state_desc <> N'ONLINE DAC' OPTION (RECOMPILE);
-------
--- Output the result
-SELECT @LogicalCPUs AS LogicalCPUs, @MaxWorkerThreads AS MaxWorkerThreads, @current_workers_count CurrentWorkerThreads;
-
+USE tempdb;
 GO
-SELECT 
-    r.session_id AS SPID,
-    COUNT(t.task_address) AS ThreadCount
-FROM 
-    sys.dm_exec_requests r
-INNER JOIN 
-    sys.dm_os_tasks t ON r.task_address = t.task_address
-GROUP BY 
-    r.session_id;
+
+-- Drop the procedure if it already exists to ensure a clean create (SQL 2012+ compatible)
+IF OBJECT_ID('dbo.usp_CollectWorkerThreadStats', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE dbo.usp_CollectWorkerThreadStats;
+END
+GO
+
+-- Optional: Use this to manually reset the log table during testing
+IF OBJECT_ID('dbo.tblWorkerThreadStats', 'U') IS NOT NULL
+BEGIN
+    DROP TABLE [dbo].[tblWorkerThreadStats];
+END
+GO
+
+-- Create the stored procedure
+CREATE PROCEDURE dbo.usp_CollectWorkerThreadStats
+    @LogToTable BIT = 1,
+    @RetentionDays INT = 30 -- New parameter for data retention
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Declare variables
+    DECLARE @LogicalCPUs_OS INT;
+    DECLARE @CPUs_Used_By_SQL INT;
+    DECLARE @MaxWorkerThreads INT;
+    DECLARE @current_workers_count INT;
+    DECLARE @SQLEdition NVARCHAR(128);
+    DECLARE @SQLVersion NVARCHAR(128);
+    DECLARE @SQLVersionMajor INT;
+    DECLARE @DBCount INT;
+
+    SELECT @DBCount = COUNT(*) FROM sys.databases;
+
+    -- Collect OS, SQL Edition, and Version information
+    SELECT
+        @LogicalCPUs_OS = cpu_count,
+        @SQLEdition = CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128)),
+        @SQLVersion = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128)),
+        @SQLVersionMajor = CAST(SERVERPROPERTY('ProductMajorVersion') AS INT)
+    FROM sys.dm_os_sys_info;
+
+    -- Get the number of CPUs actually being used by SQL Server (accounts for Edition limits and affinity masking)
+    SELECT @CPUs_Used_By_SQL = COUNT(*)
+    FROM sys.dm_os_schedulers
+    WHERE status = 'VISIBLE ONLINE' AND is_online = 1;
+
+    -- Calculate the maximum number of worker threads based on the CPUs SQL is actually using.
+    -- This logic correctly handles the changes introduced in SQL Server 2016.
+    IF @SQLVersionMajor >= 13 -- SQL Server 2016 and higher
+    BEGIN
+        IF @CPUs_Used_By_SQL <= 4
+            SET @MaxWorkerThreads = 512;
+        ELSE IF @CPUs_Used_By_SQL <= 64
+            SET @MaxWorkerThreads = 512 + (@CPUs_Used_By_SQL - 4) * 16;
+        ELSE -- @CPUs_Used_By_SQL > 64
+            SET @MaxWorkerThreads = 1024 + (@CPUs_Used_By_SQL - 64) * 32;
+    END
+    ELSE -- SQL Server 2014, 2012
+    BEGIN
+        IF @CPUs_Used_By_SQL <= 4
+            SET @MaxWorkerThreads = 512;
+        ELSE
+            SET @MaxWorkerThreads = 512 + (@CPUs_Used_By_SQL - 4) * 16;
+    END
+
+    -- Get the current number of active worker threads
+    SELECT @current_workers_count = SUM(active_worker_count)
+    FROM sys.dm_os_nodes WITH (NOLOCK)
+    WHERE node_state_desc <> N'ONLINE DAC' OPTION (RECOMPILE);
+
+    -- Log to table if the parameter is set to 1
+    IF @LogToTable = 1
+    BEGIN
+        -- Create the table only when logging is requested and if it doesn't already exist.
+        IF OBJECT_ID('dbo.tblWorkerThreadStats', 'U') IS NULL
+        BEGIN
+            CREATE TABLE [dbo].[tblWorkerThreadStats](
+                [ServerName] [sysname] DEFAULT @@SERVERNAME,
+                [SQLEdition] [nvarchar](128),
+                [SQLVersion] [nvarchar](128),
+                [LogicalCPUs_OS] [int],
+                [CPUs_Used_By_SQL] [int],
+                [DBCount] [int],
+                [MaxWorkerThreads] [int],
+                [CurrentWorkerThreads] [int],
+                [LogTimestamp] [datetime] DEFAULT GETDATE()
+            ) WITH (DATA_COMPRESSION = PAGE); -- Added Page Compression for storage efficiency
+        END;
+
+        -- Insert the collected data into the log table
+        INSERT INTO [dbo].[tblWorkerThreadStats] (
+            [SQLEdition],
+            [SQLVersion],
+            [LogicalCPUs_OS],
+            [CPUs_Used_By_SQL],
+            [MaxWorkerThreads],
+            [CurrentWorkerThreads],
+            [DBCount]
+        )
+        VALUES (
+            @SQLEdition,
+            @SQLVersion,
+            @LogicalCPUs_OS,
+            @CPUs_Used_By_SQL,
+            @MaxWorkerThreads,
+            @current_workers_count,
+            @DBCount
+        );
+        
+        -- NEW: Purge old data based on the retention period
+        DELETE FROM [dbo].[tblWorkerThreadStats]
+        WHERE LogTimestamp < DATEADD(day, -@RetentionDays, GETDATE());
+
+    END
+    ELSE
+    BEGIN
+        -- Output the result as a direct SELECT statement
+        SELECT
+            @@SERVERNAME AS ServerName,
+            @SQLEdition AS SQLEdition,
+            @SQLVersion AS SQLVersion,
+            @LogicalCPUs_OS AS LogicalCPUs_OS,
+            @CPUs_Used_By_SQL AS CPUs_Used_By_SQL,
+            @DBCount AS DBCount,
+            @MaxWorkerThreads AS MaxWorkerThreads,
+            @current_workers_count AS CurrentWorkerThreads,
+            GETDATE() AS LogTimestamp;
+    END;
+END;
+GO
+EXEC usp_CollectWorkerThreadStats
