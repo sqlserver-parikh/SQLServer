@@ -1,105 +1,173 @@
---if alwayson sync is very slow its worth to try to restart endpoint.
-SET NOCOUNT ON;
-DECLARE @EndpointName NVARCHAR(128);
-DECLARE @PrimaryReplicaServerName NVARCHAR(128);
-DECLARE @ReplicaServerName NVARCHAR(128);
-DECLARE @Command NVARCHAR(MAX);
+USE [tempdb];
+GO
 
--- Find the endpoint name
-SELECT @EndpointName = name
-FROM sys.endpoints
-WHERE type_desc = 'DATABASE_MIRRORING';
-
--- Check if the endpoint exists
-IF @EndpointName IS NULL
+-- Drop the procedure if it already exists to ensure a clean creation (compatible with all SQL versions)
+IF OBJECT_ID('dbo.usp_RestartAlwaysOnEndpoints', 'P') IS NOT NULL
 BEGIN
-    PRINT 'No database mirroring endpoint found. This server might not be part of a Database Mirroring setup or Availability Group.';
+    DROP PROCEDURE dbo.usp_RestartAlwaysOnEndpoints;
 END
-ELSE
+GO
+
+CREATE PROCEDURE dbo.usp_RestartAlwaysOnEndpoints
+    @Print BIT = 1,   -- If 1, prints a full T-SQL script for all replicas (for use in SQLCMD mode).
+    @Execute BIT = 0  -- If 1, executes the restart on the local instance AND prints scripts for other replicas.
+AS
 BEGIN
-    -- Get primary and secondary server names
-    DECLARE @AGInfo TABLE (
-        AGname NVARCHAR(128),
-        dns_name NVARCHAR(128),
-        replica_server_name NVARCHAR(128),
-        database_name NVARCHAR(128),
-        IsPrimaryServer BIT,
-        ReadableSecondary NVARCHAR(128),
-        Synchronous NVARCHAR(128),
-        failover_mode_desc NVARCHAR(128),
-        read_only_routing_url NVARCHAR(128),
-        availability_mode_desc NVARCHAR(128)
+    SET NOCOUNT ON;
+
+    DECLARE @EndpointName NVARCHAR(128);
+    DECLARE @Command NVARCHAR(MAX);
+    DECLARE @LocalServerName NVARCHAR(128) = @@SERVERNAME;
+
+    -- Find the database mirroring endpoint name on the local server
+    SELECT @EndpointName = name
+    FROM sys.endpoints
+    WHERE type_desc = 'DATABASE_MIRRORING';
+
+    -- Check if the endpoint exists
+    IF @EndpointName IS NULL
+    BEGIN
+        PRINT 'Error: No database mirroring endpoint found on the local server (' + @LocalServerName + ').';
+        PRINT 'This server may not be part of an Availability Group setup.';
+        RETURN;
+    END
+
+    -- Use a temporary table to store all replica information
+    IF OBJECT_ID('tempdb..#AGReplicas') IS NOT NULL DROP TABLE #AGReplicas;
+    CREATE TABLE #AGReplicas (
+        replica_server_name NVARCHAR(128) PRIMARY KEY,
+        is_primary BIT
     );
 
-    INSERT INTO @AGInfo
-    SELECT name AS AGname, 
-           agl.dns_name, 
-           replica_server_name, 
-           ADC.database_name,
-           CASE
-               WHEN(primary_replica = replica_server_name)
-               THEN 1
-               ELSE 0
-           END AS IsPrimaryServer, 
-           secondary_role_allow_connections_desc AS ReadableSecondary, 
-           [availability_mode] AS [Synchronous], 
-           failover_mode_desc, 
-           read_only_routing_url, 
-           availability_mode_desc
-    FROM master.sys.availability_groups Groups
-         LEFT JOIN master.sys.availability_replicas Replicas ON Groups.group_id = Replicas.group_id
-         LEFT JOIN master.sys.dm_hadr_availability_group_states States ON Groups.group_id = States.group_id
-         LEFT JOIN sys.availability_databases_cluster ADC ON ADC.group_id = Groups.group_id
-         LEFT JOIN sys.availability_group_listeners agl ON agl.group_id = groups.group_id;
+    -- Get all unique replicas across all availability groups
+    -- This DMV query is compatible with SQL Server 2012 and newer (where Always On was introduced)
+    INSERT INTO #AGReplicas (replica_server_name, is_primary)
+    SELECT DISTINCT
+           ar.replica_server_name,
+           CASE WHEN ags.primary_replica = ar.replica_server_name THEN 1 ELSE 0 END AS is_primary
+    FROM master.sys.availability_groups ag
+    JOIN master.sys.availability_replicas ar ON ag.group_id = ar.group_id
+    JOIN master.sys.dm_hadr_availability_group_states ags ON ag.group_id = ags.group_id;
 
-    -- Print the dynamic SQL statements for the primary replica
-    SELECT @PrimaryReplicaServerName = replica_server_name
-    FROM @AGInfo
-    WHERE IsPrimaryServer = 1;
-
-    IF @PrimaryReplicaServerName IS NOT NULL
+    -- Parameter @Print=1: Generate a script for all replicas in SQLCMD mode
+    IF @Print = 1 AND @Execute = 0
     BEGIN
-        PRINT '-- Connecting to Primary Replica: ' + @PrimaryReplicaServerName;
-        PRINT ':CONNECT ' + @PrimaryReplicaServerName;
-        PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
-        PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STOPPED';
-        PRINT 'GO';
-        PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
-        PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STARTED';
-        PRINT 'GO';
-        PRINT '-- Run this script on the Primary Replica';
-        PRINT '';
-    END
-    ELSE
-    BEGIN
-        PRINT 'Primary replica not found.';
-    END
-
-    -- Print the dynamic SQL statements for each secondary replica
-    DECLARE ReplicaCursor CURSOR FOR
-    SELECT DISTINCT replica_server_name
-    FROM @AGInfo
-    WHERE IsPrimaryServer = 0;
-
-    OPEN ReplicaCursor;
-    FETCH NEXT FROM ReplicaCursor INTO @ReplicaServerName;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        PRINT '-- Connecting to Secondary Replica: ' + @ReplicaServerName;
-        PRINT ':CONNECT ' + @ReplicaServerName;
-        PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
-        PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STOPPED';
-        PRINT 'GO';
-        PRINT 'WAITFOR DELAY ''00:00:05'''; -- 5 seconds delay
-        PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE=STARTED';
-        PRINT 'GO';
-        PRINT '-- Run this script on the Secondary Replica';
+        PRINT '/*************************************************************************************************';
+        PRINT '/* Script to restart Always On endpoints for all replicas.';
+        PRINT '/* To use this script, enable "SQLCMD Mode" in the SSMS Query menu, then execute.';
+        PRINT '/* This will connect to each replica and restart its endpoint sequentially.';
+        PRINT '*************************************************************************************************/';
         PRINT '';
 
-        FETCH NEXT FROM ReplicaCursor INTO @ReplicaServerName;
-    END;
+        DECLARE @ReplicaServerName NVARCHAR(128);
+        DECLARE @IsPrimary BIT;
 
-    CLOSE ReplicaCursor;
-    DEALLOCATE ReplicaCursor;
+        DECLARE ReplicaCursor CURSOR FOR
+        SELECT replica_server_name, is_primary FROM #AGReplicas ORDER BY is_primary DESC; -- Primary first
+
+        OPEN ReplicaCursor;
+        FETCH NEXT FROM ReplicaCursor INTO @ReplicaServerName, @IsPrimary;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            PRINT '-- Connecting to ' + CASE WHEN @IsPrimary = 1 THEN 'Primary' ELSE 'Secondary' END + ' Replica: ' + @ReplicaServerName;
+            PRINT ':CONNECT ' + @ReplicaServerName;
+            PRINT 'PRINT ''Restarting endpoint on ' + @ReplicaServerName + '...'';';
+            PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE = STOPPED;';
+            PRINT 'GO';
+            PRINT 'WAITFOR DELAY ''00:00:05'';';
+            PRINT 'GO';
+            PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE = STARTED;';
+            PRINT 'GO';
+            PRINT 'PRINT ''Endpoint on ' + @ReplicaServerName + ' restarted successfully.'';';
+            PRINT 'GO';
+            PRINT '';
+
+            FETCH NEXT FROM ReplicaCursor INTO @ReplicaServerName, @IsPrimary;
+        END;
+        CLOSE ReplicaCursor;
+        DEALLOCATE ReplicaCursor;
+    END
+
+    -- Parameter @Execute=1: Run commands locally and print scripts for other nodes
+    IF @Execute = 1
+    BEGIN
+        PRINT '*************************************************************************************************';
+        PRINT '/* STEP 1: Executing endpoint restart on the LOCAL server: ' + @LocalServerName;
+        PRINT '*************************************************************************************************';
+        BEGIN TRY
+            PRINT '';
+            PRINT 'Attempting to STOP endpoint [' + @EndpointName + '] on ' + @LocalServerName + '...';
+            SET @Command = N'ALTER ENDPOINT [' + @EndpointName + '] STATE = STOPPED;';
+            EXEC sp_executesql @Command;
+            PRINT 'Endpoint [' + @EndpointName + '] stopped successfully.';
+            PRINT '';
+
+            PRINT 'Waiting for 5 seconds...';
+            WAITFOR DELAY '00:00:05';
+            PRINT '';
+
+            PRINT 'Attempting to START endpoint [' + @EndpointName + '] on ' + @LocalServerName + '...';
+            SET @Command = N'ALTER ENDPOINT [' + @EndpointName + '] STATE = STARTED;';
+            EXEC sp_executesql @Command;
+            PRINT 'Endpoint [' + @EndpointName + '] started successfully.';
+            PRINT 'Local restart on ' + @LocalServerName + ' is complete.';
+
+        END TRY
+        BEGIN CATCH
+            PRINT 'ERROR: An error occurred while trying to restart the endpoint on ' + @LocalServerName + '.';
+            PRINT 'Error Number: ' + CAST(ERROR_NUMBER() AS NVARCHAR(20));
+            PRINT 'Error Message: ' + ERROR_MESSAGE();
+        END CATCH
+
+        PRINT '';
+        PRINT '*************************************************************************************************';
+        PRINT '/* STEP 2: The following commands MUST be run on the OTHER replica node(s).';
+        PRINT '*************************************************************************************************';
+        PRINT '';
+
+        IF NOT EXISTS (SELECT 1 FROM #AGReplicas WHERE replica_server_name <> @LocalServerName)
+        BEGIN
+            PRINT '-- No other replicas were found in the Availability Group configuration.';
+        END
+        ELSE
+        BEGIN
+            DECLARE @RemoteReplicaName NVARCHAR(128);
+            DECLARE RemoteCursor CURSOR FOR
+            SELECT replica_server_name FROM #AGReplicas WHERE replica_server_name <> @LocalServerName;
+
+            OPEN RemoteCursor;
+            FETCH NEXT FROM RemoteCursor INTO @RemoteReplicaName;
+
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                PRINT '/* --- Script for Replica: ' + @RemoteReplicaName + ' --- */';
+                PRINT 'USE [master];';
+                PRINT 'GO';
+                PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE = STOPPED;';
+                PRINT 'GO';
+                PRINT 'WAITFOR DELAY ''00:00:05'';';
+                PRINT 'GO';
+                PRINT 'ALTER ENDPOINT [' + @EndpointName + '] STATE = STARTED;';
+                PRINT 'GO';
+                PRINT '';
+
+                FETCH NEXT FROM RemoteCursor INTO @RemoteReplicaName;
+            END;
+            CLOSE RemoteCursor;
+            DEALLOCATE RemoteCursor;
+        END
+    END
+
+    -- Message if no action was taken
+    IF @Print = 0 AND @Execute = 0
+    BEGIN
+        PRINT 'No action taken. Set @Print=1 to generate a full script or @Execute=1 to run locally and generate scripts for other nodes.';
+    END
+
+    IF OBJECT_ID('tempdb..#AGReplicas') IS NOT NULL DROP TABLE #AGReplicas;
 END;
+GO
+
+PRINT 'Stored procedure [usp_RestartAlwaysOnEndpoints] has been created in tempdb.';
+GO
