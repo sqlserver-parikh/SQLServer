@@ -3,18 +3,21 @@ GO
 -- ============================================================================
 -- 1. CLEANUP / RESET 
 -- ============================================================================
-IF OBJECT_ID('dbo.tblAuditDefaultTrace', 'U') IS NOT NULL 
-    DROP TABLE dbo.tblAuditDefaultTrace;
-GO
+-- Remove the old separate stats table
 IF OBJECT_ID('dbo.tblAuditLoginStats', 'U') IS NOT NULL 
     DROP TABLE dbo.tblAuditLoginStats;
 GO
+-- Remove the detailed tables to recreate with new schema
 IF OBJECT_ID('dbo.tblLoginAudit', 'U') IS NOT NULL 
     DROP TABLE dbo.tblLoginAudit;
+GO
+IF OBJECT_ID('dbo.tblAuditDefaultTrace', 'U') IS NOT NULL 
+    DROP TABLE dbo.tblAuditDefaultTrace;
 GO
 IF OBJECT_ID('dbo.usp_AuditDefaultTrace', 'P') IS NOT NULL 
     DROP PROCEDURE dbo.usp_AuditDefaultTrace;
 GO
+-- Clean up old procs if they exist
 IF OBJECT_ID('dbo.usp_Audit_CaptureLog', 'P') IS NOT NULL 
     DROP PROCEDURE dbo.usp_Audit_CaptureLog; 
 GO
@@ -27,11 +30,10 @@ GO
 -- ============================================================================
 CREATE PROCEDURE [dbo].[usp_AuditDefaultTrace]
 (
-    @LogToTable        BIT  = 1,        -- 1 = Log to tables, 0 = Display Only
-    @RetentionDays     INT  = 90,       -- Retention for Detail Logs
+    @LogToTable        BIT  = 0,        -- 1 = Log to tables, 0 = Display Previews
+    @RetentionDays     INT  = 90,       -- Retention for Logs
     @IncludeTextData   BIT  = 1,        -- Keep SQL text for DDL events
-    @IncludeSystem     BIT  = 0,        -- 0 = Exclude system DBs (master, msdb)
-    @TrackLoginStats   BIT  = 1,        -- 1 = Maintain the Login Statistics table
+    @IncludeSystem     BIT  = 0,        -- 0 = Exclude system DBs
     @MinStartTime      DATETIME = NULL  -- Force load from specific date
 )
 AS
@@ -56,7 +58,7 @@ BEGIN
         END
 
         ---------------------------------------------------------------------------
-        -- 2. Define System Databases List
+        -- 2. Define System Databases
         ---------------------------------------------------------------------------
         DECLARE @SystemDBs TABLE (Name NVARCHAR(128) PRIMARY KEY);
         INSERT INTO @SystemDBs (Name) VALUES 
@@ -87,11 +89,11 @@ BEGIN
         (22099,'SB Service'),(22601,'Index'),(22604,'Cert Login'),(22611,'XMLSchema'),(22868,'Type');
 
         ---------------------------------------------------------------------------
-        -- 4. Table Setup (WITH PAGE COMPRESSION)
+        -- 4. Table Setup (Consolidated & Compressed)
         ---------------------------------------------------------------------------
         IF @LogToTable = 1
         BEGIN
-            -- TABLE A: Detailed Events
+            -- TABLE A: Event Log (DDL, Security changes)
             IF OBJECT_ID('dbo.tblAuditDefaultTrace', 'U') IS NULL
             BEGIN
                 CREATE TABLE dbo.tblAuditDefaultTrace
@@ -122,61 +124,38 @@ BEGIN
                 EXEC sp_executesql N'CREATE UNIQUE NONCLUSTERED INDEX UX_AuditTrace_RowHash ON dbo.tblAuditDefaultTrace (RowHash) WHERE RowHash IS NOT NULL WITH (DATA_COMPRESSION = PAGE);';
             END
 
-            -- TABLE B: Basic Login Stats (Success & Fail)
-            IF OBJECT_ID('dbo.tblAuditLoginStats', 'U') IS NULL
-            BEGIN
-                CREATE TABLE dbo.tblAuditLoginStats
-                (
-                    StatID             BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                    LoginName          NVARCHAR(128),
-                    HostName           NVARCHAR(128),
-                    DatabaseName       NVARCHAR(128),
-                    ApplicationName    NVARCHAR(256),
-                    Status             VARCHAR(20), -- 'Success' or 'Failed'
-                    FirstSeenTime      DATETIME,
-                    LastSeenTime       DATETIME,
-                    EventCount         BIGINT DEFAULT 1,
-                    LastUpdated        DATETIME DEFAULT GETDATE()
-                ) WITH (DATA_COMPRESSION = PAGE);
-
-                CREATE UNIQUE NONCLUSTERED INDEX UX_LoginStats_Keys 
-                    ON dbo.tblAuditLoginStats (LoginName, HostName, DatabaseName, ApplicationName, Status)
-                    WITH (DATA_COMPRESSION = PAGE);
-            END
-
-            -- TABLE C: Detailed Principal Audit
+            -- TABLE B: Consolidated Login Audit (Stats + Identity + Status)
             IF OBJECT_ID('dbo.tblLoginAudit', 'U') IS NULL
             BEGIN
                 CREATE TABLE dbo.tblLoginAudit (
-                    NTUserName NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
-                    loginname NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
-                    HostName NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
-                    ApplicationName NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
-                    SessionLoginName NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
-                    databasename NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
-                    first_used DATETIME,
-                    last_used DATETIME,
-                    usage_count BIGINT,
-                    principal_id INT,
-                    sid VARBINARY(MAX),
-                    type_desc NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
-                    name NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
-                    RunTimeUTC DATETIME DEFAULT GETUTCDATE()
+                    AuditID             BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                    LoginName           NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
+                    HostName            NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
+                    ApplicationName     NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
+                    DatabaseName        NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
+                    SessionLoginName    NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
+                    NTUserName          NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
+                    Status              VARCHAR(20) NOT NULL, -- 'Success' or 'Failed'
+                    PrincipalID         INT,
+                    SID                 VARBINARY(MAX),
+                    TypeDesc            NVARCHAR(256) COLLATE Latin1_General_CI_AS_KS_WS,
+                    FirstSeen           DATETIME,
+                    LastSeen            DATETIME,
+                    EventCount          BIGINT,
+                    RunTimeUTC          DATETIME DEFAULT GETUTCDATE()
                 ) WITH (DATA_COMPRESSION = PAGE);
                 
-                CREATE NONCLUSTERED INDEX IX_tblLoginAudit_Lookup 
-                    ON dbo.tblLoginAudit (loginname, HostName, ApplicationName)
+                -- Unique Index to handle the Upsert/Merge logic
+                CREATE UNIQUE NONCLUSTERED INDEX UX_LoginAudit_Merge 
+                    ON dbo.tblLoginAudit (LoginName, HostName, ApplicationName, DatabaseName, Status, SID)
                     WITH (DATA_COMPRESSION = PAGE);
             END
             
-            -- Schema Recovery for existing tables
+            -- Schema Recovery
             IF COL_LENGTH('dbo.tblAuditDefaultTrace', 'RowHash') IS NULL
             BEGIN
                 ALTER TABLE dbo.tblAuditDefaultTrace ADD RowHash VARBINARY(32) NULL;
-                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_AuditTrace_RowHash' AND object_id = OBJECT_ID('dbo.tblAuditDefaultTrace'))
-                BEGIN
-                     EXEC sp_executesql N'CREATE UNIQUE NONCLUSTERED INDEX UX_AuditTrace_RowHash ON dbo.tblAuditDefaultTrace (RowHash) WHERE RowHash IS NOT NULL WITH (DATA_COMPRESSION = PAGE);';
-                END
+                EXEC sp_executesql N'CREATE UNIQUE NONCLUSTERED INDEX UX_AuditTrace_RowHash ON dbo.tblAuditDefaultTrace (RowHash) WHERE RowHash IS NOT NULL WITH (DATA_COMPRESSION = PAGE);';
             END
         END
 
@@ -215,11 +194,8 @@ BEGIN
         WHERE
             (@MinStartTime IS NULL OR T.StartTime >= @MinStartTime)
             AND (
-                -- Filter Logic:
-                -- 1. Always include Login Events (Class 14, 20) regardless of DB Name
-                (TE.name LIKE '%Login%')
+                (TE.name LIKE '%Login%') -- Always capture login/failure
                 OR 
-                -- 2. For other events, apply the System DB filter
                 (
                     @IncludeSystem = 1 
                     OR T.DatabaseName IS NULL 
@@ -229,11 +205,36 @@ BEGIN
             AND (T.ObjectName NOT LIKE '_WA_Sys_%' OR T.ObjectName IS NULL);
 
         ---------------------------------------------------------------------------
-        -- 6. Mode: Display Only
+        -- 6. PREVIEW MODE (Display Both Result Sets)
         ---------------------------------------------------------------------------
         IF @LogToTable = 0 
         BEGIN
-            SELECT * FROM #TraceRows ORDER BY StartTime DESC;
+            PRINT '>>> PREVIEW: Events that would go into tblAuditDefaultTrace (DDL/Security) <<<';
+            SELECT 
+                StartTime AS EventTime, EventCategory, EventName, EventSubClassName, 
+                ObjectType, DatabaseName, ObjectName, LoginName, TargetLoginName, TextData
+            FROM #TraceRows
+            WHERE EventName NOT LIKE 'Audit Login%'
+            ORDER BY StartTime DESC;
+
+            PRINT '>>> PREVIEW: Aggregated Stats that would go into tblLoginAudit (Success & Failed) <<<';
+            SELECT 
+                I.LoginName, I.HostName, I.ApplicationName, I.DatabaseName,
+                CASE WHEN I.EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END AS Status,
+                COUNT(*) as NewEvents,
+                MIN(I.StartTime) as FirstSeen,
+                MAX(I.StartTime) as LastSeen,
+                S.name as PrincipalName,
+                S.type_desc
+            FROM #TraceRows I
+            LEFT JOIN sys.server_principals S ON CONVERT(VARBINARY(MAX), I.LoginSid) = S.sid
+            WHERE I.LoginName IS NOT NULL
+            GROUP BY 
+                I.LoginName, I.HostName, I.ApplicationName, I.DatabaseName,
+                CASE WHEN I.EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END,
+                S.name, S.type_desc
+            ORDER BY LastSeen DESC;
+
             RETURN;
         END
 
@@ -277,121 +278,74 @@ BEGIN
           AND NOT EXISTS (SELECT 1 FROM dbo.tblAuditDefaultTrace T WHERE T.RowHash = HashVal.RowHash);
 
         ---------------------------------------------------------------------------
-        -- 8. Process Basic Login Stats (Success & Fail)
+        -- 8. Process CONSOLIDATED LOGIN AUDIT (One Table)
         ---------------------------------------------------------------------------
-        -- This looks at ALL events in the trace to determine "Success" presence
-        IF @TrackLoginStats = 1
-        BEGIN
-            ;WITH CurrentTraceLogins AS (
-                SELECT 
-                    LoginName,
-                    ISNULL(HostName, 'Unknown') AS HostName,
-                    ISNULL(DatabaseName, 'Unknown') AS DatabaseName,
-                    ISNULL(ApplicationName, 'Unknown') AS ApplicationName,
-                    CASE 
-                        WHEN EventName LIKE '%Failed%' THEN 'Failed' 
-                        ELSE 'Success' 
-                    END AS Status,
-                    MIN(StartTime) AS SessionFirst,
-                    MAX(StartTime) AS SessionLast,
-                    COUNT(*) AS SessionCount
-                FROM #TraceRows 
-                WHERE LoginName IS NOT NULL 
-                GROUP BY LoginName, HostName, DatabaseName, ApplicationName,
-                         CASE WHEN EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END
+        DECLARE @MaxLastUsed DATETIME;
+        SELECT @MaxLastUsed = ISNULL(MAX(LastSeen), '2000-01-01') FROM dbo.tblLoginAudit WITH (NOLOCK);
+
+        MERGE dbo.tblLoginAudit AS target
+        USING (
+            SELECT 
+                I.NTUserName COLLATE Latin1_General_CI_AS_KS_WS AS NTUserName,
+                I.LoginName COLLATE Latin1_General_CI_AS_KS_WS AS LoginName,
+                ISNULL(I.HostName, 'Unknown') COLLATE Latin1_General_CI_AS_KS_WS AS HostName,
+                ISNULL(I.ApplicationName, 'Unknown') COLLATE Latin1_General_CI_AS_KS_WS AS ApplicationName,
+                I.SessionLoginName COLLATE Latin1_General_CI_AS_KS_WS AS SessionLoginName,
+                ISNULL(I.DatabaseName, '') COLLATE Latin1_General_CI_AS_KS_WS AS DatabaseName,
+                CASE 
+                    WHEN I.EventName LIKE '%Failed%' THEN 'Failed' 
+                    ELSE 'Success' 
+                END AS Status,
+                MIN(I.StartTime) AS FirstSeen,
+                MAX(I.StartTime) AS LastSeen,
+                COUNT(*) AS EventCount,
+                S.principal_id,
+                S.sid,
+                S.type_desc COLLATE Latin1_General_CI_AS_KS_WS AS type_desc
+            FROM #TraceRows I
+            LEFT JOIN sys.server_principals S ON CONVERT(VARBINARY(MAX), I.LoginSid) = S.sid
+            WHERE I.LoginName IS NOT NULL
+              AND I.StartTime > @MaxLastUsed
+            GROUP BY 
+                I.NTUserName,
+                I.LoginName,
+                I.SessionLoginName,
+                I.DatabaseName,
+                CASE WHEN I.EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END,
+                S.principal_id,
+                S.sid,
+                S.type_desc,
+                I.HostName,
+                I.ApplicationName
+        ) AS source
+        ON (
+            target.LoginName = source.LoginName
+            AND target.HostName = source.HostName
+            AND target.ApplicationName = source.ApplicationName
+            AND target.DatabaseName = source.DatabaseName
+            AND target.Status = source.Status
+            AND ISNULL(target.SID, 0x00) = ISNULL(source.sid, 0x00) -- Handle NULL SIDs for failed logins
+        )
+        WHEN MATCHED THEN 
+            UPDATE SET 
+                target.LastSeen = CASE 
+                                    WHEN source.LastSeen > target.LastSeen THEN source.LastSeen 
+                                    ELSE target.LastSeen 
+                                  END,
+                target.EventCount = target.EventCount + source.EventCount,
+                target.RunTimeUTC = GETUTCDATE()
+        WHEN NOT MATCHED THEN 
+            INSERT (
+                NTUserName, LoginName, HostName, ApplicationName, SessionLoginName, DatabaseName, 
+                Status, FirstSeen, LastSeen, EventCount, PrincipalID, SID, TypeDesc
             )
-            MERGE dbo.tblAuditLoginStats AS Target
-            USING CurrentTraceLogins AS Source
-            ON (
-                ISNULL(Target.LoginName,'') = ISNULL(Source.LoginName,'') AND
-                ISNULL(Target.HostName,'') = ISNULL(Source.HostName,'') AND
-                ISNULL(Target.DatabaseName,'') = ISNULL(Source.DatabaseName,'') AND
-                ISNULL(Target.ApplicationName,'') = ISNULL(Source.ApplicationName,'') AND
-                Target.Status = Source.Status
-            )
-            WHEN MATCHED THEN
-                UPDATE SET 
-                    Target.LastSeenTime = CASE WHEN Source.SessionLast > Target.LastSeenTime THEN Source.SessionLast ELSE Target.LastSeenTime END,
-                    Target.EventCount = Target.EventCount + Source.SessionCount,
-                    Target.LastUpdated = GETDATE()
-            WHEN NOT MATCHED THEN
-                INSERT (LoginName, HostName, DatabaseName, ApplicationName, Status, FirstSeenTime, LastSeenTime, EventCount, LastUpdated)
-                VALUES (Source.LoginName, Source.HostName, Source.DatabaseName, Source.ApplicationName, Source.Status, Source.SessionFirst, Source.SessionLast, Source.SessionCount, GETDATE());
-        END
+            VALUES (
+                source.NTUserName, source.LoginName, source.HostName, source.ApplicationName, source.SessionLoginName, source.DatabaseName, 
+                source.Status, source.FirstSeen, source.LastSeen, source.EventCount, source.principal_id, source.sid, source.type_desc
+            );
 
         ---------------------------------------------------------------------------
-        -- 9. Process DETAILED PRINCIPAL AUDIT
-        ---------------------------------------------------------------------------
-        IF @TrackLoginStats = 1
-        BEGIN
-            DECLARE @MaxLastUsed DATETIME;
-            SELECT @MaxLastUsed = ISNULL(MAX(last_used), '2000-01-01') FROM dbo.tblLoginAudit WITH (NOLOCK);
-
-            MERGE dbo.tblLoginAudit AS target
-            USING (
-                SELECT 
-                    I.NTUserName COLLATE Latin1_General_CI_AS_KS_WS AS NTUserName,
-                    I.loginname COLLATE Latin1_General_CI_AS_KS_WS AS loginname,
-                    I.HostName COLLATE Latin1_General_CI_AS_KS_WS AS HostName,
-                    I.ApplicationName COLLATE Latin1_General_CI_AS_KS_WS AS ApplicationName,
-                    I.SessionLoginName COLLATE Latin1_General_CI_AS_KS_WS AS SessionLoginName,
-                    I.databasename COLLATE Latin1_General_CI_AS_KS_WS AS databasename,
-                    MIN(I.StartTime) AS first_used,
-                    MAX(I.StartTime) AS last_used,
-                    COUNT(I.StartTime) AS usage_count,
-                    S.principal_id,
-                    S.sid,
-                    S.type_desc COLLATE Latin1_General_CI_AS_KS_WS AS type_desc,
-                    S.name COLLATE Latin1_General_CI_AS_KS_WS AS name
-                FROM #TraceRows I
-                LEFT JOIN sys.server_principals S ON CONVERT(VARBINARY(MAX), I.LoginSid) = S.sid
-                WHERE I.LoginSid IS NOT NULL
-                  AND I.StartTime > @MaxLastUsed
-                GROUP BY 
-                    I.NTUserName,
-                    I.loginname,
-                    I.SessionLoginName,
-                    I.databasename,
-                    S.principal_id,
-                    S.sid,
-                    S.type_desc,
-                    S.name,
-                    I.HostName,
-                    I.ApplicationName
-            ) AS source
-            ON (
-                ISNULL(target.NTUserName,'') = ISNULL(source.NTUserName,'')
-                AND target.loginname = source.loginname
-                AND target.HostName = source.HostName
-                AND target.ApplicationName = source.ApplicationName
-                AND target.SessionLoginName = source.SessionLoginName
-                AND target.databasename = source.databasename
-                AND ISNULL(target.principal_id, -1) = ISNULL(source.principal_id, -1)
-                AND target.sid = source.sid
-                AND ISNULL(target.type_desc,'') = ISNULL(source.type_desc,'')
-                AND ISNULL(target.name,'') = ISNULL(source.name,'')
-            )
-            WHEN MATCHED THEN 
-                UPDATE SET 
-                    target.first_used = CASE 
-                                            WHEN target.first_used IS NULL OR source.first_used < target.first_used 
-                                            THEN source.first_used 
-                                            ELSE target.first_used 
-                                        END,
-                    target.last_used = CASE 
-                                            WHEN target.last_used IS NULL OR source.last_used > target.last_used 
-                                            THEN source.last_used 
-                                            ELSE target.last_used 
-                                        END,
-                    target.usage_count = source.usage_count + target.usage_count,
-                    target.RunTimeUTC = GETUTCDATE()
-            WHEN NOT MATCHED THEN 
-                INSERT (NTUserName, loginname, HostName, ApplicationName, SessionLoginName, databasename, first_used, last_used, usage_count, principal_id, sid, type_desc, name)
-                VALUES (source.NTUserName, source.loginname, source.HostName, source.ApplicationName, source.SessionLoginName, source.databasename, source.first_used, source.last_used, source.usage_count, source.principal_id, source.sid, source.type_desc, source.name);
-        END
-
-        ---------------------------------------------------------------------------
-        -- 10. Cleanup
+        -- 9. Cleanup
         ---------------------------------------------------------------------------
         IF @RetentionDays > 0
         BEGIN
