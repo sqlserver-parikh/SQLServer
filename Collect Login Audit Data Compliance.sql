@@ -1,7 +1,7 @@
 USE tempdb
 GO
 -- ============================================================================
--- 1. CLEANUP / RESET (Run once)
+-- 1. CLEANUP / RESET (Run once) 
 -- ============================================================================
 IF OBJECT_ID('dbo.tblAuditDefaultTrace', 'U') IS NOT NULL 
     DROP TABLE dbo.tblAuditDefaultTrace;
