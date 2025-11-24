@@ -10,6 +10,21 @@ BEGIN
     DECLARE @InnerScript NVARCHAR(MAX);
     DECLARE @NextSnapID INT;
 
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tbl_DBPermission]') AND type in (N'U'))
+BEGIN
+    CREATE TABLE [dbo].[tbl_DBPermission](
+        [ID] [int] IDENTITY(1,1) NOT NULL,
+        [DBName] [nvarchar](128) NULL,
+        [PermissionScript] [nvarchar](max) NULL,
+        [ScriptDate] [datetime] NULL CONSTRAINT [DF_tbl_DBPermission_ScriptDate] DEFAULT (GETDATE()),
+        [Servername] [nvarchar](128) NULL CONSTRAINT [DF_tbl_DBPermission_Servername] DEFAULT (@@SERVERNAME),
+        [DBSnapID] [int] NULL CONSTRAINT [DF_tbl_DBPermission_DBSnapID] DEFAULT ((1)),
+        CONSTRAINT [PK_tbl_DBPermission] PRIMARY KEY CLUSTERED 
+        (
+            [ID] ASC
+        ) WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+    ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+END
     ---------------------------------------------------------------------------
     -- 1. DEFINE THE CORE SCRIPT LOGIC
     --    Changes: Removed empty spacer rows; Added ISNULL to all QUOTENAMEs
