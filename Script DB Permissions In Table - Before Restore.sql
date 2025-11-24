@@ -168,3 +168,138 @@ END
     PRINT 'Done.';
 END
 GO
+
+
+CREATE OR ALTER PROCEDURE usp_RestorePermission
+    @CurrentDBName NVARCHAR(128), -- The DB Name stored in tbl_DBPermission
+    @NewDBName NVARCHAR(128),     -- The Target DB to apply permissions to
+    @DBSnapID INT,                -- The Snapshot ID to restore
+    @Execute BIT = 0              -- 0 = Print Script with Error Handling; 1 = Execute Directly
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- 1. Validation
+    IF DB_ID(@NewDBName) IS NULL
+    BEGIN
+        RAISERROR('Target database [%s] does not exist.', 16, 1, @NewDBName);
+        RETURN;
+    END
+
+    IF NOT EXISTS (SELECT 1 FROM dbo.tbl_DBPermission WHERE DBName = @CurrentDBName AND DBSnapID = @DBSnapID)
+    BEGIN
+        RAISERROR('No permissions found for DB [%s] with Snapshot ID [%d].', 16, 1, @CurrentDBName, @DBSnapID);
+        RETURN;
+    END
+
+    DECLARE @ScriptLine NVARCHAR(MAX);
+    DECLARE @DynamicSQL NVARCHAR(MAX);
+    DECLARE @ErrorMsg NVARCHAR(MAX);
+    DECLARE @SuccessCount INT = 0;
+    DECLARE @FailCount INT = 0;
+
+    -- 2. Header Information
+    IF @Execute = 1
+    BEGIN
+        PRINT '-------------------------------------------------------------';
+        PRINT 'Restoring Permissions (EXECUTION MODE)';
+        PRINT 'Source: ' + @CurrentDBName + ' (SnapID: ' + CAST(@DBSnapID AS VARCHAR(10)) + ')';
+        PRINT 'Target: ' + @NewDBName;
+        PRINT '-------------------------------------------------------------';
+    END
+    ELSE
+    BEGIN
+        PRINT '-- -------------------------------------------------------------';
+        PRINT '-- Generated Restoration Script';
+        PRINT '-- Source: ' + @CurrentDBName + ' (SnapID: ' + CAST(@DBSnapID AS VARCHAR(10)) + ')';
+        PRINT '-- Target: ' + @NewDBName;
+        PRINT '-- -------------------------------------------------------------';
+        PRINT '';
+        PRINT 'USE ' + QUOTENAME(@NewDBName) + ';';
+        PRINT 'GO';
+        PRINT '';
+    END
+
+    -- 3. Cursor to loop through the stored script lines
+    DECLARE cur_restore CURSOR LOCAL FAST_FORWARD FOR 
+    SELECT PermissionScript 
+    FROM dbo.tbl_DBPermission
+    WHERE DBName = @CurrentDBName 
+      AND DBSnapID = @DBSnapID
+    ORDER BY ID;
+
+    OPEN cur_restore;
+    FETCH NEXT FROM cur_restore INTO @ScriptLine;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        -- Filter out comments and blank lines
+        IF LEFT(LTRIM(@ScriptLine), 2) <> '--' AND LEN(LTRIM(@ScriptLine)) > 0
+        BEGIN
+            -- Skip the original "USE [OldDB]" statement from the source script
+            IF @ScriptLine NOT LIKE 'USE %'
+            BEGIN
+                
+                -- ==========================================================
+                -- MODE: EXECUTE (@Execute = 1)
+                -- ==========================================================
+                IF @Execute = 1
+                BEGIN
+                    SET @DynamicSQL = N'USE ' + QUOTENAME(@NewDBName) + N'; ' + @ScriptLine;
+
+                    BEGIN TRY
+                        EXEC sp_executesql @DynamicSQL;
+                        SET @SuccessCount = @SuccessCount + 1;
+                    END TRY
+                    BEGIN CATCH
+                        SET @FailCount = @FailCount + 1;
+                        SET @ErrorMsg = ERROR_MESSAGE();
+                        PRINT 'FAILED Statement: ' + LEFT(@ScriptLine, 100) + '...';
+                        PRINT '   Error: ' + @ErrorMsg;
+                        PRINT '-------------------------------------------------------------';
+                    END CATCH
+                END
+
+                -- ==========================================================
+                -- MODE: PRINT / GENERATE SCRIPT (@Execute = 0)
+                -- ==========================================================
+                ELSE
+                BEGIN
+                    -- We wrap the statement in TRY/CATCH so manual execution doesn't stop on error
+                    PRINT 'BEGIN TRY';
+                    PRINT '    ' + @ScriptLine;
+                    PRINT 'END TRY';
+                    PRINT 'BEGIN CATCH';
+                    -- We print the error inside the generated script for the user to see
+                    PRINT '    PRINT ''Error Executing: ' + LEFT(REPLACE(@ScriptLine, '''', ''), 50) + '...'';';
+                    PRINT '    PRINT ''Reason: '' + ERROR_MESSAGE();';
+                    PRINT 'END CATCH';
+                    PRINT ''; -- Empty line for readability
+                END
+            END
+        END
+
+        FETCH NEXT FROM cur_restore INTO @ScriptLine;
+    END
+
+    CLOSE cur_restore;
+    DEALLOCATE cur_restore;
+
+    -- 4. Summary (Only needed for Execution Mode)
+    IF @Execute = 1
+    BEGIN
+        PRINT '-------------------------------------------------------------';
+        PRINT 'Restore Complete.';
+        PRINT 'Successful Statements: ' + CAST(@SuccessCount AS VARCHAR(10));
+        PRINT 'Failed Statements:     ' + CAST(@FailCount AS VARCHAR(10));
+        PRINT '-------------------------------------------------------------';
+    END
+    ELSE
+    BEGIN
+        PRINT '-- -------------------------------------------------------------';
+        PRINT '-- End of Generated Script';
+        PRINT '-- -------------------------------------------------------------';
+    END
+END
+GO
+
