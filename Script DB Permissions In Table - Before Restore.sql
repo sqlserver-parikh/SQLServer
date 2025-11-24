@@ -303,3 +303,35 @@ BEGIN
 END
 GO
 
+
+--/* 
+--   ROLLBACK SCRIPT 
+--   Removes: usp_RestorePermission, usp_ScriptPermission, tbl_DBPermission
+--*/
+
+--USE tempdb; -- Or your specific database name
+--GO
+
+---- 1. Drop the Restore Procedure
+--IF OBJECT_ID('dbo.usp_RestorePermission', 'P') IS NOT NULL
+--BEGIN
+--    DROP PROCEDURE dbo.usp_RestorePermission;
+--    PRINT 'Dropped procedure usp_RestorePermission';
+--END
+--GO
+
+---- 2. Drop the Scripting Procedure
+--IF OBJECT_ID('dbo.usp_ScriptPermission', 'P') IS NOT NULL
+--BEGIN
+--    DROP PROCEDURE dbo.usp_ScriptPermission;
+--    PRINT 'Dropped procedure usp_ScriptPermission';
+--END
+--GO
+
+---- 3. Drop the Table (Warning: This deletes all saved permission history)
+--IF OBJECT_ID('dbo.tbl_DBPermission', 'U') IS NOT NULL
+--BEGIN
+--    DROP TABLE dbo.tbl_DBPermission;
+--    PRINT 'Dropped table tbl_DBPermission';
+--END
+--GO
