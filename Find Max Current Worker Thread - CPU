@@ -1,135 +1,360 @@
-USE tempdb;
+USE tempdb
 GO
-
--- Drop the procedure if it already exists to ensure a clean create (SQL 2012+ compatible)
+/*==============================================================================
+  CLEANUP: Drop existing objects so this script starts fresh
+==============================================================================*/
+IF OBJECT_ID('dbo.vWorkerThreadRunSummary', 'V') IS NOT NULL
+    DROP VIEW dbo.vWorkerThreadRunSummary;
+GO
 IF OBJECT_ID('dbo.usp_CollectWorkerThreadStats', 'P') IS NOT NULL
-BEGIN
     DROP PROCEDURE dbo.usp_CollectWorkerThreadStats;
-END
 GO
-
--- Optional: Use this to manually reset the log table during testing
 IF OBJECT_ID('dbo.tblWorkerThreadStats', 'U') IS NOT NULL
-BEGIN
-    DROP TABLE [dbo].[tblWorkerThreadStats];
-END
+    DROP TABLE dbo.tblWorkerThreadStats;
 GO
 
--- Create the stored procedure
+
+/*==============================================================================
+  TABLE: dbo.tblWorkerThreadStats
+  Purpose: Single destination for short-interval samples that combine
+           worker-thread metrics (dynamic) and instance configuration (static).
+==============================================================================*/
+CREATE TABLE dbo.tblWorkerThreadStats
+(
+    -- Execution identity
+    RunId                UNIQUEIDENTIFIER NOT NULL,            -- groups samples from one execution
+    ServerName           SYSNAME         NOT NULL DEFAULT @@SERVERNAME,
+
+    -- Instance fingerprint
+    SQLEdition           NVARCHAR(128)   NULL,                 -- SERVERPROPERTY('Edition')
+    SQLVersion           NVARCHAR(128)   NULL,                 -- SERVERPROPERTY('ProductVersion')
+
+    -- CPU / capacity context
+    LogicalCPUs_OS       INT             NULL,                 -- dm_os_sys_info.cpu_count
+    CPUs_Used_By_SQL     INT             NULL,                 -- COUNT of visible online schedulers
+    DBCount              INT             NULL,                 -- sys.databases count
+    MaxWorkerThreads     INT             NULL,                 -- computed per version rules
+
+    -- Dynamic worker metrics (per sample)
+    ActiveWorker         INT             NULL,                 -- dm_os_nodes SUM(active_worker_count)
+    CurrentWorkers       INT             NULL,                 -- dm_os_schedulers SUM(current_workers_count)
+    WaitingTasks         INT             NULL,                 -- dm_os_schedulers SUM(runnable_tasks_count)
+
+    -- Static / slow-changing context
+    SchedulerCount       INT             NULL,                 -- visible online schedulers
+    NumaNodeCount        INT             NULL,                 -- COUNT(dm_os_nodes, excluding ONLINE DAC)
+    PhysicalMemoryGB     DECIMAL(18,4)   NULL,                 -- dm_os_sys_info.physical_memory_kb / (1024*1024)
+    SqlMemoryTargetMB    INT             NULL,                 -- dm_os_sys_info.committed_target_kb / 1024
+    SqlMemoryCommittedMB INT             NULL,                 -- dm_os_sys_info.committed_kb / 1024
+    MaxServerMemoryMB    INT             NULL,                 -- sys.configurations value_in_use
+    MinServerMemoryMB    INT             NULL,                 -- sys.configurations value_in_use
+    MaxDOP               INT             NULL,                 -- sys.configurations value_in_use
+    CTFP                 INT             NULL,                 -- cost threshold for parallelism
+
+    -- Timestamp
+    LogTimestamp         DATETIME        NOT NULL DEFAULT GETDATE()
+)
+WITH (DATA_COMPRESSION = PAGE);
+GO
+
+CREATE INDEX IX_tblWorkerThreadStats_LogTimestamp
+  ON dbo.tblWorkerThreadStats (LogTimestamp);
+GO
+
+CREATE INDEX IX_tblWorkerThreadStats_RunId
+  ON dbo.tblWorkerThreadStats (RunId, LogTimestamp);
+GO
+
+
+/*==============================================================================
+  PROCEDURE: dbo.usp_CollectWorkerThreadStats
+  Purpose: Collect short-interval snapshots of worker-thread usage/pressure
+           and stable instance configuration into dbo.tblWorkerThreadStats.
+  Parameters:
+    @LogToTable          BIT  = 1  -- 1: insert rows; 0: return rows only
+    @RetentionDays       INT  = 30 -- delete rows older than this (when logging)
+    @WaitForDelaySeconds INT  = 5  -- delay between samples (seconds)
+    @TotalLoops          INT  = 3  -- number of samples to collect this run
+==============================================================================*/
 CREATE PROCEDURE dbo.usp_CollectWorkerThreadStats
-    @LogToTable BIT = 1,
-    @RetentionDays INT = 30 -- New parameter for data retention
+    @LogToTable          BIT  = 1,
+    @RetentionDays       INT  = 30,
+    @WaitForDelaySeconds INT  = 5,
+    @TotalLoops          INT  = 12
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    -- Declare variables
-    DECLARE @LogicalCPUs_OS INT;
-    DECLARE @CPUs_Used_By_SQL INT;
-    DECLARE @MaxWorkerThreads INT;
-    DECLARE @current_workers_count INT;
-    DECLARE @SQLEdition NVARCHAR(128);
-    DECLARE @SQLVersion NVARCHAR(128);
-    DECLARE @SQLVersionMajor INT;
-    DECLARE @DBCount INT;
+    -- Parameter hygiene
+    IF @TotalLoops IS NULL OR @TotalLoops < 1 SET @TotalLoops = 1;
+    IF @WaitForDelaySeconds IS NULL OR @WaitForDelaySeconds < 0 SET @WaitForDelaySeconds = 0;
 
-    SELECT @DBCount = COUNT(*) FROM sys.databases;
+    -- WAITFOR DELAY requires character string 'hh:mm:ss'
+    DECLARE @h INT = @WaitForDelaySeconds / 3600;
+    DECLARE @m INT = (@WaitForDelaySeconds % 3600) / 60;
+    DECLARE @s INT = @WaitForDelaySeconds % 60;
 
-    -- Collect OS, SQL Edition, and Version information
-    SELECT
-        @LogicalCPUs_OS = cpu_count,
-        @SQLEdition = CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128)),
-        @SQLVersion = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128)),
-        @SQLVersionMajor = CAST(SERVERPROPERTY('ProductMajorVersion') AS INT)
-    FROM sys.dm_os_sys_info;
+    DECLARE @DelayString NVARCHAR(12) =
+        RIGHT('00' + CAST(@h AS VARCHAR(2)), 2) + ':' +
+        RIGHT('00' + CAST(@m AS VARCHAR(2)), 2) + ':' +
+        RIGHT('00' + CAST(@s AS VARCHAR(2)), 2);  -- e.g. '00:00:05'
 
-    -- Get the number of CPUs actually being used by SQL Server (accounts for Edition limits and affinity masking)
-    SELECT @CPUs_Used_By_SQL = COUNT(*)
-    FROM sys.dm_os_schedulers
-    WHERE status = 'VISIBLE ONLINE' AND is_online = 1;
+    -- Execution grouping token
+    DECLARE @RunId UNIQUEIDENTIFIER = NEWID();
 
-    -- Calculate the maximum number of worker threads based on the CPUs SQL is actually using.
-    -- This logic correctly handles the changes introduced in SQL Server 2016.
-    IF @SQLVersionMajor >= 13 -- SQL Server 2016 and higher
+    -- Buffer when not logging
+    DECLARE @Results TABLE
+    (
+        RunId                UNIQUEIDENTIFIER,
+        ServerName           SYSNAME,
+        SQLEdition           NVARCHAR(128),
+        SQLVersion           NVARCHAR(128),
+        LogicalCPUs_OS       INT,
+        CPUs_Used_By_SQL     INT,
+        DBCount              INT,
+        MaxWorkerThreads     INT,
+        ActiveWorker         INT,
+        CurrentWorkers       INT,
+        WaitingTasks         INT,
+        SchedulerCount       INT,
+        NumaNodeCount        INT,
+        PhysicalMemoryGB     DECIMAL(18,4),
+        SqlMemoryTargetMB    INT,
+        SqlMemoryCommittedMB INT,
+        MaxServerMemoryMB    INT,
+        MinServerMemoryMB    INT,
+        MaxDOP               INT,
+        CTFP                 INT,
+        LogTimestamp         DATETIME
+    );
+
+    -- Sampling loop
+    DECLARE @i INT = 1;
+    WHILE @i <= @TotalLoops
     BEGIN
-        IF @CPUs_Used_By_SQL <= 4
-            SET @MaxWorkerThreads = 512;
-        ELSE IF @CPUs_Used_By_SQL <= 64
-            SET @MaxWorkerThreads = 512 + (@CPUs_Used_By_SQL - 4) * 16;
-        ELSE -- @CPUs_Used_By_SQL > 64
-            SET @MaxWorkerThreads = 1024 + (@CPUs_Used_By_SQL - 64) * 32;
-    END
-    ELSE -- SQL Server 2014, 2012
-    BEGIN
-        IF @CPUs_Used_By_SQL <= 4
-            SET @MaxWorkerThreads = 512;
-        ELSE
-            SET @MaxWorkerThreads = 512 + (@CPUs_Used_By_SQL - 4) * 16;
-    END
+        -- Instance fingerprint
+        DECLARE @SQLEdition       NVARCHAR(128);
+        DECLARE @SQLVersion       NVARCHAR(128);
+        DECLARE @SQLVersionMajor  INT;
 
-    -- Get the current number of active worker threads
-    SELECT @current_workers_count = SUM(active_worker_count)
-    FROM sys.dm_os_nodes WITH (NOLOCK)
-    WHERE node_state_desc <> N'ONLINE DAC' OPTION (RECOMPILE);
+        -- Capacity context
+        DECLARE @LogicalCPUs_OS   INT;
+        DECLARE @CPUs_Used_By_SQL INT;
+        DECLARE @DBCount          INT;
+        DECLARE @MaxWorkerThreads INT;
 
-    -- Log to table if the parameter is set to 1
-    IF @LogToTable = 1
-    BEGIN
-        -- Create the table only when logging is requested and if it doesn't already exist.
-        IF OBJECT_ID('dbo.tblWorkerThreadStats', 'U') IS NULL
-        BEGIN
-            CREATE TABLE [dbo].[tblWorkerThreadStats](
-                [ServerName] [sysname] DEFAULT @@SERVERNAME,
-                [SQLEdition] [nvarchar](128),
-                [SQLVersion] [nvarchar](128),
-                [LogicalCPUs_OS] [int],
-                [CPUs_Used_By_SQL] [int],
-                [DBCount] [int],
-                [MaxWorkerThreads] [int],
-                [CurrentWorkerThreads] [int],
-                [LogTimestamp] [datetime] DEFAULT GETDATE()
-            ) WITH (DATA_COMPRESSION = PAGE); -- Added Page Compression for storage efficiency
-        END;
+        -- Worker metrics
+        DECLARE @ActiveWorker     INT;
+        DECLARE @CurrentWorkers   INT;
+        DECLARE @WaitingTasks     INT;
 
-        -- Insert the collected data into the log table
-        INSERT INTO [dbo].[tblWorkerThreadStats] (
-            [SQLEdition],
-            [SQLVersion],
-            [LogicalCPUs_OS],
-            [CPUs_Used_By_SQL],
-            [MaxWorkerThreads],
-            [CurrentWorkerThreads],
-            [DBCount]
-        )
-        VALUES (
-            @SQLEdition,
-            @SQLVersion,
-            @LogicalCPUs_OS,
-            @CPUs_Used_By_SQL,
-            @MaxWorkerThreads,
-            @current_workers_count,
-            @DBCount
-        );
-        
-        -- NEW: Purge old data based on the retention period
-        DELETE FROM [dbo].[tblWorkerThreadStats]
-        WHERE LogTimestamp < DATEADD(day, -@RetentionDays, GETDATE());
+        -- Static / slow-changing context
+        DECLARE @SchedulerCount       INT;
+        DECLARE @NumaNodeCount        INT;
+        DECLARE @PhysicalMemoryGB     DECIMAL(18,4);
+        DECLARE @SqlMemoryTargetMB    INT;
+        DECLARE @SqlMemoryCommittedMB INT;
+        DECLARE @MaxServerMemoryMB    INT;
+        DECLARE @MinServerMemoryMB    INT;
+        DECLARE @MaxDOP               INT;
+        DECLARE @CTFP                 INT;
 
-    END
-    ELSE
-    BEGIN
-        -- Output the result as a direct SELECT statement
+        -- Database count
+        SELECT @DBCount = COUNT(*) FROM sys.databases;
+
+        -- Edition/version and OS memory/CPU
         SELECT
-            @@SERVERNAME AS ServerName,
-            @SQLEdition AS SQLEdition,
-            @SQLVersion AS SQLVersion,
-            @LogicalCPUs_OS AS LogicalCPUs_OS,
-            @CPUs_Used_By_SQL AS CPUs_Used_By_SQL,
-            @DBCount AS DBCount,
-            @MaxWorkerThreads AS MaxWorkerThreads,
-            @current_workers_count AS CurrentWorkerThreads,
-            GETDATE() AS LogTimestamp;
-    END;
+            @LogicalCPUs_OS    = s.cpu_count,
+            @SQLEdition        = CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128)),
+            @SQLVersion        = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128)),
+            @SQLVersionMajor   = CAST(SERVERPROPERTY('ProductMajorVersion') AS INT),
+            @PhysicalMemoryGB  = CAST(s.physical_memory_kb / 1024.0 / 1024.0 AS DECIMAL(18,4)),
+            @SqlMemoryTargetMB = CAST(s.committed_target_kb / 1024 AS INT),
+            @SqlMemoryCommittedMB = CAST(s.committed_kb / 1024 AS INT)
+        FROM sys.dm_os_sys_info AS s;
+
+        -- CPUs actually used by SQL + scheduler count
+        SELECT
+            @CPUs_Used_By_SQL = COUNT(*),
+            @SchedulerCount   = COUNT(*)
+        FROM sys.dm_os_schedulers
+        WHERE status = 'VISIBLE ONLINE'
+          AND is_online = 1;
+
+        -- NUMA node count (exclude ONLINE DAC)
+        SELECT @NumaNodeCount = COUNT(*)
+        FROM sys.dm_os_nodes
+        WHERE node_state_desc <> N'ONLINE DAC';
+
+        -- Config view: Max/Min Server Memory, MaxDOP, Cost Threshold
+        SELECT
+            @MaxServerMemoryMB = CAST(MAX(CASE WHEN name = 'max server memory (MB)' THEN value_in_use END) AS INT),
+            @MinServerMemoryMB = CAST(MAX(CASE WHEN name = 'min server memory (MB)' THEN value_in_use END) AS INT),
+            @MaxDOP            = CAST(MAX(CASE WHEN name = 'max degree of parallelism' THEN value_in_use END) AS INT),
+            @CTFP              = CAST(MAX(CASE WHEN name = 'cost threshold for parallelism' THEN value_in_use END) AS INT)
+        FROM sys.configurations;
+
+        -- Max worker threads rule set by version
+        IF @SQLVersionMajor >= 13  -- SQL Server 2016+
+        BEGIN
+            IF @CPUs_Used_By_SQL <= 4
+                SET @MaxWorkerThreads = 512;
+            ELSE IF @CPUs_Used_By_SQL <= 64
+                SET @MaxWorkerThreads = 512 + (@CPUs_Used_By_SQL - 4) * 16;
+            ELSE
+                SET @MaxWorkerThreads = 1024 + (@CPUs_Used_By_SQL - 64) * 32;
+        END
+        ELSE  -- SQL Server 2014 / 2012 rule set
+        BEGIN
+            IF @CPUs_Used_By_SQL <= 4
+                SET @MaxWorkerThreads = 512;
+            ELSE
+                SET @MaxWorkerThreads = 512 + (@CPUs_Used_By_SQL - 4) * 16;
+        END
+
+        -- Capacity utilization (across nodes)
+        SELECT @ActiveWorker = SUM(active_worker_count)
+        FROM sys.dm_os_nodes WITH (NOLOCK)
+        WHERE node_state_desc <> N'ONLINE DAC'
+        OPTION (RECOMPILE);
+
+        -- Scheduler pool + runnable queue (across visible online schedulers)
+        SELECT
+            @CurrentWorkers = SUM(current_workers_count),
+            @WaitingTasks   = SUM(runnable_tasks_count)
+        FROM sys.dm_os_schedulers
+        WHERE status = 'VISIBLE ONLINE'
+          AND is_online = 1;
+
+        -- Write to table or buffer
+        IF @LogToTable = 1
+        BEGIN
+            INSERT INTO dbo.tblWorkerThreadStats
+            (
+                RunId, ServerName, SQLEdition, SQLVersion,
+                LogicalCPUs_OS, CPUs_Used_By_SQL, DBCount, MaxWorkerThreads,
+                ActiveWorker, CurrentWorkers, WaitingTasks,
+                SchedulerCount, NumaNodeCount, PhysicalMemoryGB,
+                SqlMemoryTargetMB, SqlMemoryCommittedMB,
+                MaxServerMemoryMB, MinServerMemoryMB, MaxDOP, CTFP,
+                LogTimestamp
+            )
+            VALUES
+            (
+                @RunId, @@SERVERNAME, @SQLEdition, @SQLVersion,
+                @LogicalCPUs_OS, @CPUs_Used_By_SQL, @DBCount, @MaxWorkerThreads,
+                @ActiveWorker, @CurrentWorkers, @WaitingTasks,
+                @SchedulerCount, @NumaNodeCount, @PhysicalMemoryGB,
+                @SqlMemoryTargetMB, @SqlMemoryCommittedMB,
+                @MaxServerMemoryMB, @MinServerMemoryMB, @MaxDOP, @CTFP,
+                GETDATE()
+            );
+        END
+        ELSE
+        BEGIN
+            INSERT INTO @Results
+            (
+                RunId, ServerName, SQLEdition, SQLVersion,
+                LogicalCPUs_OS, CPUs_Used_By_SQL, DBCount, MaxWorkerThreads,
+                ActiveWorker, CurrentWorkers, WaitingTasks,
+                SchedulerCount, NumaNodeCount, PhysicalMemoryGB,
+                SqlMemoryTargetMB, SqlMemoryCommittedMB,
+                MaxServerMemoryMB, MinServerMemoryMB, MaxDOP, CTFP,
+                LogTimestamp
+            )
+            VALUES
+            (
+                @RunId, @@SERVERNAME, @SQLEdition, @SQLVersion,
+                @LogicalCPUs_OS, @CPUs_Used_By_SQL, @DBCount, @MaxWorkerThreads,
+                @ActiveWorker, @CurrentWorkers, @WaitingTasks,
+                @SchedulerCount, @NumaNodeCount, @PhysicalMemoryGB,
+                @SqlMemoryTargetMB, @SqlMemoryCommittedMB,
+                @MaxServerMemoryMB, @MinServerMemoryMB, @MaxDOP, @CTFP,
+                GETDATE()
+            );
+        END
+
+        -- Inter-sample delay
+        IF @i < @TotalLoops AND @WaitForDelaySeconds > 0
+            WAITFOR DELAY @DelayString;
+
+        SET @i += 1;
+    END
+
+    -- Retention purge (when logging)
+    IF @LogToTable = 1 AND @RetentionDays > 0
+    BEGIN
+        DELETE FROM dbo.tblWorkerThreadStats
+        WHERE LogTimestamp < DATEADD(day, -@RetentionDays, GETDATE());
+    END
+
+    -- Return buffer when not logging
+    IF @LogToTable = 0
+    BEGIN
+        SELECT *
+        FROM @Results
+        ORDER BY LogTimestamp;
+    END
 END;
 GO
-EXEC usp_CollectWorkerThreadStats
+
+
+
+/*==============================================================================
+  VIEW: dbo.vWorkerThreadRunSummary
+  Purpose: Per-RunId aggregates (AVG / MIN / MAX) for key metrics, plus
+           static context and sampling window info.
+==============================================================================*/
+CREATE VIEW dbo.vWorkerThreadRunSummary
+AS
+SELECT
+    w.RunId,
+    w.ServerName,
+
+    -- Window bounds and sample count
+    MIN(w.LogTimestamp) AS FirstSampleTime,
+    MAX(w.LogTimestamp) AS LastSampleTime,
+    COUNT(*)            AS SampleCount,
+
+    -- Static / fingerprint context (stable values during a run)
+    MAX(w.SQLEdition)            AS SQLEdition,
+    MAX(w.SQLVersion)            AS SQLVersion,
+    MAX(w.LogicalCPUs_OS)        AS LogicalCPUs_OS,
+    MAX(w.CPUs_Used_By_SQL)      AS CPUs_Used_By_SQL,
+    MAX(w.DBCount)               AS DBCount,
+    MAX(w.MaxWorkerThreads)      AS MaxWorkerThreads,
+    MAX(w.SchedulerCount)        AS SchedulerCount,
+    MAX(w.NumaNodeCount)         AS NumaNodeCount,
+    MAX(w.PhysicalMemoryGB)      AS PhysicalMemoryGB,
+    MAX(w.SqlMemoryTargetMB)     AS SqlMemoryTargetMB,
+    MAX(w.SqlMemoryCommittedMB)  AS SqlMemoryCommittedMB,
+    MAX(w.MaxServerMemoryMB)     AS MaxServerMemoryMB,
+    MAX(w.MinServerMemoryMB)     AS MinServerMemoryMB,
+    MAX(w.MaxDOP)                AS MaxDOP,
+    MAX(w.CTFP)                  AS CTFP,
+
+    -- ActiveWorker aggregates
+    AVG(CAST(w.ActiveWorker   AS DECIMAL(18,4))) AS AvgActiveWorker,
+    MIN(w.ActiveWorker)                            AS MinActiveWorker,
+    MAX(w.ActiveWorker)                            AS MaxActiveWorker,
+
+    -- CurrentWorkers aggregates
+    AVG(CAST(w.CurrentWorkers AS DECIMAL(18,4))) AS AvgCurrentWorkers,
+    MIN(w.CurrentWorkers)                          AS MinCurrentWorkers,
+    MAX(w.CurrentWorkers)                          AS MaxCurrentWorkers,
+
+    -- WaitingTasks aggregates
+    AVG(CAST(w.WaitingTasks   AS DECIMAL(18,4))) AS AvgWaitingTasks,
+    MIN(w.WaitingTasks)                            AS MinWaitingTasks,
+    MAX(w.WaitingTasks)                            AS MaxWaitingTasks,
+
+    -- Derived signal (average pressure across the run)
+    AVG(
+        CAST(w.WaitingTasks AS FLOAT) /
+        NULLIF(CAST(w.MaxWorkerThreads AS FLOAT), 0)
+    ) AS AvgPressureRatio
+FROM dbo.tblWorkerThreadStats AS w
+GROUP BY
+    w.RunId,
+    w.ServerName;
+GO
