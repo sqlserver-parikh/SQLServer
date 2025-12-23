@@ -1,0 +1,101 @@
+SET NOCOUNT ON;
+
+DECLARE @SPID INT = 51; 
+DECLARE @Target_LSN NUMERIC(25,0);
+DECLARE @Start_LSN NUMERIC(25,0);
+DECLARE @Best_Current_LSN NUMERIC(25,0); -- The freshest non-null LSN found
+DECLARE @Prev_Best_LSN NUMERIC(25,0);
+
+DECLARE @LSN_Diff NUMERIC(25,0);
+DECLARE @Distance_Remaining NUMERIC(25,0);
+DECLARE @Speed_LSN_Per_Sec FLOAT;
+DECLARE @Seconds_Left FLOAT;
+
+DECLARE @Log_Records BIGINT;
+DECLARE @Prev_Log_Records BIGINT;
+DECLARE @Rec_Diff BIGINT;
+
+DECLARE @Status NVARCHAR(30);
+DECLARE @TimeStr VARCHAR(30);
+DECLARE @LoopCount INT;
+
+-- 1. Initialize Finish Line
+SELECT @Target_LSN = CAST(t.database_transaction_begin_lsn AS NUMERIC(25,0))
+FROM sys.dm_tran_session_transactions st
+JOIN sys.dm_tran_database_transactions t ON st.transaction_id = t.transaction_id
+WHERE st.session_id = @SPID;
+
+IF @Target_LSN IS NULL BEGIN PRINT 'Session 1744 not found.'; RETURN; END
+
+PRINT 'Monitoring Rollback (Sampling every 1s, Reporting every 60s)';
+PRINT 'Target LSN: ' + CAST(@Target_LSN AS VARCHAR(50));
+PRINT '-------------------------------------------------------------';
+
+-- 2. Get Initial Baseline
+SELECT @Prev_Best_LSN = CAST(t.database_transaction_next_undo_lsn AS NUMERIC(25,0)),
+       @Prev_Log_Records = t.database_transaction_log_record_count
+FROM sys.dm_tran_session_transactions st
+JOIN sys.dm_tran_database_transactions t ON st.transaction_id = t.transaction_id
+WHERE st.session_id = @SPID;
+
+IF @Prev_Best_LSN IS NULL SET @Prev_Best_LSN = 0;
+
+-- 3. Main Monitor Loop
+WHILE 1=1
+BEGIN
+    SET @LoopCount = 0;
+    SET @Best_Current_LSN = NULL;
+
+    -- Inner Loop: Hunt for a valid LSN for 60 seconds
+    WHILE @LoopCount < 60
+    BEGIN
+        SELECT 
+            @Log_Records = t.database_transaction_log_record_count,
+            @Status = r.status,
+            -- Capture LSN if it is not null
+            @Best_Current_LSN = COALESCE(CAST(t.database_transaction_next_undo_lsn AS NUMERIC(25,0)), @Best_Current_LSN)
+        FROM sys.dm_exec_requests r
+        JOIN sys.dm_tran_session_transactions st ON r.session_id = st.session_id
+        JOIN sys.dm_tran_database_transactions t ON st.transaction_id = t.transaction_id
+        WHERE r.session_id = @SPID;
+
+        WAITFOR DELAY '00:00:01'; -- Wait 1 second
+        SET @LoopCount = @LoopCount + 1;
+    END
+
+    -- Report Time
+    SET @TimeStr = CONVERT(VARCHAR(30), GETDATE(), 120);
+    SET @Rec_Diff = @Log_Records - @Prev_Log_Records;
+
+    -- Calculations
+    IF @Best_Current_LSN IS NOT NULL AND @Prev_Best_LSN > 0
+    BEGIN
+        SET @LSN_Diff = @Prev_Best_LSN - @Best_Current_LSN;
+        SET @Distance_Remaining = @Best_Current_LSN - @Target_LSN;
+        
+        -- Speed (LSN/sec over the last 60s)
+        SET @Speed_LSN_Per_Sec = @LSN_Diff / 60.0;
+
+        IF @Speed_LSN_Per_Sec > 0 
+            SET @Seconds_Left = @Distance_Remaining / @Speed_LSN_Per_Sec;
+        ELSE 
+            SET @Seconds_Left = 0;
+
+        DECLARE @MinsLeft INT = @Seconds_Left / 60;
+        DECLARE @DistStr VARCHAR(50) = CAST(@Distance_Remaining AS VARCHAR(50));
+
+        RAISERROR('[%s] Status: %s | Records/min: %I64d | ETA: ~%d Mins | LSN Dist: %s', 0, 1, 
+            @TimeStr, @Status, @Rec_Diff, @MinsLeft, @DistStr) WITH NOWAIT;
+            
+        -- Update Baseline only if we got a valid read
+        SET @Prev_Best_LSN = @Best_Current_LSN;
+    END
+    ELSE
+    BEGIN
+        -- Fallback if we were unlucky and got 60 straight NULLs
+        RAISERROR('[%s] Status: %s | Records/min: %I64d | LSN: Still Waiting on Disk...', 0, 1, 
+            @TimeStr, @Status, @Rec_Diff) WITH NOWAIT;
+    END
+
+    SET @Prev_Log_Records = @Log_Records;
+END
