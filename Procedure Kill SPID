@@ -5,7 +5,8 @@ CREATE OR ALTER PROCEDURE usp_KillSessions
     @TargetSpids NVARCHAR(MAX) = NULL,        -- Comma-separated SPIDs
     @TargetDatabases NVARCHAR(MAX) = NULL,    -- Comma-separated database names
     @HostNames NVARCHAR(MAX) = NULL,          -- Comma-separated host names
-    @ProgramNames NVARCHAR(MAX) = NULL,        -- Comma-separated program names
+    @ProgramNames NVARCHAR(MAX) = NULL,       -- Comma-separated program names
+    @KillRootBlockersOnly BIT = 0,            -- If 1, only kills root blockers
     @PrintOnly BIT = 0
 AS
 BEGIN
@@ -37,11 +38,16 @@ BEGIN
 
     -- Identify SPIDs to kill
     CREATE TABLE #SPIDsToKill (SPID INT);
+    
     INSERT INTO #SPIDsToKill (SPID)
-    SELECT spid
+    SELECT p.spid
     FROM sys.sysprocesses p
-    WHERE spid > 50
-      AND login_time < @ThresholdTime
+    -- Cross reference with dm_exec_sessions to ensure it's a USER process
+    INNER JOIN sys.dm_exec_sessions s ON p.spid = s.session_id
+    WHERE p.spid > 50 
+      AND p.spid <> @@SPID               -- AVOID KILLING SELF
+      AND s.is_user_process = 1          -- AVOID KILLING SYSTEM PROCESSES (Fixes Msg 6107)
+      AND p.login_time < @ThresholdTime
       AND (ISNULL(@SessionStatus, '') = '' OR p.status = @SessionStatus)
       AND (
             ISNULL(@LoginNames, '') = ''
@@ -62,6 +68,10 @@ BEGIN
       AND (
             ISNULL(@ProgramNames, '') = ''
             OR EXISTS (SELECT 1 FROM #ProgramNames pr WHERE RTRIM(p.program_name) = RTRIM(pr.ProgramName))
+          )
+      AND (
+            @KillRootBlockersOnly = 0
+            OR (p.blocked = 0 AND EXISTS (SELECT 1 FROM sys.sysprocesses p2 WHERE p2.blocked = p.spid))
           );
 
     -- Loop and kill matching SPIDs
@@ -74,9 +84,23 @@ BEGIN
     WHILE @@FETCH_STATUS = 0
     BEGIN
         SET @sql = 'KILL ' + CAST(@spid AS NVARCHAR(10));
-	IF @PrintOnly = 0
-        EXEC sp_executesql @sql;
-        PRINT @sql;
+        
+        IF @PrintOnly = 1
+        BEGIN
+            PRINT '-- [DRY RUN] ' + @sql;
+        END
+        ELSE
+        BEGIN
+            BEGIN TRY
+                EXEC sp_executesql @sql;
+                PRINT 'Success: ' + @sql;
+            END TRY
+            BEGIN CATCH
+                -- Captures errors like "process has already finished" or permissions issues
+                PRINT 'Error: Could not ' + @sql + '. Reason: ' + ERROR_MESSAGE();
+            END CATCH
+        END
+
         FETCH NEXT FROM KillCursor INTO @spid;
     END
 
@@ -91,3 +115,6 @@ BEGIN
     DROP TABLE #HostNames;
     DROP TABLE #ProgramNames;
 END;
+GO
+
+EXEC usp_KillSessions 
