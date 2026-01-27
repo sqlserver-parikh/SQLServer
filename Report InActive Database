@@ -1,153 +1,127 @@
--- Create the tblInactiveDBs table if it doesn't exist
-IF OBJECT_ID('TempDB..tblInactiveDBs', 'U') IS NULL
-BEGIN
-    CREATE TABLE TempDB..tblInactiveDBs (
-        DBName NVARCHAR(300),
-        TableCount INT,
-        LastUsed DATETIME,
-        FirstChecked DATETIME,
-        LastUpdated DATETIME,
-        DBSizeMB FLOAT -- Rename the DBSize column to DBSizeMB
-    );
-END
-
--- Create a temporary table to store table details
-CREATE TABLE #TableDetails (
-    DatabaseName NVARCHAR(128),
-    TableName NVARCHAR(128),
-    TableType NVARCHAR(50)
-);
-
--- Create a temporary table to store databases with active index operations
-CREATE TABLE #ActiveIndexOps (
-    DatabaseName NVARCHAR(128)
-);
-
--- Insert databases with active index operations into the temporary table
-INSERT INTO #ActiveIndexOps (DatabaseName)
-SELECT DISTINCT DB_NAME(database_id)
-FROM sys.dm_exec_requests
-WHERE command IN ('ALTER INDEX', 'CREATE INDEX', 'DROP INDEX');
-
-DECLARE @sql NVARCHAR(MAX) = N'';
-
--- Generate the dynamic SQL for each database
-SELECT @sql += '
-BEGIN TRY
-    USE ' + QUOTENAME(name) + ';
-    INSERT INTO #TableDetails (DatabaseName, TableName, TableType)
-    SELECT 
-        ''' + REPLACE(name, '''', '''''') + ''' AS DatabaseName,
-        OBJECT_NAME(o.object_id) AS TableName,
-        CASE 
-            WHEN t.is_ms_shipped = 1 THEN ''System Table''
-            ELSE ''User Table''
-        END AS TableType
-    FROM 
-        sys.objects AS o WITH (READPAST)
-    JOIN 
-        sys.tables AS t WITH (READPAST)
-    ON 
-        o.object_id = t.object_id
-    WHERE 
-        t.is_ms_shipped IN (0, 1); -- Include both user and system tables
-END TRY
-BEGIN CATCH
-    -- Handle the error by skipping the database
-    PRINT ''Skipping database [' + REPLACE(name, '''', '''''') + '] due to error: '' + ERROR_MESSAGE();
-END CATCH;
-'
-FROM sys.databases
-WHERE database_id > 4 
-      AND state_desc = 'ONLINE'
-      AND USER_ACCESS = 0 -- Exclude system databases
-      AND NAME NOT IN (SELECT DatabaseName FROM #ActiveIndexOps); -- Exclude databases with active index operations
-
--- Execute the dynamic SQL
-EXEC sp_executesql @sql;
-
--- Create a temporary table to store usage statistics
-SELECT 
-    DATABASE_ID,
-    OBJECT_ID,
-    MAX(
-        CASE
-            WHEN LAST_USER_SEEK IS NOT NULL AND LAST_USER_SEEK >= ISNULL(LAST_USER_SCAN, '1900-01-01') AND LAST_USER_SEEK >= ISNULL(LAST_USER_LOOKUP, '1900-01-01')
-            AND LAST_USER_SEEK >= ISNULL(LAST_USER_UPDATE, '1900-01-01') THEN LAST_USER_SEEK
-            WHEN LAST_USER_SCAN IS NOT NULL AND LAST_USER_SCAN >= ISNULL(LAST_USER_SEEK, '1900-01-01') AND LAST_USER_SCAN >= ISNULL(LAST_USER_LOOKUP, '1900-01-01')
-            AND LAST_USER_SCAN >= ISNULL(LAST_USER_UPDATE, '1900-01-01') THEN LAST_USER_SCAN
-            WHEN LAST_USER_LOOKUP IS NOT NULL AND LAST_USER_LOOKUP >= ISNULL(LAST_USER_SEEK, '1900-01-01') AND LAST_USER_LOOKUP >= ISNULL(LAST_USER_SCAN, '1900-01-01')
-            AND LAST_USER_LOOKUP >= ISNULL(LAST_USER_UPDATE, '1900-01-01') THEN LAST_USER_LOOKUP
-            ELSE LAST_USER_UPDATE
-        END
-    ) AS MAX_DATE
-INTO #UsageStats
-FROM sys.dm_db_index_usage_stats ius WITH (READPAST)
-WHERE database_id not in (select db_id(databasename) from #ActiveIndexOps)
-GROUP BY DATABASE_ID, OBJECT_ID;
-
--- Combine the results and get the required details
-SELECT DISTINCT 
-    td.DatabaseName, 
-    us.database_id,
-    MAX(us.MAX_DATE) AS MaxDate, 
-    (SELECT COUNT(TableName) FROM #TableDetails t WITH (READPAST) WHERE t.DatabaseName = td.DatabaseName) AS TableCount,
-    (SELECT SUM(size * 8.0 / 1024) FROM sys.master_files WHERE type = 0 AND database_id = DB_ID(td.DatabaseName)) AS DBSizeMB -- Calculate DB size in MB
-INTO #RESULT
-FROM #UsageStats us WITH (NOLOCK)
-RIGHT JOIN #TableDetails td WITH (NOLOCK)
-    ON us.database_id = DB_ID(td.DatabaseName)
-    AND td.TableName = OBJECT_NAME(us.object_id, us.database_id)
-WHERE td.TableType = 'User Table' AND td.DatabaseName NOT IN (SELECT DatabaseName FROM #ActiveIndexOps)
-GROUP BY us.database_id, td.DatabaseName
-ORDER BY td.DatabaseName;
-
--- Include databases with zero tables
-INSERT INTO #RESULT (DatabaseName, database_id, MaxDate, TableCount, DBSizeMB)
-SELECT name, database_id, NULL, 0, 
-       (SELECT SUM(size * 8.0 / 1024) FROM sys.master_files m WHERE type = 0 AND m.database_id = d.database_id) AS DBSizeMB -- Calculate DB size in MB
-FROM sys.databases d
-WHERE database_id > 4
-      AND state_desc = 'ONLINE'
-      AND USER_ACCESS = 0 AND NAME NOT IN (SELECT DatabaseName FROM #ActiveIndexOps)
-      AND name NOT IN (SELECT DatabaseName FROM #RESULT);
-
--- Use CTE to filter the results
-WITH cte AS (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY DatabaseName ORDER BY MaxDate DESC, DATABASE_ID DESC) AS RowNum 
-    FROM #RESULT
-)
-SELECT 
-    DatabaseName, 
-    ISNULL(database_id, DB_ID(DatabaseName)) AS DBID, 
-    MaxDate, 
-    TableCount, 
-    DBSizeMB, -- Include DBSizeMB in the final result
-    GETDATE() AS RunDate 
-INTO #FinalResult
-FROM cte 
-WHERE RowNum = 1;
-
--- Merge the results into the tblInactiveDBs table
-MERGE TempDB..tblInactiveDBs AS target
-USING #FinalResult AS source
-ON target.DBName = source.DatabaseName
-WHEN MATCHED THEN
-    UPDATE SET 
-        LastUsed = source.MaxDate,
-        TableCount = source.TableCount,
-        LastUpdated = source.RunDate,
-        FirstChecked = ISNULL(target.FirstChecked, source.RunDate),
-        DBSizeMB = source.DBSizeMB -- Update DBSizeMB
-WHEN NOT MATCHED THEN
-    INSERT (DBName, TableCount, LastUsed, FirstChecked, LastUpdated, DBSizeMB)
-    VALUES (source.DatabaseName, source.TableCount, source.MaxDate, source.RunDate, source.RunDate, source.DBSizeMB);
+USE tempdb;
 GO
--- Clean up temporary tables
-DROP TABLE #TableDetails;
-DROP TABLE #UsageStats;
-DROP TABLE #RESULT;
-DROP TABLE #FinalResult;
-DROP TABLE #ActiveIndexOps;
+CREATE OR ALTER PROCEDURE dbo.usp_TrackInactiveDatabases
+AS
+BEGIN
+    SET NOCOUNT ON;
 
-SELECT * FROM TempDB..tblInactiveDBs;
+    --------------------------------------------------------------------------------
+    -- 1. Create the permanent tracking table if it doesn't exist
+    --------------------------------------------------------------------------------
+    IF OBJECT_ID('tblInactiveDBs', 'U') IS NULL
+    BEGIN
+        CREATE TABLE tblInactiveDBs (
+            DBName NVARCHAR(300) NOT NULL PRIMARY KEY,
+            DBID INT,
+            TableCount INT,
+            LastUsed DATETIME,
+            FirstChecked DATETIME,
+            LastUpdated DATETIME,
+            DBSizeMB FLOAT,
+            SQLServerRestarted DATETIME 
+        );
+    END
+
+    --------------------------------------------------------------------------------
+    -- 2. Prepare Temp Table for current snapshot
+    --------------------------------------------------------------------------------
+    IF OBJECT_ID('tempdb..#CurrentStats') IS NOT NULL DROP TABLE #CurrentStats;
+    CREATE TABLE #CurrentStats (
+        DatabaseName NVARCHAR(128),
+        DBID INT,
+        TableCount INT DEFAULT 0,
+        LastUsed DATETIME,
+        DBSizeMB FLOAT
+    );
+
+    DECLARE @SqlServerStartTime DATETIME = (SELECT sqlserver_start_time FROM sys.dm_os_sys_info);
+
+    --------------------------------------------------------------------------------
+    -- 3. Get Index Usage Stats (Aggregated by Database)
+    -- Fixed the subquery column naming issue here
+    --------------------------------------------------------------------------------
+    ;WITH LastUsageCTE AS (
+        SELECT 
+            database_id,
+            MAX(MaxValue.MaxDate) as MaxUserAction
+        FROM sys.dm_db_index_usage_stats
+        CROSS APPLY (
+            SELECT MAX(d) AS MaxDate 
+            FROM (VALUES (last_user_seek), (last_user_scan), (last_user_lookup), (last_user_update)) AS ActionDates(d)
+        ) AS MaxValue
+        GROUP BY database_id
+    )
+    INSERT INTO #CurrentStats (DatabaseName, DBID, LastUsed, DBSizeMB)
+    SELECT 
+        d.name,
+        d.database_id,
+        lus.MaxUserAction,
+        (SELECT SUM(CAST(size AS FLOAT)) * 8 / 1024 FROM sys.master_files WHERE database_id = d.database_id AND type = 0)
+    FROM sys.databases d
+    LEFT JOIN LastUsageCTE lus ON d.database_id = lus.database_id
+    WHERE d.database_id > 4              
+      AND d.state_desc = 'ONLINE'       
+      AND d.user_access_desc = 'MULTI_USER' 
+      AND d.name NOT IN (
+          SELECT DISTINCT DB_NAME(database_id) 
+          FROM sys.dm_exec_requests 
+          WHERE command IN ('ALTER INDEX', 'CREATE INDEX', 'DROP INDEX')
+      );
+
+    --------------------------------------------------------------------------------
+    -- 4. Get User Table Counts via Dynamic SQL
+    --------------------------------------------------------------------------------
+    DECLARE @dbName NVARCHAR(128);
+    DECLARE @sql NVARCHAR(MAX);
+
+    DECLARE db_cursor CURSOR FOR SELECT DatabaseName FROM #CurrentStats;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @dbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @sql = N'
+            UPDATE #CurrentStats 
+            SET TableCount = (SELECT COUNT(*) FROM ' + QUOTENAME(@dbName) + N'.sys.tables WHERE is_ms_shipped = 0)
+            WHERE DatabaseName = @innerDBName;';
+        
+        BEGIN TRY
+            EXEC sp_executesql @sql, N'@innerDBName NVARCHAR(128)', @dbName;
+        END TRY
+        BEGIN CATCH
+            PRINT 'Skipping table count for [' + @dbName + '] - ' + ERROR_MESSAGE();
+        END CATCH
+
+        FETCH NEXT FROM db_cursor INTO @dbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+
+    --------------------------------------------------------------------------------
+    -- 5. Merge results into the permanent table
+    --------------------------------------------------------------------------------
+    MERGE tblInactiveDBs AS target
+    USING #CurrentStats AS source
+    ON target.DBName = source.DatabaseName
+    WHEN MATCHED THEN
+        UPDATE SET 
+            target.DBID = source.DBID,
+            target.LastUsed = source.LastUsed,
+            target.TableCount = source.TableCount,
+            target.LastUpdated = GETDATE(),
+            target.DBSizeMB = source.DBSizeMB,
+            target.SQLServerRestarted = @SqlServerStartTime
+    WHEN NOT MATCHED THEN
+        INSERT (DBName, DBID, TableCount, LastUsed, FirstChecked, LastUpdated, DBSizeMB, SQLServerRestarted)
+        VALUES (source.DatabaseName, source.DBID, source.TableCount, source.LastUsed, GETDATE(), GETDATE(), source.DBSizeMB, @SqlServerStartTime);
+
+    PRINT 'Inactive Database Tracking Updated successfully.';
+
+    -- Return the results
+    SELECT * FROM tblInactiveDBs ORDER BY LastUsed ASC;
+
+END
+GO
+EXEC usp_TrackInactiveDatabases
+
