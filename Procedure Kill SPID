@@ -1,80 +1,153 @@
 CREATE OR ALTER PROCEDURE usp_KillSessions
-    @SessionStatus NVARCHAR(50) = NULL,
-    @LoginThresholdMinutes INT = 60,
-    @LoginNames NVARCHAR(MAX) = NULL,         -- Comma-separated login names
-    @TargetSpids NVARCHAR(MAX) = NULL,        -- Comma-separated SPIDs
-    @TargetDatabases NVARCHAR(MAX) = NULL,    -- Comma-separated database names
-    @HostNames NVARCHAR(MAX) = NULL,          -- Comma-separated host names
-    @ProgramNames NVARCHAR(MAX) = NULL,       -- Comma-separated program names
-    @KillRootBlockersOnly BIT = 0,            -- If 1, only kills root blockers
-    @PrintOnly BIT = 0
+    @SessionStatus           NVARCHAR(50)  = 'sleeping',
+    @LoginThresholdMinutes   INT           = 7,
+    @LoginNames              NVARCHAR(MAX) = 'login1, login2',
+    @TargetSpids             NVARCHAR(MAX) = NULL,
+    @TargetDatabases         NVARCHAR(MAX) = NULL,
+    @HostNames               NVARCHAR(MAX) = NULL,
+    @ProgramNames            NVARCHAR(MAX) = NULL,
+    @KillRootBlockersOnly    BIT           = 0,
+    @PrintOnly               BIT           = 0,
+    @LogToTable              BIT           = 1,
+    @RetentionDays           INT           = 30
 AS
+/*******************************************************************************
+Description:
+    Identifies and terminates SQL Server sessions based on multiple criteria.
+    Includes persistent logging and automatic log rotation (retention).
+
+Parameters:
+    @SessionStatus:         Filter by status (e.g., 'sleeping', 'suspended').
+    @LoginThresholdMinutes: Only target sessions connected longer than this value.
+    @LoginNames:            Comma-separated list of login names.
+    @TargetSpids:           Comma-separated list of specific session IDs.
+    @TargetDatabases:       Comma-separated list of database names.
+    @HostNames:             Comma-separated list of workstation/host names.
+    @ProgramNames:          Comma-separated list of application names.
+    @KillRootBlockersOnly:  If 1, only kills the head of blocking chains.
+    @PrintOnly:             If 1, displays the KILL commands but executes nothing.
+                            NOTE: If PrintOnly is enabled, LogToTable is ignored.
+    @LogToTable:            If 1, logs killed session details to tblKillSessionLog.
+    @RetentionDays:         Days of logs to keep in tblKillSessionLog. 
+                            (Only processed if @LogToTable = 1). Default is 30.
+
+Usage Examples:
+    -- Kill all sleeping sessions in 'HR_Prod' older than 1 hour and keep 7 days of logs:
+    EXEC usp_KillSessions @SessionStatus = 'sleeping', @TargetDatabases = 'HR_Prod', 
+                          @LogToTable = 1, @RetentionDays = 7;
+
+Change Log:
+    2024-05-20 - Initial version with multi-filter support.
+    2024-05-21 - Added tblKillSessionLog auditing.
+    2024-05-22 - Added @RetentionDays parameter and cleanup logic.
+*******************************************************************************/
 BEGIN
     SET NOCOUNT ON;
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+    /* -------------------------------------------------------------------------
+       1. PARAMETER VALIDATION & LOGGING PREP
+    ------------------------------------------------------------------------- */
+    -- Dry-run safety: LogToTable is disabled if PrintOnly is requested
+    IF @PrintOnly = 1
+    BEGIN
+        SET @LogToTable = 0;
+    END
+
+    IF @LogToTable = 1 
+    BEGIN
+        -- Ensure audit table exists
+        IF OBJECT_ID('dbo.tblKillSessionLog', 'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.tblKillSessionLog (
+                LogID          INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                KillTimestamp  DATETIME          NOT NULL DEFAULT GETDATE(),
+                SPID           INT               NOT NULL,
+                LoginName      NVARCHAR(256)     NULL,
+                DBName         NVARCHAR(256)     NULL,
+                HostName       NVARCHAR(256)     NULL,
+                ProgramName    NVARCHAR(256)     NULL,
+                LoginTime      DATETIME          NULL,
+                Status         NVARCHAR(50)      NULL,
+                BlockedBy      INT               NULL,
+                WaitTime       INT               NULL,
+                LastBatch      DATETIME          NULL,
+                ExecutedBy     NVARCHAR(256)     NOT NULL DEFAULT SUSER_SNAME()
+            );
+        END
+
+        -- Perform Retention Cleanup
+        DELETE FROM dbo.tblKillSessionLog
+        WHERE KillTimestamp < DATEADD(DAY, -ABS(@RetentionDays), GETDATE());
+    END
 
     DECLARE @ThresholdTime DATETIME = DATEADD(MINUTE, -@LoginThresholdMinutes, GETDATE());
     DECLARE @spid INT, @sql NVARCHAR(MAX);
 
-    -- Normalize inputs
-    CREATE TABLE #LoginNames (LoginName NVARCHAR(256));
+    /* -------------------------------------------------------------------------
+       2. NORMALIZE CSV INPUTS
+    ------------------------------------------------------------------------- */
+    CREATE TABLE #LoginNames      (LoginName NVARCHAR(256));
+    CREATE TABLE #TargetSpids     (SPID INT);
+    CREATE TABLE #TargetDatabases (DbName NVARCHAR(256));
+    CREATE TABLE #HostNames       (HostName NVARCHAR(256));
+    CREATE TABLE #ProgramNames    (ProgramName NVARCHAR(256));
+
     IF ISNULL(@LoginNames, '') <> ''
         INSERT INTO #LoginNames SELECT TRIM(value) FROM STRING_SPLIT(@LoginNames, ',');
 
-    CREATE TABLE #TargetSpids (SPID INT);
     IF ISNULL(@TargetSpids, '') <> ''
         INSERT INTO #TargetSpids SELECT TRY_CAST(TRIM(value) AS INT) FROM STRING_SPLIT(@TargetSpids, ',');
 
-    CREATE TABLE #TargetDatabases (DbName NVARCHAR(256));
     IF ISNULL(@TargetDatabases, '') <> ''
         INSERT INTO #TargetDatabases SELECT TRIM(value) FROM STRING_SPLIT(@TargetDatabases, ',');
 
-    CREATE TABLE #HostNames (HostName NVARCHAR(256));
     IF ISNULL(@HostNames, '') <> ''
         INSERT INTO #HostNames SELECT TRIM(value) FROM STRING_SPLIT(@HostNames, ',');
 
-    CREATE TABLE #ProgramNames (ProgramName NVARCHAR(256));
     IF ISNULL(@ProgramNames, '') <> ''
         INSERT INTO #ProgramNames SELECT TRIM(value) FROM STRING_SPLIT(@ProgramNames, ',');
 
-    -- Identify SPIDs to kill
-    CREATE TABLE #SPIDsToKill (SPID INT);
+    /* -------------------------------------------------------------------------
+       3. IDENTIFY CANDIDATE SESSIONS
+    ------------------------------------------------------------------------- */
+    CREATE TABLE #SPIDsToKill (
+        SPID         INT,
+        LoginName    NVARCHAR(256),
+        DBName       NVARCHAR(256),
+        HostName     NVARCHAR(256),
+        ProgramName  NVARCHAR(256),
+        LoginTime    DATETIME,
+        Status       NVARCHAR(50),
+        BlockedBy    INT,
+        WaitTime     INT,
+        LastBatch    DATETIME
+    );
     
-    INSERT INTO #SPIDsToKill (SPID)
-    SELECT p.spid
+    INSERT INTO #SPIDsToKill 
+    SELECT 
+        p.spid, p.loginame, DB_NAME(p.dbid), p.hostname, p.program_name, 
+        p.login_time, p.status, p.blocked, p.waittime, p.last_batch
     FROM sys.sysprocesses p
-    -- Cross reference with dm_exec_sessions to ensure it's a USER process
     INNER JOIN sys.dm_exec_sessions s ON p.spid = s.session_id
     WHERE p.spid > 50 
-      AND p.spid <> @@SPID               -- AVOID KILLING SELF
-      AND s.is_user_process = 1          -- AVOID KILLING SYSTEM PROCESSES (Fixes Msg 6107)
+      AND p.spid <> @@SPID                 
+      AND s.is_user_process = 1            
       AND p.login_time < @ThresholdTime
       AND (ISNULL(@SessionStatus, '') = '' OR p.status = @SessionStatus)
+      AND (ISNULL(@LoginNames, '') = ''    OR EXISTS (SELECT 1 FROM #LoginNames l WHERE RTRIM(p.loginame) = RTRIM(l.LoginName)))
+      AND (ISNULL(@TargetSpids, '') = ''   OR EXISTS (SELECT 1 FROM #TargetSpids s WHERE s.SPID = p.spid))
+      AND (ISNULL(@TargetDatabases, '') = '' OR EXISTS (SELECT 1 FROM #TargetDatabases d WHERE DB_NAME(p.dbid) = d.DbName))
+      AND (ISNULL(@HostNames, '') = ''     OR EXISTS (SELECT 1 FROM #HostNames h WHERE RTRIM(p.hostname) = RTRIM(h.HostName)))
+      AND (ISNULL(@ProgramNames, '') = ''  OR EXISTS (SELECT 1 FROM #ProgramNames pr WHERE RTRIM(p.program_name) = RTRIM(pr.ProgramName)))
       AND (
-            ISNULL(@LoginNames, '') = ''
-            OR EXISTS (SELECT 1 FROM #LoginNames l WHERE RTRIM(p.loginame) = RTRIM(l.LoginName))
-          )
-      AND (
-            ISNULL(@TargetSpids, '') = ''
-            OR EXISTS (SELECT 1 FROM #TargetSpids s WHERE s.SPID = p.spid)
-          )
-      AND (
-            ISNULL(@TargetDatabases, '') = ''
-            OR EXISTS (SELECT 1 FROM #TargetDatabases d WHERE DB_NAME(p.dbid) = d.DbName)
-          )
-      AND (
-            ISNULL(@HostNames, '') = ''
-            OR EXISTS (SELECT 1 FROM #HostNames h WHERE RTRIM(p.hostname) = RTRIM(h.HostName))
-          )
-      AND (
-            ISNULL(@ProgramNames, '') = ''
-            OR EXISTS (SELECT 1 FROM #ProgramNames pr WHERE RTRIM(p.program_name) = RTRIM(pr.ProgramName))
-          )
-      AND (
-            @KillRootBlockersOnly = 0
+            @KillRootBlockersOnly = 0 
             OR (p.blocked = 0 AND EXISTS (SELECT 1 FROM sys.sysprocesses p2 WHERE p2.blocked = p.spid))
           );
 
-    -- Loop and kill matching SPIDs
+    /* -------------------------------------------------------------------------
+       4. LOOP AND TERMINATE
+    ------------------------------------------------------------------------- */
     DECLARE KillCursor CURSOR LOCAL FAST_FORWARD FOR
     SELECT SPID FROM #SPIDsToKill;
 
@@ -94,10 +167,23 @@ BEGIN
             BEGIN TRY
                 EXEC sp_executesql @sql;
                 PRINT 'Success: ' + @sql;
+
+                -- Record the activity if logging is enabled
+                IF @LogToTable = 1
+                BEGIN
+                    INSERT INTO dbo.tblKillSessionLog (
+                        SPID, LoginName, DBName, HostName, ProgramName, 
+                        LoginTime, Status, BlockedBy, WaitTime, LastBatch
+                    )
+                    SELECT 
+                        SPID, LoginName, DBName, HostName, ProgramName, 
+                        LoginTime, Status, BlockedBy, WaitTime, LastBatch
+                    FROM #SPIDsToKill
+                    WHERE SPID = @spid;
+                END
             END TRY
             BEGIN CATCH
-                -- Captures errors like "process has already finished" or permissions issues
-                PRINT 'Error: Could not ' + @sql + '. Reason: ' + ERROR_MESSAGE();
+                PRINT 'Error: Execution of ' + @sql + ' failed. Reason: ' + ERROR_MESSAGE();
             END CATCH
         END
 
@@ -107,14 +193,15 @@ BEGIN
     CLOSE KillCursor;
     DEALLOCATE KillCursor;
 
-    -- Cleanup
+    /* -------------------------------------------------------------------------
+       5. CLEANUP
+    ------------------------------------------------------------------------- */
     DROP TABLE #SPIDsToKill;
     DROP TABLE #LoginNames;
     DROP TABLE #TargetSpids;
     DROP TABLE #TargetDatabases;
     DROP TABLE #HostNames;
     DROP TABLE #ProgramNames;
+
 END;
 GO
-
-EXEC usp_KillSessions 
