@@ -1,84 +1,194 @@
 USE tempdb
 GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
 CREATE OR ALTER PROCEDURE dbo.usp_GrantAccess
-    @UserName NVARCHAR(128) = 'domain\username',
-    @Print BIT = 1,
-    @Execute BIT = 0,
-    @Password NVARCHAR(128) = NULL OUTPUT,
-    @IsPasswordHashed BIT = 0,
-    @SID VARBINARY(85) = NULL,
-    @DBNames NVARCHAR(MAX) = '', 
-    @ExcludeDBs NVARCHAR(MAX) = NULL,
-    @IncludeSystemDBs BIT = 0,
-    @Schema NVARCHAR(128) = NULL,
-    @GrantRead BIT = 1,
-    @GrantWrite BIT = 0,
-    @GrantExecute BIT = 1,
-    @GrantViewDefinition BIT = 0,
-    @GrantViewServerState BIT = 0,
-    @CustomRoles NVARCHAR(MAX) = 'db_ddladmin'
+    @UserName               NVARCHAR(128) = 'testinggggg',
+    @Print                  BIT           = 1,
+    @Execute                BIT           = 0,
+    @Password               NVARCHAR(128) = NULL OUTPUT,
+    @IsPasswordHashed       BIT           = 0,
+    @SID                    VARBINARY(85) = NULL,
+    @DBNames                NVARCHAR(MAX) = '', 
+    @ExcludeDBs             NVARCHAR(MAX) = NULL,
+    @IncludeSystemDBs       BIT           = 0,
+    @Schema                 NVARCHAR(128) = NULL,
+    @GrantRead              BIT           = 1,
+    @GrantWrite             BIT           = 0,
+    @GrantExecute           BIT           = 1,
+    @GrantViewDefinition    BIT           = 0,
+    @GrantViewServerState   BIT           = 0,
+    @CustomRoles            NVARCHAR(MAX) = NULL
 AS
+/*******************************************************************************
+Name: usp_GrantAccess
+--------------------------------------------------------------------------------
+Description:
+    A high-level utility to automate the creation of logins and users across 
+    one or many databases. This procedure handles the "Heavy Lifting" of security:
+    - Automatically detects if a name is an AD Account or SQL Login.
+    - Resolves SID mismatches (AD Renames).
+    - Generates cryptographically secure passwords for SQL Logins.
+    - Intelligently separates Server-Level roles from Database-Level roles.
+    - Supports Schema-level permission containment.
+
+Parameters:
+    @UserName            (Req) Target login name. Supports 'DOMAIN\User' or 'SqlLogin'.
+    @Print               (Opt) 1 = Print generated T-SQL. Default = 1.
+    @Execute             (Opt) 1 = Execute generated T-SQL. Default = 0.
+    @Password            (Out) If SQL Login, this returns the generated password.
+    @IsPasswordHashed    (Opt) Set to 1 if passing a pre-hashed string in @Password.
+    @SID                 (Opt) Pass a specific SID (useful for keeping logins in 
+                               sync across Availability Group replicas).
+    @DBNames             (Opt) Comma-separated list of DBs. Empty string = ALL user DBs.
+    @ExcludeDBs          (Opt) Comma-separated list of DBs to skip.
+    @IncludeSystemDBs    (Opt) 1 = Include master, model, msdb. Default = 0.
+    @Schema              (Opt) If provided, grants are restricted to this schema 
+                               only (e.g., granting SELECT on 'Sales' schema).
+    @GrantRead           (Opt) Adds db_datareader (or SELECT on @Schema).
+    @GrantWrite          (Opt) Adds db_datawriter (or INSERT/UPDATE/DELETE on @Schema).
+    @GrantExecute        (Opt) Grants EXECUTE permissions.
+    @GrantViewDefinition (Opt) Grants VIEW DEFINITION permissions.
+    @GrantViewServerState(Opt) Grants VIEW SERVER STATE (Server-Level grant).
+    @CustomRoles         (Opt) Comma-separated roles (e.g., 'sysadmin, db_owner').
+                               Handles NULL/Empty values without error.
+
+Examples:
+    -- 1. Dry run for AD User: Standard Read/Execute on all user databases
+    EXEC dbo.usp_GrantAccess @UserName = 'CORP\JDoe';
+
+    -- 2. Create SQL Login with db_owner on specific DBs and get the password
+    DECLARE @NewPass NVARCHAR(128);
+    EXEC dbo.usp_GrantAccess 
+        @UserName = 'AppServiceUser', 
+        @DBNames = 'Orders,Inventory', 
+        @CustomRoles = 'db_owner', 
+        @Execute = 1, 
+        @Password = @NewPass OUTPUT;
+    SELECT @NewPass AS GeneratedPassword;
+
+    -- 3. Grant schema-specific developer access to one database
+    EXEC dbo.usp_GrantAccess 
+        @UserName = 'CORP\DevUser', 
+        @DBNames = 'HR_System', 
+        @Schema = 'Staging',
+        @GrantWrite = 1,
+        @Execute = 1;
+
+--------------------------------------------------------------------------------
+Internal Logic Flow:
+    Phase 0: Generate a secure password if needed (guarantees complexity).
+    Phase 1: Parse @CustomRoles into a temporary table and identify role type.
+    Phase 2: Perform Server-Level tasks (Create Login, Server Roles).
+    Phase 3: Loop through Databases to create Users and apply permissions.
+*******************************************************************************/
 BEGIN
     SET NOCOUNT ON;
-    -- Fix for XML/Filtered Index errors
-    SET ANSI_NULLS ON; SET ANSI_WARNINGS ON; SET QUOTED_IDENTIFIER ON;
+    
+    -- Basic Validation
+    IF @UserName IS NULL
+    BEGIN
+        RAISERROR('The parameter @UserName is required.', 16, 1);
+        RETURN;
+    END
 
     DECLARE @Results TABLE (DBName SYSNAME, Status NVARCHAR(20), Message NVARCHAR(MAX));
     DECLARE @SQL NVARCHAR(MAX);
     DECLARE @IsSqlLogin BIT = IIF(CHARINDEX('\', @UserName) = 0, 1, 0);
-    DECLARE @ExistingName SYSNAME;
-    DECLARE @ResolvedSID VARBINARY(85) = @SID;
 
     --------------------------------------------------------------------------------
-    -- 1. SERVER LEVEL: IDENTITY RESOLUTION (AD Name Change)
+    -- PHASE 0: SECURE PASSWORD GENERATION
+    -- Creates a high-entropy string including Upper, Lower, Numbers, and Symbols.
+    -- This ensures SQL Server "Check Policy" requirements are met.
+    --------------------------------------------------------------------------------
+    IF @IsSqlLogin = 1 AND ISNULL(@Password, '') = ''
+    BEGIN
+        DECLARE @Upper  VARCHAR(26) = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        DECLARE @Lower  VARCHAR(26) = 'abcdefghijklmnopqrstuvwxyz';
+        DECLARE @Num    VARCHAR(10) = '0123456789';
+        DECLARE @Sym    VARCHAR(10) = '!@#$%^&*()';
+        DECLARE @Pool   VARCHAR(100)= @Upper + @Lower + @Num + @Sym;
+        
+        ;WITH RandChars AS (
+            -- Guarantee one of each complexity type
+            SELECT SUBSTRING(@Upper, (ABS(CHECKSUM(CRYPT_GEN_RANDOM(4))) % 26) + 1, 1) as c 
+            UNION ALL SELECT SUBSTRING(@Lower, (ABS(CHECKSUM(CRYPT_GEN_RANDOM(4))) % 26) + 1, 1)
+            UNION ALL SELECT SUBSTRING(@Num, (ABS(CHECKSUM(CRYPT_GEN_RANDOM(4))) % 10) + 1, 1)
+            UNION ALL SELECT SUBSTRING(@Sym, (ABS(CHECKSUM(CRYPT_GEN_RANDOM(4))) % 10) + 1, 1)
+            UNION ALL
+            -- Add 12 more random chars from the full pool
+            SELECT TOP 12 SUBSTRING(@Pool, (ABS(CHECKSUM(CRYPT_GEN_RANDOM(4))) % LEN(@Pool)) + 1, 1)
+            FROM sys.all_columns
+        )
+        -- Shred into a single string in random order
+        SELECT @Password = (SELECT c + '' FROM RandChars ORDER BY NEWID() FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)');
+    END
+
+    --------------------------------------------------------------------------------
+    -- PHASE 1: ROLE NORMALIZATION
+    -- Handles NULL, empty strings, and trailing commas.
+    -- Determines if the role is a 'Server Role' (like sysadmin) or a 'DB Role'.
+    --------------------------------------------------------------------------------
+    DECLARE @CleanRoles TABLE (RoleName SYSNAME, IsServerRole BIT);
+    INSERT INTO @CleanRoles (RoleName, IsServerRole)
+    SELECT 
+        LTRIM(RTRIM(value)),
+        IIF(EXISTS(SELECT 1 FROM sys.server_principals WHERE name = LTRIM(RTRIM(value)) AND type = 'R'), 1, 0)
+    FROM STRING_SPLIT(ISNULL(@CustomRoles, ''), ',')
+    WHERE LTRIM(RTRIM(value)) <> ''; -- Filter out empty strings
+
+    --------------------------------------------------------------------------------
+    -- PHASE 2: SERVER LEVEL OPERATIONS
+    -- Checks for AD account renames, creates the login, and assigns Server Roles.
     --------------------------------------------------------------------------------
     BEGIN TRY
+        -- 2a. Identity Resolution (AD Rename Check)
         IF @IsSqlLogin = 0
         BEGIN
-            SET @ResolvedSID = SUSER_SID(@UserName);
+            DECLARE @ResolvedSID VARBINARY(85) = SUSER_SID(@UserName);
+            DECLARE @ExistingName SYSNAME;
             SELECT @ExistingName = [name] FROM sys.server_principals WHERE [sid] = @ResolvedSID;
 
             IF @ExistingName IS NOT NULL AND @ExistingName <> @UserName
             BEGIN
                 SET @SQL = N'ALTER LOGIN ' + QUOTENAME(@ExistingName) + N' WITH NAME = ' + QUOTENAME(@UserName) + N';';
-                IF @Print = 1 PRINT '-- INFO: AD Rename detected. Mapping SID ' + CONVERT(NVARCHAR(100), @ResolvedSID, 1) + ' to new name.' + CHAR(10) + @SQL + CHAR(10);
+                IF @Print = 1 PRINT '-- INFO: Renaming existing login to match AD: ' + @ExistingName + ' -> ' + @UserName + CHAR(10) + @SQL;
                 IF @Execute = 1 EXEC sp_executesql @SQL;
             END
         END
 
+        -- 2b. Create Login
         IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @UserName)
         BEGIN
             IF @IsSqlLogin = 1
-            BEGIN
-                IF ISNULL(@Password, '') = '' SET @Password = REPLACE(CAST(NEWID() AS NVARCHAR(36)), '-', '') + 'A1!a';
                 SET @SQL = N'CREATE LOGIN ' + QUOTENAME(@UserName) + N' WITH PASSWORD = ' +
                     IIF(@IsPasswordHashed = 1, @Password + N' HASHED', N'''' + REPLACE(@Password, '''', '''''') + N'''') + 
-                    ISNULL(N', SID = ' + CONVERT(NVARCHAR(100), @SID, 1), N'') + N', CHECK_POLICY = OFF;';
-            END
+                    ISNULL(N', SID = ' + CONVERT(NVARCHAR(100), @SID, 1), N'') + N', CHECK_POLICY = ON;';
             ELSE
-            BEGIN
                 SET @SQL = N'CREATE LOGIN ' + QUOTENAME(@UserName) + N' FROM WINDOWS;';
-            END
-            IF @Print = 1 PRINT @SQL;
+            
+            IF @Print = 1 PRINT '-- LOGIN CREATION' + CHAR(10) + @SQL;
             IF @Execute = 1 EXEC sp_executesql @SQL;
         END
 
-        -- SERVER ROLES
-        DECLARE @RoleName NVARCHAR(128);
-        DECLARE curR CURSOR LOCAL FAST_FORWARD FOR SELECT LTRIM(RTRIM(value)) FROM STRING_SPLIT(@CustomRoles, ',');
-        OPEN curR; FETCH NEXT FROM curR INTO @RoleName;
+        -- 2c. Assign Server-Level Roles
+        DECLARE @SRole SYSNAME;
+        DECLARE curSR CURSOR LOCAL FAST_FORWARD FOR SELECT RoleName FROM @CleanRoles WHERE IsServerRole = 1;
+        OPEN curSR; FETCH NEXT FROM curSR INTO @SRole;
         WHILE @@FETCH_STATUS = 0
         BEGIN
-            IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @RoleName AND type = 'R')
-            BEGIN
-                SET @SQL = N'ALTER SERVER ROLE ' + QUOTENAME(@RoleName) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N';';
-                IF @Print = 1 PRINT @SQL;
-                IF @Execute = 1 EXEC sp_executesql @SQL;
-            END
-            FETCH NEXT FROM curR INTO @RoleName;
+            SET @SQL = N'ALTER SERVER ROLE ' + QUOTENAME(@SRole) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N';';
+            IF @Print = 1 PRINT @SQL;
+            IF @Execute = 1 EXEC sp_executesql @SQL;
+            FETCH NEXT FROM curSR INTO @SRole;
         END
-        CLOSE curR; DEALLOCATE curR;
+        CLOSE curSR; DEALLOCATE curSR;
 
+        -- 2d. Grant View Server State
         IF @GrantViewServerState = 1
         BEGIN
             SET @SQL = N'GRANT VIEW SERVER STATE TO ' + QUOTENAME(@UserName) + N';';
@@ -91,12 +201,14 @@ BEGIN
     END CATCH
 
     --------------------------------------------------------------------------------
-    -- 2. DATABASE LEVEL: USER & ROLE ASSIGNMENT
+    -- PHASE 3: DATABASE LEVEL OPERATIONS
+    -- Iterates through selected databases to create users and assign permissions.
     --------------------------------------------------------------------------------
     DECLARE @DBName SYSNAME;
     DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
         SELECT name FROM sys.databases
-        WHERE state_desc = 'ONLINE'
+        WHERE state_desc = 'ONLINE' 
+          AND user_access_desc = 'MULTI_USER'
           AND (@DBNames = '' OR name IN (SELECT LTRIM(RTRIM(value)) FROM STRING_SPLIT(@DBNames, ',')))
           AND (@ExcludeDBs IS NULL OR name NOT IN (SELECT LTRIM(RTRIM(value)) FROM STRING_SPLIT(@ExcludeDBs, ',')))
           AND (@IncludeSystemDBs = 1 OR (is_distributor = 0 AND name NOT IN ('master', 'model', 'msdb', 'tempdb')));
@@ -107,49 +219,43 @@ BEGIN
     WHILE @@FETCH_STATUS = 0
     BEGIN
         BEGIN TRY
+            -- Skip READ_ONLY databases (common in AG Secondaries)
             IF DATABASEPROPERTYEX(@DBName, 'Updateability') = 'READ_ONLY'
-                THROW 50001, 'Database is READ_ONLY.', 1;
+                THROW 50001, 'Database is READ_ONLY. Skipping.', 1;
 
-            -- 2a. User Creation
+            -- 3a. User Creation / Mapping
             SET @SQL = N'USE ' + QUOTENAME(@DBName) + N';' + CHAR(10) +
                        N'IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ' + QUOTENAME(@UserName, '''') + N')' + CHAR(10) +
                        N'    CREATE USER ' + QUOTENAME(@UserName) + N' FOR LOGIN ' + QUOTENAME(@UserName) + N';' + CHAR(10) +
                        N'ELSE ALTER USER ' + QUOTENAME(@UserName) + N' WITH LOGIN = ' + QUOTENAME(@UserName) + N';' + CHAR(10);
 
-            -- 2b. Standard Permissions (Schema aware)
+            -- 3b. Standard Permissions (Schema-Aware)
             IF @GrantRead = 1
-                SET @SQL += IIF(@Schema IS NULL, N'ALTER ROLE db_datareader ADD MEMBER ' + QUOTENAME(@UserName) + N';' + CHAR(10), 
-                            N'IF EXISTS (SELECT 1 FROM sys.schemas WHERE name = ' + QUOTENAME(@Schema, '''') + N') GRANT SELECT ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';' + CHAR(10));
+                SET @SQL += IIF(@Schema IS NULL, N'ALTER ROLE db_datareader ADD MEMBER ' + QUOTENAME(@UserName) + N';', 
+                            N'GRANT SELECT ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';') + CHAR(10);
             IF @GrantWrite = 1
-                SET @SQL += IIF(@Schema IS NULL, N'ALTER ROLE db_datawriter ADD MEMBER ' + QUOTENAME(@UserName) + N';' + CHAR(10), 
-                            N'IF EXISTS (SELECT 1 FROM sys.schemas WHERE name = ' + QUOTENAME(@Schema, '''') + N') GRANT INSERT, UPDATE, DELETE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';' + CHAR(10));
+                SET @SQL += IIF(@Schema IS NULL, N'ALTER ROLE db_datawriter ADD MEMBER ' + QUOTENAME(@UserName) + N';', 
+                            N'GRANT INSERT, UPDATE, DELETE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';') + CHAR(10);
             IF @GrantExecute = 1
-                SET @SQL += IIF(@Schema IS NULL, N'GRANT EXECUTE TO ' + QUOTENAME(@UserName) + N';' + CHAR(10), 
-                            N'IF EXISTS (SELECT 1 FROM sys.schemas WHERE name = ' + QUOTENAME(@Schema, '''') + N') GRANT EXECUTE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';' + CHAR(10));
+                SET @SQL += IIF(@Schema IS NULL, N'GRANT EXECUTE TO ' + QUOTENAME(@UserName) + N';', 
+                            N'GRANT EXECUTE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ' + QUOTENAME(@UserName) + N';') + CHAR(10);
+            IF @GrantViewDefinition = 1
+                SET @SQL += N'GRANT VIEW DEFINITION TO ' + QUOTENAME(@UserName) + N';' + CHAR(10);
 
-            -- 2c. Custom DB Roles (Built outside the dynamic string to avoid syntax errors)
-            DECLARE @DBRoleName NVARCHAR(128);
-            DECLARE curDBR CURSOR LOCAL FAST_FORWARD FOR SELECT LTRIM(RTRIM(value)) FROM STRING_SPLIT(@CustomRoles, ',');
-            OPEN curDBR; FETCH NEXT FROM curDBR INTO @DBRoleName;
-            WHILE @@FETCH_STATUS = 0
-            BEGIN
-                -- Build the check: only if it's a DB Role and NOT a Server Role
-                SET @SQL += N'IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ' + QUOTENAME(@DBRoleName, '''') + N' AND type = ''R'') ' +
-                            N'AND NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = ' + QUOTENAME(@DBRoleName, '''') + N' AND type = ''R'') ' +
-                            N'BEGIN ALTER ROLE ' + QUOTENAME(@DBRoleName) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N'; END' + CHAR(10);
-                FETCH NEXT FROM curDBR INTO @DBRoleName;
-            END
-            CLOSE curDBR; DEALLOCATE curDBR;
+            -- 3c. Custom Database Roles
+            -- Only applies roles if they exist in the current database.
+            DECLARE @DBRoleSQL NVARCHAR(MAX) = '';
+            SELECT @DBRoleSQL += 
+                N'IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ' + QUOTENAME(RoleName, '''') + N' AND type = ''R'') ' +
+                N'ALTER ROLE ' + QUOTENAME(RoleName) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N';' + CHAR(10)
+            FROM @CleanRoles WHERE IsServerRole = 0;
 
-            IF @Print = 1 
-            BEGIN
-                PRINT '-- START DB: ' + @DBName;
-                PRINT @SQL;
-                PRINT '-- END DB: ' + @DBName + CHAR(10);
-            END
+            SET @SQL += @DBRoleSQL;
 
+            IF @Print = 1 PRINT '-- PERMISSIONS FOR: ' + @DBName + CHAR(10) + @SQL;
             IF @Execute = 1 EXEC sp_executesql @SQL;
-            INSERT INTO @Results (DBName, Status, Message) VALUES (@DBName, 'SUCCESS', 'Applied');
+            
+            INSERT INTO @Results (DBName, Status, Message) VALUES (@DBName, 'SUCCESS', 'Permissions Applied');
         END TRY
         BEGIN CATCH
             INSERT INTO @Results (DBName, Status, Message) VALUES (@DBName, 'FAILED', ERROR_MESSAGE());
@@ -160,13 +266,8 @@ BEGIN
 
     CLOSE db_cursor; DEALLOCATE db_cursor;
 
-    --------------------------------------------------------------------------------
-    -- 3. FINAL SUMMARY
-    --------------------------------------------------------------------------------
-    PRINT '--==================================================';
-    PRINT '--FINAL EXECUTION SUMMARY';
-    PRINT '--==================================================';
+    -- Final Report
+    IF @Print = 1 PRINT '-- GENERATED PASSWORD: ' + ISNULL(@Password, 'N/A');
     SELECT * FROM @Results;
 END
 GO
-usp_GrantAccess
