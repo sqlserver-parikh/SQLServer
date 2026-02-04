@@ -54,6 +54,105 @@ CREATE  PROCEDURE dbo.usp_RunDatabaseIntegrityCheck
     , @DatabaseOrder            NVARCHAR(128)   = 'DATABASE_SIZE_ASC' -- Specify the database order (e.g., 'DATABASE_NAME_ASC', 'DATABASE_SIZE_DESC') -- If single database is taking 80% of total CHECKDB run time on server then that database will be always first.
 AS
 BEGIN
+
+/*
+PARAMETERS
+----------------------------------------------------------------------------------------------------
+@MinCheckDBDays
+Data Type: INT
+Default: 7
+Description: The minimum number of days since the last successful integrity check before a database is considered "due."
+Usage: If set to 7, the script will skip any database that has had a successful CHECKDB within the last week.
+
+@mediumDBMinSizeInGB
+Data Type: INT
+Default: 200
+Description: The size threshold (in GB) at which a database is categorized as Medium.
+Behavior: Databases between this size and @LargeDBMinSizeInGB will run with @NoIndex = 'Y'. This speeds up the check by skipping non-clustered index validation while still checking data integrity.
+
+@LargeDBMinSizeInGB
+Data Type: INT
+Default: 2048 (2 TB)
+Description: The size threshold (in GB) at which a database is categorized as Large.
+Behavior: Databases exceeding this size will run with @PhysicalOnly = 'Y' and @NoIndex = 'Y'. This is the "fast path" for very large databases, checking only physical consistency and page headers.
+
+@Execute
+Data Type: NVARCHAR(MAX)
+Default: 'Y'
+Valid Values: 'Y', 'N'
+Description: Determines whether the script actually executes the DBCC CHECKDB commands.
+Usage: Set to 'N' to perform a "Dry Run." The script will output the plan and the databases it would have processed without actually running them.
+
+@CPUThreshold
+Data Type: INT
+Default: 40
+Description: The maximum average CPU utilization percentage allowed for the script to start or continue.
+Usage: If the system CPU is higher than this value, the script will wait (based on @WaitForMin) or abort, preventing the integrity check from starving production workloads.
+
+@CPUCheckBackTime
+Data Type: INT
+Default: 15
+Description: The number of minutes of historical CPU data to evaluate when calculating the average CPU load.
+Valid Range: 1 to 180 minutes.
+
+@CPUCheckMtoS
+Data Type: NVARCHAR(MAX)
+Default: 'Y,Y,Y,Y,Y,N,Y'
+Description: A comma-separated list representing Monday through Sunday. Determines whether CPU throttling is enabled for that specific day.
+Usage: In the default 'Y,Y,Y,Y,Y,N,Y', CPU checking is disabled on Saturday (the 6th position), allowing the check to run regardless of load during a presumed weekend maintenance window.
+
+@RunTimeMtoS
+Data Type: NVARCHAR(MAX)
+Default: NULL
+Description: A comma-separated list representing the maximum minutes the job is allowed to run for each day (Monday–Sunday).
+Limit: Maximum 720 minutes (12 hours) per day.
+Usage: If set to '60,60,60,60,60,240,60', the script will strictly stop processing new databases after 60 minutes on weekdays and 240 minutes on Saturday.
+
+@WaitForMin
+Data Type: INT
+Default: 10
+Description: The amount of time (in minutes) the script will pause before re-checking the CPU if the @CPUThreshold is exceeded.
+
+@RetryCPUCheck
+Data Type: INT
+Default: 5
+Description: The number of times the script will attempt to wait for the CPU to drop before giving up and terminating the job for the day.
+
+@SplitGroups
+Data Type: INT
+Default: 7
+Description: Only used if @RunTimeMtoS is NULL. It automatically calculates a time window by taking the total historical runtime of all databases and dividing it by this number.
+Usage: If total CHECKDB time is 700 minutes and @SplitGroups is 7, the script will automatically set a 100-minute daily limit to ensure the full cycle completes over 7 days.
+
+@DatabaseOrder
+Data Type: NVARCHAR(128)
+Default: 'DATABASE_SIZE_ASC'
+Valid Values:
+    - DATABASE_LAST_GOOD_CHECK_ASC: Oldest checks first (Default logic).
+    - DATABASE_LAST_GOOD_CHECK_DESC: Most recently checked first.
+    - DATABASE_NAME_ASC / DATABASE_NAME_DESC: Alphabetical order.
+    - DATABASE_SIZE_ASC / DATABASE_SIZE_DESC: Order by data volume.
+    - DATABASE_RUNTIME_DESC: Order by longest historical execution time.
+Note: If a single database's historical runtime exceeds 80% of the available daily window, it is automatically moved to the front of the queue to ensure it gets started immediately.
+
+----------------------------------------------------------------------------------------------------
+EXAMPLES
+----------------------------------------------------------------------------------------------------
+Example A: Standard Weekly Cycle
+Run with default settings (7-day cycle, CPU throttling enabled, auto-calculating 7 equal groups).
+    EXEC dbo.usp_RunDatabaseIntegrityCheck;
+
+Example B: Strict 2-Hour Maintenance Window
+Run for exactly 120 minutes every night, skipping CPU checks on Sundays.
+    EXEC dbo.usp_RunDatabaseIntegrityCheck
+        @RunTimeMtoS = '120,120,120,120,120,120,120',
+        @CPUCheckMtoS = 'Y,Y,Y,Y,Y,Y,N';
+
+Example C: Dry Run / Preview Plan
+Preview which databases are due and the order they will run without executing.
+    EXEC dbo.usp_RunDatabaseIntegrityCheck @Execute = 'N';
+----------------------------------------------------------------------------------------------------
+*/
     SET NOCOUNT ON;
     SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; -- For reading system views
 
