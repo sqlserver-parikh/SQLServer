@@ -454,7 +454,7 @@ IF @RunTimeMtoS IS NULL
     WHERE d.state_desc = 'ONLINE'
       AND d.user_access_desc IN ('MULTI_USER', 'SINGLE_USER')
       AND d.is_read_only = 0
-      AND d.name NOT IN ('master','tempdb','model','msdb') -- Exclude system databases that typically don't need CHECKDB
+      AND d.name NOT IN ('tempdb') -- Exclude system databases that typically don't need CHECKDB
     ;
     PRINT 'Step 1: Identified last good CHECKDB times for user databases.';
 
@@ -473,7 +473,7 @@ IF @RunTimeMtoS IS NULL
         CAST(SUM(CAST(mf.size AS BIGINT)) * 8.0 / 1024 AS DECIMAL(18,2)) AS TotalSizeMB -- Convert pages to MB
     FROM sys.databases AS d WITH (NOLOCK)
     JOIN sys.master_files AS mf WITH (NOLOCK) ON d.database_id = mf.database_id
-    WHERE d.name NOT IN ('master','model','msdb','tempdb')
+    WHERE d.name NOT IN ('tempdb')
       AND d.state_desc = 'ONLINE'
       AND d.user_access_desc IN ('MULTI_USER', 'SINGLE_USER')
       AND d.is_read_only = 0
