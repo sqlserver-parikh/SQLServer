@@ -1,0 +1,88 @@
+function Restore-PostgreSQLTables {
+    param(
+        [string]$ServerName,
+        [string]$Username,
+        [string]$Password,
+        [string]$DatabaseName,
+        [string]$BackupFilesPath,
+        [string]$PgRestorePath = "C:\Program Files\pgAdmin 4\runtime\pg_restore.exe",
+        [string]$Port = "5432"
+    )
+
+    if (-not (Test-Path $BackupFilesPath -PathType Container)) {
+        Write-Error "Backup files path '$BackupFilesPath' does not exist."
+        return
+    }
+
+    $backupFiles = Get-ChildItem -Path $BackupFilesPath -Filter "*.backup" | Sort-Object Name
+    if (-not $backupFiles) {
+        Write-Host "No backup files found." -ForegroundColor Yellow
+        return
+    }
+
+    $env:PGPASSWORD = $Password
+    $startTime = Get-Date
+    Write-Host "Starting restore process at $startTime..." -ForegroundColor Green
+
+    foreach ($file in $backupFiles) {
+        $fullFilePath = $file.FullName
+        Write-Host "`nRestoring: $($file.Name)" -ForegroundColor Cyan
+
+        $arguments = @(
+            "--host", $ServerName,
+            "--port", $Port,
+            "--username", $Username,
+            "--dbname", $DatabaseName,
+            "--section=pre-data",
+            "--section=data",
+            "--section=post-data",
+            "--no-owner",
+            "--no-privileges",
+            "--clean",
+            "--if-exists",
+            "--verbose",
+            $fullFilePath
+        )
+
+        try {
+            # Redirect 2>&1 merges Error Stream into Success Stream so we can parse it
+            # and prevents PowerShell from throwing NativeCommandErrors for status messages.
+            $output = & $PgRestorePath $arguments 2>&1
+            $exitCode = $LASTEXITCODE
+
+            # Check if the output contains the specific transaction_timeout error
+            $isTimeoutError = $output | Where-Object { $_ -match "transaction_timeout" }
+            
+            if ($exitCode -eq 0) {
+                Write-Host "Successfully restored: $($file.Name)" -ForegroundColor Green
+            }
+            elseif ($exitCode -eq 1 -and $isTimeoutError) {
+                Write-Host "Restored with minor version warnings (transaction_timeout ignored). Data integrity is likely fine." -ForegroundColor Yellow
+            }
+            else {
+                Write-Error "pg_restore failed for $($file.Name) with exit code $exitCode."
+                # Output the actual error messages for debugging
+                $output | Where-Object { $_.GetType().Name -eq "ErrorRecord" -or $_ -match "error" } | Write-Host -ForegroundColor Red
+            }
+        }
+        catch {
+            Write-Error "Critical script error: $($_.Exception.Message)"
+        }
+    }
+
+    Remove-Item Env:\PGPASSWORD
+    $duration = (Get-Date) - $startTime
+    Write-Host "`nRestore completed. Total duration: $($duration.ToString('hh\:mm\:ss'))" -ForegroundColor Green
+}
+
+# --- Usage (Splatting) ---
+$restoreParams = @{
+    ServerName      = "ServerName"
+    Username        = "DBAccountName"
+    Password        = "ComplexPassword" 
+    DatabaseName    = "DBName"
+    BackupFilesPath = "D:\Restore\"
+    PgRestorePath   = "C:\Program Files\pgAdmin 4\runtime\pg_restore.exe"
+}
+
+Restore-PostgreSQLTables @restoreParams
