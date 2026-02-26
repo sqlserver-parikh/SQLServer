@@ -1,0 +1,89 @@
+function Backup-PostgreSQLTables {
+    param(
+        [string]$ServerName,
+        [string]$Username,
+        [string]$Password,
+        [string]$DatabaseName,
+        [string]$TableNames,
+        [string]$OutputPath = "C:\Backups",
+        [string]$PgDumpPath = "C:\Program Files\pgAdmin 4\runtime\pg_dump.exe",
+        [string]$Port = "5432"
+    )
+
+    if (-not (Test-Path $OutputPath)) {
+        New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
+    }
+
+    $tables = $TableNames -split ',' | ForEach-Object { $_.Trim() }
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $env:PGPASSWORD = $Password
+
+    foreach ($table in $tables) {
+        $cleanTableName = $table -replace '\W', '_'
+        $fileName = Join-Path $OutputPath "$($ServerName -replace '\W','_')_$($DatabaseName -replace '\W','_')_${cleanTableName}_${timestamp}.backup"
+        
+        # We use a temporary log file to capture the 'verbose' output without crashing PowerShell
+        $logFile = [System.IO.Path]::GetTempFileName()
+
+        $argList = @(
+            "--file=`"$fileName`"",
+            "--host=$ServerName",
+            "--port=$Port",
+            "--username=$Username",
+            "--format=c",
+            "--large-objects",
+            "--verbose",
+            "--table=`"$table`"",
+            $DatabaseName
+        )
+
+        Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Starting backup for: $table" -ForegroundColor Cyan
+        
+        # Start pg_dump as a background process
+        $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $processInfo.FileName = $PgDumpPath
+        $processInfo.Arguments = $argList
+        $processInfo.RedirectStandardError = $true  # Capture the verbose logs
+        $processInfo.UseShellExecute = $false
+        $processInfo.CreateNoWindow = $true
+        
+        $process = [System.Diagnostics.Process]::Start($processInfo)
+        
+        # MONITORING LOOP
+        while (-not $process.HasExited) {
+            if (Test-Path $fileName) {
+                $sizeMB = (Get-Item $fileName).Length / 1MB
+                # Write a progress line (overwriting the same line is hard in PS, so we just timestamp it)
+                Write-Host "   > Working... Current File Size: $([math]::Round($sizeMB, 2)) MB" -ForegroundColor Gray
+            }
+            Start-Sleep -Seconds 60 # Update every 60 seconds
+        }
+
+        # Final check
+        $stdErr = $process.StandardError.ReadToEnd()
+        if ($process.ExitCode -eq 0) {
+            $finalSize = (Get-Item $fileName).Length / 1MB
+            Write-Host "Successfully backed up $table ($([math]::Round($finalSize, 2)) MB)" -ForegroundColor Green
+        } else {
+            Write-Error "pg_dump failed for $table. Error details:`n$stdErr"
+        }
+        
+        if (Test-Path $logFile) { Remove-Item $logFile }
+    }
+
+    Remove-Item Env:\PGPASSWORD
+    Write-Host "`nAll tasks completed." -ForegroundColor Green
+}
+
+# --- Usage ---
+$params = @{
+    ServerName      = "ServerName"
+    Username        = "UserName"
+    Password        = "SecretPass"
+    DatabaseName    = "DBName"
+    TableNames      = "public.table1, public.table2, public.table3"
+    OutputPath      = "D:\backups\"
+    PgDumpPath      = "C:\Program Files\pgAdmin 4\runtime\pg_dump.exe"
+}
+
+Backup-PostgreSQLTables @params
