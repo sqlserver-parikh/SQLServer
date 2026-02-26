@@ -10,6 +10,8 @@ function Backup-PostgreSQLTables {
         [string]$Port = "5432"
     )
 
+    $PsqlPath = Join-Path (Split-Path $PgDumpPath) "psql.exe"
+
     if (-not (Test-Path $OutputPath)) {
         New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
     }
@@ -19,12 +21,43 @@ function Backup-PostgreSQLTables {
     $env:PGPASSWORD = $Password
 
     foreach ($table in $tables) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Checking size for $table..." -ForegroundColor Gray
+        
+        # IMPROVED QUERY: Uses ::regclass to handle schema names correctly
+        # We wrap the table name in single quotes.
+        $sizeQuery = "SELECT pg_total_relation_size('$table'::regclass);"
+        $rawSizeBytes = 0
+        
+        try {
+            # Execute psql and capture both output and potential errors
+            $dbResult = & $PsqlPath -h $ServerName -p $Port -U $Username -d $DatabaseName -t -A -c "$sizeQuery" 2>&1
+            
+            # Check if the result is a number
+            if ($dbResult -match '^\d+$') {
+                $rawSizeBytes = [long]($dbResult.Trim())
+            } else {
+                Write-Host "   [Warning] Could not get size. Database said: $dbResult" -ForegroundColor DarkYellow
+            }
+        } catch {
+            Write-Host "   [Error] Size query failed: $($_.Exception.Message)" -ForegroundColor Red
+        }
+
+        # Determine Monitoring Interval & Pretty Size
+        $prettySize = "$([math]::Round($rawSizeBytes / 1GB, 2)) GB"
+        if ($rawSizeBytes -lt 1GB) { $prettySize = "$([math]::Round($rawSizeBytes / 1MB, 2)) MB" }
+
+        # Dynamic Interval: < 5GB = 30s, > 5GB = 120s
+        if ($rawSizeBytes -gt 0 -and $rawSizeBytes -lt 5GB) {
+            $monitorInterval = 30
+            $intervalText = "30 seconds"
+        } else {
+            $monitorInterval = 120 
+            $intervalText = "2 minutes"
+        }
+
         $cleanTableName = $table -replace '\W', '_'
         $fileName = Join-Path $OutputPath "$($ServerName -replace '\W','_')_$($DatabaseName -replace '\W','_')_${cleanTableName}_${timestamp}.backup"
         
-        # We use a temporary log file to capture the 'verbose' output without crashing PowerShell
-        $logFile = [System.IO.Path]::GetTempFileName()
-
         $argList = @(
             "--file=`"$fileName`"",
             "--host=$ServerName",
@@ -38,28 +71,26 @@ function Backup-PostgreSQLTables {
         )
 
         Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Starting backup for: $table" -ForegroundColor Cyan
+        Write-Host "   > Estimated table Size: $prettySize" -ForegroundColor Yellow
+        Write-Host "   > Updating progress every $intervalText." -ForegroundColor DarkGray
         
-        # Start pg_dump as a background process
         $processInfo = New-Object System.Diagnostics.ProcessStartInfo
         $processInfo.FileName = $PgDumpPath
         $processInfo.Arguments = $argList
-        $processInfo.RedirectStandardError = $true  # Capture the verbose logs
+        $processInfo.RedirectStandardError = $true
         $processInfo.UseShellExecute = $false
         $processInfo.CreateNoWindow = $true
         
         $process = [System.Diagnostics.Process]::Start($processInfo)
         
-        # MONITORING LOOP
         while (-not $process.HasExited) {
             if (Test-Path $fileName) {
-                $sizeMB = (Get-Item $fileName).Length / 1MB
-                # Write a progress line (overwriting the same line is hard in PS, so we just timestamp it)
-                Write-Host "   > Working... Current File Size: $([math]::Round($sizeMB, 2)) MB" -ForegroundColor Gray
+                $currentSizeMB = (Get-Item $fileName).Length / 1MB
+                Write-Host "   > [$(Get-Date -Format 'HH:mm:ss')] Progress... Local File Size: $([math]::Round($currentSizeMB, 2)) MB" -ForegroundColor Gray
             }
-            Start-Sleep -Seconds 60 # Update every 60 seconds
+            Start-Sleep -Seconds $monitorInterval
         }
 
-        # Final check
         $stdErr = $process.StandardError.ReadToEnd()
         if ($process.ExitCode -eq 0) {
             $finalSize = (Get-Item $fileName).Length / 1MB
@@ -67,8 +98,6 @@ function Backup-PostgreSQLTables {
         } else {
             Write-Error "pg_dump failed for $table. Error details:`n$stdErr"
         }
-        
-        if (Test-Path $logFile) { Remove-Item $logFile }
     }
 
     Remove-Item Env:\PGPASSWORD
