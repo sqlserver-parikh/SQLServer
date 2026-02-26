@@ -1,240 +1,215 @@
-use tempdb
-go
-create or ALTER PROCEDURE [dbo].[usp_DBGrowthData]
-    @LogToTable BIT = 0,
+USE tempdb 
+GO
+SET QUOTED_IDENTIFIER ON;
+GO
+SET ANSI_NULLS ON;
+GO
+
+--------------------------------------------------------------------------------------------------------------------------------
+-- Database Growth & Trend Analysis Procedure
+--------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------------------------
+-- DESCRIPTION:
+--  This procedure collects file-level size and space usage data for all databases on an instance.
+--  It can output results to the grid, log them to a historical table, and perform trend 
+--  analysis (Linear Regression/Pivoted Growth) using either MSDB backup history or 
+--  previously logged data.
+--------------------------------------------------------------------------------------------------------------------------------
+-- PARAMETERS:
+--  @LogToTable:          1 = Save snapshot to dbo.tblDBGrowth. 0 = Output current stats to results grid.
+--  @Retention:           Duration to keep data in history table. Examples: '2y' (years), '6m' (months), '30d' (days).
+--                        Supports combinations like '1y6m'. Default is '2y'.
+--  @GrowthTrendAnalysis: 0 = No Trend Analysis (Default).
+--                        1 = Use msdb.dbo.backupset (Immediate history based on backup sizes).
+--                        2 = Use dbo.tblDBGrowth (Accurate history based on logged snapshots).
+--  @Debug:               1 = Print the dynamic SQL without executing it.
+--------------------------------------------------------------------------------------------------------------------------------
+-- EXAMPLES:
+--  1. Perform a manual check of current database sizes:
+--     EXEC [dbo].[usp_DBGrowthData] @LogToTable = 0, @GrowthTrendAnalysis = 0;
+--
+--  2. Run as a daily SQL Agent Job to track growth and purge data older than 1 year:
+--     EXEC [dbo].[usp_DBGrowthData] @LogToTable = 1, @Retention = '1y';
+--
+--  3. Get a 12-month growth projection based on Backup History:
+--     EXEC [dbo].[usp_DBGrowthData] @GrowthTrendAnalysis = 1;
+--------------------------------------------------------------------------------------------------------------------------------
+
+IF OBJECT_ID('[dbo].[usp_DBGrowthData]', 'P') IS NULL
+BEGIN
+    EXEC ('CREATE PROCEDURE [dbo].[usp_DBGrowthData] AS RETURN 0;');
+END
+GO
+
+ALTER PROCEDURE [dbo].[usp_DBGrowthData]
+    @LogToTable BIT = 1,
     @Retention NVARCHAR(20) = '2y',
-    @GrowthTrendAnalysis TINYINT = 1
---     - 0: Skip growth trend
---     - 1: Use msdb backupset for trend
---     - 2: Use tblDBGrowth for trend
+    @GrowthTrendAnalysis TINYINT = 0,
+    @Debug BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
-    BEGIN TRY
-        DECLARE @StartDate DATE = GETUTCDATE();
+    SET XACT_ABORT ON;
 
-        -- Parse @Retention string (supports '2y3m10d')
+    DECLARE @CurrentDate DATETIME2 = SYSUTCDATETIME();
+    DECLARE @RetentionDate DATETIME2;
+    DECLARE @ErrorMsg NVARCHAR(2048);
+
+    --------------------------------------------------------------------------------
+    -- 1. Parse Retention String (Handles '2y', '6m', '30d' and combinations)
+    --------------------------------------------------------------------------------
+    BEGIN
         DECLARE @Years INT = 0, @Months INT = 0, @Days INT = 0;
-        IF @Retention LIKE '%y%'
-            SET @Years = TRY_CAST(LEFT(@Retention, CHARINDEX('y', @Retention) - 1) AS INT);
-        IF @Retention LIKE '%m%'
-            SET @Months = TRY_CAST(SUBSTRING(@Retention, CHARINDEX('y', @Retention) + 1, CHARINDEX('m', @Retention) - CHARINDEX('y', @Retention) - 1) AS INT);
-        IF @Retention LIKE '%d%'
-            SET @Days = TRY_CAST(SUBSTRING(@Retention, CHARINDEX('m', @Retention) + 1, CHARINDEX('d', @Retention) - CHARINDEX('m', @Retention) - 1) AS INT);
-
-        DECLARE @RetentionDate DATE = DATEADD(DAY, -@Days, DATEADD(MONTH, -@Months, DATEADD(YEAR, -@Years, GETUTCDATE())));
-
-        IF @GrowthTrendAnalysis IN (1, 2)
-        BEGIN
-            -- Helper function to generate month-year column names dynamically
-            DECLARE @CurrentMonth DATE = GETUTCDATE();
-            DECLARE @MonthNames TABLE (MonthsAgo INT, ColumnName NVARCHAR(20));
-            
-            INSERT INTO @MonthNames
-            VALUES  (0, FORMAT(@CurrentMonth, 'MMMyy') + '_' + CAST(MONTH(@CurrentMonth) AS VARCHAR) + '_MB'),
-                    (-1, FORMAT(DATEADD(MONTH, -1, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -1, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-2, FORMAT(DATEADD(MONTH, -2, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -2, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-3, FORMAT(DATEADD(MONTH, -3, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -3, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-4, FORMAT(DATEADD(MONTH, -4, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -4, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-5, FORMAT(DATEADD(MONTH, -5, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -5, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-6, FORMAT(DATEADD(MONTH, -6, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -6, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-7, FORMAT(DATEADD(MONTH, -7, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -7, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-8, FORMAT(DATEADD(MONTH, -8, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -8, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-9, FORMAT(DATEADD(MONTH, -9, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -9, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-10, FORMAT(DATEADD(MONTH, -10, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -10, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-11, FORMAT(DATEADD(MONTH, -11, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -11, @CurrentMonth)) AS VARCHAR) + '_MB'),
-                    (-12, FORMAT(DATEADD(MONTH, -12, @CurrentMonth), 'MMMyy') + '_' + CAST(MONTH(DATEADD(MONTH, -12, @CurrentMonth)) AS VARCHAR) + '_MB');
-
-            DECLARE @PivotColumns NVARCHAR(MAX);
-            DECLARE @SelectColumns NVARCHAR(MAX);
-            
-            -- Generate the dynamic column list for PIVOT and SELECT
-            SELECT 
-                @PivotColumns = STRING_AGG(QUOTENAME(MonthsAgo), ',') WITHIN GROUP (ORDER BY MonthsAgo DESC),
-                @SelectColumns = STRING_AGG('PVT.[' + CAST(MonthsAgo AS VARCHAR) + '] AS ' + QUOTENAME(ColumnName), ',') WITHIN GROUP (ORDER BY MonthsAgo DESC)
-            FROM @MonthNames;
-            
-            DECLARE @TrendSQL NVARCHAR(MAX);
-            SET @TrendSQL = '
-            WITH TrendData AS (
-                SELECT
-                    ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bs.database_name' ELSE 'g.DatabaseName' END + ' AS DatabaseName,
-                    DATEDIFF(MONTH, GETUTCDATE(), ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bs.backup_start_date' ELSE 'g.LogDate' END + ') AS MonthsAgo,
-                    AVG(' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bf.file_size / 1048576.0' ELSE 'g.UsedSpaceMB' END + ') AS AvgSizeMB
-                FROM ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'msdb.dbo.backupset bs JOIN msdb.dbo.backupfile bf ON bs.backup_set_id = bf.backup_set_id' ELSE 'dbo.tblDBGrowth g' END + '
-                WHERE ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bs.backup_start_date' ELSE 'g.LogDate' END + ' BETWEEN DATEADD(YEAR, -1, GETUTCDATE()) AND GETUTCDATE()
-                      AND ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bf.file_type = ''D'' AND bs.database_name' ELSE 'g.DatabaseName' END + ' NOT IN (''master'', ''tempdb'', ''model'', ''msdb'')
-                GROUP BY ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bs.database_name, DATEDIFF(MONTH, GETUTCDATE(), bs.backup_start_date)' ELSE 'g.DatabaseName, DATEDIFF(MONTH, GETUTCDATE(), g.LogDate)' END + '
-            ),
-            DatabaseMonthCounts AS (
-                SELECT 
-                    DatabaseName,
-                    COUNT(DISTINCT MonthsAgo) AS MonthsWithData
-                FROM TrendData
-                GROUP BY DatabaseName
-            )
-            SELECT 
-                PVT.DatabaseName,
-                ' + @SelectColumns + ',
-                CASE 
-                    WHEN dmc.MonthsWithData > 1 THEN 
-                        (PVT.[0] - COALESCE(PVT.[-12], PVT.[-11], PVT.[-10], PVT.[-9], PVT.[-8],
-                                 PVT.[-7], PVT.[-6], PVT.[-5], PVT.[-4], PVT.[-3], PVT.[-2], PVT.[-1]))
-                    ELSE NULL -- No growth calculation possible with only one month
-                END AS LastXMonthGrowth,
-                dmc.MonthsWithData AS XMonthsData,
-                CASE 
-                    WHEN dmc.MonthsWithData > 1 THEN 
-                        (PVT.[0] - COALESCE(PVT.[-12], PVT.[-11], PVT.[-10], PVT.[-9], PVT.[-8],
-                                 PVT.[-7], PVT.[-6], PVT.[-5], PVT.[-4], PVT.[-3], PVT.[-2], PVT.[-1])) / 
-                        (dmc.MonthsWithData - 1)
-                    ELSE NULL -- Cannot calculate monthly growth with only one month
-                END AS MonthlyGrowthMB,
-                CASE 
-                    WHEN dmc.MonthsWithData > 1 THEN
-                        PVT.[0] + ((PVT.[0] - COALESCE(PVT.[-12], PVT.[-11], PVT.[-10], PVT.[-9], PVT.[-8],
-                                 PVT.[-7], PVT.[-6], PVT.[-5], PVT.[-4], PVT.[-3], PVT.[-2], PVT.[-1])) /
-                                 (dmc.MonthsWithData - 1)) * 1
-                    ELSE NULL -- Cannot project with only one month of data
-                END AS Projected_1Month,
-                CASE 
-                    WHEN dmc.MonthsWithData > 1 THEN
-                        PVT.[0] + ((PVT.[0] - COALESCE(PVT.[-12], PVT.[-11], PVT.[-10], PVT.[-9], PVT.[-8],
-                                 PVT.[-7], PVT.[-6], PVT.[-5], PVT.[-4], PVT.[-3], PVT.[-2], PVT.[-1])) /
-                                 (dmc.MonthsWithData - 1)) * 3
-                    ELSE NULL -- Cannot project with only one month of data
-                END AS Projected_3Month,
-                CASE 
-                    WHEN dmc.MonthsWithData > 1 THEN
-                        PVT.[0] + ((PVT.[0] - COALESCE(PVT.[-12], PVT.[-11], PVT.[-10], PVT.[-9], PVT.[-8],
-                                 PVT.[-7], PVT.[-6], PVT.[-5], PVT.[-4], PVT.[-3], PVT.[-2], PVT.[-1])) /
-                                 (dmc.MonthsWithData - 1)) * 6
-                    ELSE NULL -- Cannot project with only one month of data
-                END AS Projected_6Month,
-                CASE 
-                    WHEN dmc.MonthsWithData > 1 THEN
-                        PVT.[0] + ((PVT.[0] - COALESCE(PVT.[-12], PVT.[-11], PVT.[-10], PVT.[-9], PVT.[-8],
-                                 PVT.[-7], PVT.[-6], PVT.[-5], PVT.[-4], PVT.[-3], PVT.[-2], PVT.[-1])) /
-                                 (dmc.MonthsWithData - 1)) * 12
-                    ELSE NULL -- Cannot project with only one month of data
-                END AS Projected_12Month
-            FROM (
-                SELECT DatabaseName, MonthsAgo, AvgSizeMB FROM TrendData
-            ) AS raw
-            PIVOT (
-                SUM(AvgSizeMB) FOR MonthsAgo IN (' + @PivotColumns + ')
-            ) AS PVT
-            JOIN DatabaseMonthCounts dmc ON PVT.DatabaseName = dmc.DatabaseName;
-            ';
-
-            EXEC sp_executesql @TrendSQL;
-            RETURN;
-        END
-
-        -- [Rest of the stored procedure remains unchanged]
         
-        IF @LogToTable = 1 AND OBJECT_ID(N'dbo.tblDBGrowth', 'U') IS NULL
+        -- Extract Year
+        IF PATINDEX('%y%', @Retention) > 0
+            SET @Years = TRY_CAST(LEFT(@Retention, PATINDEX('%y%', @Retention) - 1) AS INT);
+        
+        -- Extract Month
+        IF PATINDEX('%m%', @Retention) > 0
         BEGIN
-            create TABLE dbo.tblDBGrowth
-            (
-                DBID INT NOT NULL,
-                FileID INT NOT NULL,
-                FileType INT NOT NULL,
-                FileSizeMB INT NOT NULL,
-                UsedSpaceMB INT,
-                DatabaseName NVARCHAR(200),
-                LogicalFileName NVARCHAR(128),
-                FileGroupName SYSNAME NULL,
-                DataSpaceID SMALLINT,
-                FilePath NVARCHAR(260),
-                LogDate DATETIME2(7) NOT NULL,
-                StateDesc NVARCHAR(60),
-                RecoveryModel NVARCHAR(60),
-                CompatibilityLevel INT
-            );
+            DECLARE @mStart INT = ISNULL(NULLIF(PATINDEX('%y%', @Retention), 0), 0) + 1;
+            SET @Months = TRY_CAST(SUBSTRING(@Retention, @mStart, PATINDEX('%m%', @Retention) - @mStart) AS INT);
         END
 
-        CREATE TABLE #SnapshotTable
-        (
-            DBID INT,
+        -- Extract Day
+        IF PATINDEX('%d%', @Retention) > 0
+        BEGIN
+            DECLARE @dStart INT = ISNULL(NULLIF(PATINDEX('%m%', @Retention), 0), ISNULL(NULLIF(PATINDEX('%y%', @Retention), 0), 0)) + 1;
+            SET @Days = TRY_CAST(SUBSTRING(@Retention, @dStart, PATINDEX('%d%', @Retention) - @dStart) AS INT);
+        END
+
+        SET @RetentionDate = DATEADD(DAY, -ISNULL(@Days,0), DATEADD(MONTH, -ISNULL(@Months,0), DATEADD(YEAR, -ISNULL(@Years,2), @CurrentDate)));
+    END
+
+    --------------------------------------------------------------------------------
+    -- 2. Schema Maintenance
+    --------------------------------------------------------------------------------
+    IF @LogToTable = 1 AND OBJECT_ID(N'dbo.tblDBGrowth', 'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.tblDBGrowth (
+            ID INT IDENTITY(1,1) PRIMARY KEY,
+            DatabaseName SYSNAME,
             FileID INT,
-            FileType INT,
-            FileSizeMB INT,
-            UsedSpaceMB INT NULL,
-            DatabaseName NVARCHAR(200),
-            LogicalFileName NVARCHAR(128),
+            FileType NVARCHAR(60),
+            FileSizeMB DECIMAL(18,2),
+            UsedSpaceMB DECIMAL(18,2),
+            FreeSpaceMB AS (FileSizeMB - UsedSpaceMB),
             FileGroupName SYSNAME NULL,
-            DataSpaceID SMALLINT,
-            FilePath NVARCHAR(260),
-            LogDate DATETIME2(7),
-            StateDesc NVARCHAR(60),
-            RecoveryModel NVARCHAR(60),
-            CompatibilityLevel INT
+            PhysicalPath NVARCHAR(260),
+            LogDate DATETIME2 DEFAULT SYSUTCDATETIME()
+        );
+        CREATE INDEX IX_tblDBGrowth_LogDate ON dbo.tblDBGrowth(LogDate);
+    END
+
+    --------------------------------------------------------------------------------
+    -- 3. Trend Analysis Logic (Dynamic Pivot)
+    --------------------------------------------------------------------------------
+    IF @GrowthTrendAnalysis IN (1, 2)
+    BEGIN
+        DECLARE @PivotColumns NVARCHAR(MAX), @SelectColumns NVARCHAR(MAX), @TrendSQL NVARCHAR(MAX);
+        
+        -- Dynamically build column headers for the last 12 months
+        ;WITH Months AS (
+            SELECT 0 as M UNION ALL SELECT M - 1 FROM Months WHERE M > -12
+        )
+        SELECT 
+            @PivotColumns = STRING_AGG(QUOTENAME(M), ',') WITHIN GROUP (ORDER BY M DESC),
+            @SelectColumns = STRING_AGG('CAST(PVT.' + QUOTENAME(M) + ' AS DECIMAL(18,2)) AS ' + 
+                              QUOTENAME(FORMAT(DATEADD(MONTH, M, @CurrentDate), 'MMM_yy') + '_MB'), ', ') 
+                              WITHIN GROUP (ORDER BY M DESC)
+        FROM Months;
+
+        SET @TrendSQL = '
+        WITH TrendData AS (
+            SELECT
+                ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bs.database_name' ELSE 'g.DatabaseName' END + ' AS DatabaseName,
+                DATEDIFF(MONTH, GETUTCDATE(), ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bs.backup_start_date' ELSE 'g.LogDate' END + ') AS MonthsAgo,
+                AVG(' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bf.file_size / 1048576.0' ELSE 'g.UsedSpaceMB' END + ') AS AvgSizeMB
+            FROM ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'msdb.dbo.backupset bs JOIN msdb.dbo.backupfile bf ON bs.backup_set_id = bf.backup_set_id' ELSE 'dbo.tblDBGrowth g' END + '
+            WHERE ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bs.backup_start_date' ELSE 'g.LogDate' END + ' > DATEADD(YEAR, -1, GETUTCDATE())
+              AND ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bf.file_type = ''D''' ELSE '1=1' END + '
+            GROUP BY ' + CASE WHEN @GrowthTrendAnalysis = 1 THEN 'bs.database_name, DATEDIFF(MONTH, GETUTCDATE(), bs.backup_start_date)' ELSE 'g.DatabaseName, DATEDIFF(MONTH, GETUTCDATE(), g.LogDate)' END + '
+        )
+        SELECT 
+            PVT.DatabaseName,
+            ' + @SelectColumns + ',
+            CAST(PVT.[0] - COALESCE(PVT.[-12], PVT.[-6], PVT.[-1]) AS DECIMAL(18,2)) AS NetAnnualGrowthMB,
+            CAST(((PVT.[0] - COALESCE(PVT.[-12], PVT.[-6], PVT.[-1])) / 12.0) AS DECIMAL(18,2)) AS EstMonthlyGrowthMB,
+            CAST(PVT.[0] + ((PVT.[0] - COALESCE(PVT.[-12], PVT.[-6], PVT.[-1])) / 12.0 * 6) AS DECIMAL(18,2)) AS Projected_6Mo_SizeMB
+        FROM (SELECT DatabaseName, MonthsAgo, AvgSizeMB FROM TrendData) AS src
+        PIVOT (SUM(AvgSizeMB) FOR MonthsAgo IN (' + @PivotColumns + ')) AS PVT
+        ORDER BY NetAnnualGrowthMB DESC;';
+
+        IF @Debug = 1 PRINT @TrendSQL ELSE EXEC sp_executesql @TrendSQL;
+        RETURN;
+    END
+
+    --------------------------------------------------------------------------------
+    -- 4. Current Snapshot Collection
+    --------------------------------------------------------------------------------
+    BEGIN TRY
+        IF OBJECT_ID('tempdb..#Snapshot') IS NOT NULL DROP TABLE #Snapshot;
+        CREATE TABLE #Snapshot (
+            DatabaseName SYSNAME,
+            FileID INT,
+            FileType NVARCHAR(60),
+            FileSizeMB DECIMAL(18,2),
+            UsedSpaceMB DECIMAL(18,2),
+            FileGroupName SYSNAME NULL,
+            PhysicalPath NVARCHAR(260)
         );
 
-        INSERT INTO #SnapshotTable
-        SELECT
-            mf.database_id,
-            mf.file_id,
-            mf.type,
-            CEILING(mf.size * 1.0 / 128),
-            NULL,
-            DB_NAME(mf.database_id),
-            mf.name,
-            NULL,
-            NULL,
-            mf.physical_name,
-            SYSUTCDATETIME(),
-            d.state_desc,
-            d.recovery_model_desc,
-            d.compatibility_level
-        FROM sys.master_files mf
-        JOIN sys.databases d ON d.database_id = mf.database_id
-        WHERE DB_NAME(mf.database_id) NOT IN ('master', 'tempdb', 'model', 'msdb');
+        DECLARE @DBName SYSNAME, @SQL NVARCHAR(MAX);
+        DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT name FROM sys.databases 
+            WHERE state_desc = 'ONLINE' 
+              AND user_access_desc = 'MULTI_USER'
+              AND name <> 'tempdb';
 
-        DECLARE @DBName NVARCHAR(255), @SQL NVARCHAR(MAX);
-        DECLARE db_cursor CURSOR FOR
-        SELECT name FROM sys.databases
-        WHERE HAS_DBACCESS(name) = 1 AND state_desc = 'ONLINE' AND is_read_only = 0
-          AND user_access_desc = 'MULTI_USER' AND is_in_standby = 0
-          AND name NOT IN ('master', 'tempdb', 'model', 'msdb');
-
-        OPEN db_cursor;
-        FETCH NEXT FROM db_cursor INTO @DBName;
+        OPEN db_cur;
+        FETCH NEXT FROM db_cur INTO @DBName;
         WHILE @@FETCH_STATUS = 0
         BEGIN
-            SET @SQL = '
-            USE ' + QUOTENAME(@DBName) + ';
-            UPDATE s
-            SET s.UsedSpaceMB = CEILING(df.size / 128.0) - CEILING(df.size / 128.0 - CAST(FILEPROPERTY(df.name, ''SpaceUsed'') AS INT) / 128.0),
-                s.FileGroupName = ISNULL(fg.name, ''LogFile''),
-                s.DataSpaceID = ISNULL(fg.data_space_id, 0)
-            FROM #SnapshotTable s
-            JOIN sys.database_files df ON DB_ID(s.DatabaseName) = DB_ID() AND s.FileID = df.file_id
-            LEFT JOIN sys.filegroups fg ON df.data_space_id = fg.data_space_id
-            WHERE s.DatabaseName = ''' + @DBName + '''';
-
-            EXEC(@SQL);
-            FETCH NEXT FROM db_cursor INTO @DBName;
+            SET @SQL = 'USE ' + QUOTENAME(@DBName) + ';
+            SELECT 
+                DB_NAME(), file_id, type_desc,
+                CAST(size / 128.0 AS DECIMAL(18,2)),
+                CAST(FILEPROPERTY(name, ''SpaceUsed'') / 128.0 AS DECIMAL(18,2)),
+                ISNULL(FILEGROUP_NAME(data_space_id), ''LOG''),
+                physical_name
+            FROM sys.database_files;';
+            
+            INSERT INTO #Snapshot EXEC(@SQL);
+            FETCH NEXT FROM db_cur INTO @DBName;
         END
-        CLOSE db_cursor;
-        DEALLOCATE db_cursor;
+        CLOSE db_cur;
+        DEALLOCATE db_cur;
 
+        --------------------------------------------------------------------------------
+        -- 5. Finalize (Logging and Cleanup)
+        --------------------------------------------------------------------------------
         IF @LogToTable = 1
         BEGIN
+            -- Clean up old data
             DELETE FROM dbo.tblDBGrowth WHERE LogDate < @RetentionDate;
-            INSERT INTO dbo.tblDBGrowth SELECT * FROM #SnapshotTable;
+            
+            -- Insert new snapshot
+            INSERT INTO dbo.tblDBGrowth (DatabaseName, FileID, FileType, FileSizeMB, UsedSpaceMB, FileGroupName, PhysicalPath)
+            SELECT * FROM #Snapshot;
+            
+            PRINT 'Snapshot logged. History older than ' + CAST(@RetentionDate AS NVARCHAR(30)) + ' purged.';
         END
         ELSE
         BEGIN
-            SELECT * FROM #SnapshotTable;
+            SELECT *, @CurrentDate AS SnapshotDate FROM #Snapshot ORDER BY DatabaseName, FileID;
         END
-
-        DROP TABLE #SnapshotTable;
     END TRY
     BEGIN CATCH
-        DECLARE @ErrMsg NVARCHAR(MAX), @ErrSeverity INT;
-        SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY();
-        RAISERROR('usp_DBGrowthData failed: %s', @ErrSeverity, 1, @ErrMsg);
+        SET @ErrorMsg = 'usp_DBGrowthData Error: ' + ERROR_MESSAGE();
+        RAISERROR(@ErrorMsg, 16, 1);
     END CATCH
+
+    IF OBJECT_ID('tempdb..#Snapshot') IS NOT NULL DROP TABLE #Snapshot;
 END
+GO
