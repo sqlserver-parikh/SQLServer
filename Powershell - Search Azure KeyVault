@@ -1,183 +1,136 @@
+<#
+.SYNOPSIS
+    Interactive GUI-based tool to search and retrieve Azure Key Vault Secrets.
+
+.DESCRIPTION
+    This script provides a graphical interface to search for secrets by name, content-type, or tags
+    across one or many Azure Key Vaults. It supports targeted searching (via parameters) or 
+    broad discovery (searching the entire account context).
+
+.PARAMETER SearchTerm
+    Optional search string. If omitted, a GUI popup will ask for the input.
+
+.PARAMETER ResourceGroupName
+    The specific Azure Resource Group to search. If omitted, searches all vaults in the subscription.
+
+.PARAMETER SubscriptionId
+    The specific Azure Subscription to target. If omitted, uses the current active context.
+
+.EXAMPLE
+    .\Search-AzSecrets.ps1 -ResourceGroupName "it-prod-rg"
+#>
+
 [CmdletBinding()]
 param (
-    [Parameter(
-        Position = 0,
-        Mandatory = $false,
-        HelpMessage = "Optional: Tenant ID (will prompt if not provided)"
-    )]
-    [string]$TenantId,
-
-    [Parameter(
-        Position = 1,
-        Mandatory = $false,
-        HelpMessage = "Optional: Subscription ID (will prompt if not provided)"
-    )]
-    [string]$SubscriptionId,
-
-    [Parameter(
-        Position = 2,
-        Mandatory = $false,
-        HelpMessage = "Optional: Resource Group name (will prompt if not provided)"
-    )]
-    [string]$ResourceGroupName
+    [Parameter(Mandatory=$false)] [string]$SearchTerm,
+    [Parameter(Mandatory=$false)] [string]$ResourceGroupName,
+    [Parameter(Mandatory=$false)] [string]$SubscriptionId
 )
 
-# Clear the screen for better visibility
-Clear-Host
-
-# Function to prompt for input with validation
-function Get-ValidatedInput {
-    param (
-        [string]$Prompt,
-        [string]$DefaultValue,
-        [switch]$AllowEmpty
-    )
+# --- INTERNAL HELPER: GUI POPUP ---
+function Show-InputPopup {
+    param([string]$Title = "Azure Secret Search", [string]$Prompt = "Enter secret name or keyword:")
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
     
-    do {
-        if ($DefaultValue) {
-            Write-Host "$Prompt [Default: $DefaultValue]: " -NoNewline
-        } else {
-            Write-Host "$Prompt : " -NoNewline
-        }
-        
-        $input = Read-Host
-        
-        if ([string]::IsNullOrWhiteSpace($input) -and $DefaultValue) {
-            return $DefaultValue
-        }
-        
-        if ([string]::IsNullOrWhiteSpace($input) -and -not $AllowEmpty) {
-            Write-Host "Value cannot be empty. Please try again." -ForegroundColor Yellow
-            continue
-        }
-        
-        return $input
-    } while ($true)
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = $Title
+    $form.Size = New-Object System.Drawing.Size(420,180)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.Topmost = $true
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Location = New-Object System.Drawing.Point(20,20); $label.Size = New-Object System.Drawing.Size(360,20)
+    $label.Text = $Prompt
+    $form.Controls.Add($label)
+
+    $textBox = New-Object System.Windows.Forms.TextBox
+    $textBox.Location = New-Object System.Drawing.Point(20,50); $textBox.Size = New-Object System.Drawing.Size(360,20)
+    $form.Controls.Add($textBox)
+
+    $btn = New-Object System.Windows.Forms.Button
+    $btn.Location = New-Object System.Drawing.Point(305,90); $btn.Size = New-Object System.Drawing.Size(75,28)
+    $btn.Text = "Search"; $btn.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $form.AcceptButton = $btn; $form.Controls.Add($btn)
+
+    $form.Add_Shown({$textBox.Focus()})
+    return if ($form.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $textBox.Text } else { $null }
 }
 
-# Welcome message
-Write-Host "=== Azure KeyVault Password Search Tool ===" -ForegroundColor Cyan
-Write-Host "This tool will help you search for secrets across Azure KeyVaults.`n"
-
-# Get Azure configuration details if not provided as parameters
-if (-not $TenantId) {
-    $TenantId = Get-ValidatedInput -Prompt "Enter Azure Tenant ID"
-}
-
-if (-not $SubscriptionId) {
-    $SubscriptionId = Get-ValidatedInput -Prompt "Enter Azure Subscription ID"
-}
-
-if (-not $ResourceGroupName) {
-    $ResourceGroupName = Get-ValidatedInput -Prompt "Enter Resource Group name"
-}
-
-# Prompt for account search details
-Write-Host "`nWhat account password are you looking for?"
-Write-Host "Examples:" -ForegroundColor Yellow
-Write-Host "- SQL Server account (e.g., SQLDBA, SQLAdmin)"
-Write-Host "- Service account (e.g., SVC_Account)"
-Write-Host "- Application account (e.g., APP_User)`n"
-
-$SearchPattern = Get-ValidatedInput -Prompt "Enter account name to search" -DefaultValue "SQLDBA"
-
-# Format search pattern with wildcards
-$SearchPattern = "*$SearchPattern*"
-
-# Connect to Azure
-try {
-    Write-Verbose "Connecting to Azure..."
-    Write-Host "`nConnecting to Azure with the following details:" -ForegroundColor Cyan
-    Write-Host "Tenant ID: $TenantId"
-    Write-Host "Subscription: $SubscriptionId"
-    Write-Host "Resource Group: $ResourceGroupName`n"
-    
-    $confirmation = Get-ValidatedInput -Prompt "Are these details correct? (Y/N)" -DefaultValue "Y"
-    if ($confirmation.ToUpper() -ne "Y") {
-        Write-Host "Operation cancelled by user." -ForegroundColor Yellow
-        exit 0
-    }
-    
-    # Try to connect using current context first
+# --- MAIN EXECUTION ---
+process {
     try {
-        $context = Get-AzContext
-        if ($context -and $context.Tenant.Id -eq $TenantId -and $context.Subscription.Id -eq $SubscriptionId) {
-            Write-Host "Using existing Azure connection" -ForegroundColor Green
-        } else {
-            throw "Need to establish new connection"
+        Clear-Host
+        Write-Host "--- Azure Secret Hunter Tool ---" -ForegroundColor Cyan
+
+        # 1. Handle Search Term Input
+        if ([string]::IsNullOrWhiteSpace($SearchTerm)) {
+            $SearchTerm = Show-InputPopup
+            if ([string]::IsNullOrWhiteSpace($SearchTerm)) { Write-Warning "No search term entered. Exiting."; return }
         }
-    } catch {
-        Write-Host "Connecting to Azure..." -ForegroundColor Yellow
-        Connect-AzAccount -UseDeviceAuthentication -TenantId $TenantId -Subscription $SubscriptionId -ErrorAction Stop | Out-Null
-    }
-}
-catch {
-    Write-Error "Failed to connect to Azure: $_"
-    exit 1
-}
+        $pattern = "*$SearchTerm*"
 
-# Display search information
-Write-Host "`nSearching for pattern: $SearchPattern" -BackgroundColor Yellow -ForegroundColor Black
-Write-Host "`n"
+        # 2. Azure Connection Check
+        Write-Host "Checking Azure Session..." -NoNewline
+        $azContext = Get-AzContext
+        if (-not $azContext) {
+            Write-Host " Not Connected. Please login." -ForegroundColor Yellow
+            Connect-AzAccount | Out-Null
+        } else { Write-Host " Connected as [$($azContext.Account)]" -ForegroundColor Green }
 
-# Get all KeyVaults in the resource group
-try {
-    $KeyVaults = Get-AzKeyVault -ResourceGroupName $ResourceGroupName
-    if (-not $KeyVaults) {
-        Write-Warning "No KeyVaults found in resource group: $ResourceGroupName"
-        exit 0
-    }
-}
-catch {
-    Write-Error "Failed to retrieve KeyVaults: $_"
-    exit 1
-}
+        # 3. Set Subscription Context if provided
+        if ($SubscriptionId) {
+            Write-Host "Switching to Subscription: $SubscriptionId"
+            Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
+        }
 
-# Search through each KeyVault
-foreach ($Vault in $KeyVaults) {
-    Write-Host "Checking vault: $($Vault.VaultName)"
-    
-    try {
-        # Get matching secrets based on name or tags
-        $Secrets = Get-AzKeyVaultSecret -VaultName $Vault.VaultName -ErrorAction Stop | 
-            Where-Object { ($_.Name -like $SearchPattern) -or ($_.Tags.Values -like $SearchPattern) }
-        
-        if ($Secrets) {
-            Write-Host 'Found matches ->' -BackgroundColor Red
-            
-            foreach ($Secret in $Secrets) {
-                # Display secret information
-                Write-Host "`n$($Secret.Name)" -BackgroundColor Cyan -ForegroundColor Black
-                
-                # Display tags if they exist
-                if ($Secret.Tags.Count -gt 0) {
-                    Write-Host "Tags:"
-                    $Secret.Tags | Format-Table -AutoSize
-                }
-                
-                # Prompt before showing secret value
-                $showSecret = Get-ValidatedInput -Prompt "Do you want to view the secret value? (Y/N)" -DefaultValue "Y"
-                if ($showSecret.ToUpper() -eq "Y") {
-                    try {
-                        $SecretValue = Get-AzKeyVaultSecret -VaultName $Vault.VaultName -Name $Secret.Name -AsPlainText
-                        Write-Host "Secret Value:"
-                        Write-Host $SecretValue
-                    }
-                    catch {
-                        Write-Warning "Unable to retrieve secret value for $($Secret.Name): $_"
-                    }
-                }
+        # 4. Discover Key Vaults
+        Write-Host "Discovering Key Vaults..." -NoNewline
+        if ($ResourceGroupName) {
+            $vaults = Get-AzKeyVault -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+        } else {
+            $vaults = Get-AzKeyVault -ErrorAction SilentlyContinue
+        }
+
+        if (-not $vaults) { throw "No Key Vaults found in the current scope." }
+        Write-Host " Found $($vaults.Count) vaults." -ForegroundColor Green
+
+        # 5. Search for Secrets
+        Write-Host "Searching for '$SearchTerm'..." -ForegroundColor Yellow
+        $results = foreach ($v in $vaults) {
+            Write-Progress -Activity "Scanning Vaults" -Status "Checking: $($v.VaultName)"
+            Get-AzKeyVaultSecret -VaultName $v.VaultName -ErrorAction SilentlyContinue | 
+                Where-Object { ($_.Name -like $pattern) -or ($_.ContentType -like $pattern) }
+        }
+
+        if (-not $results) { 
+            Write-Host "No matches found for '$SearchTerm'." -ForegroundColor Red
+            return 
+        }
+
+        # 6. Interactive Selection GUI
+        $Selected = $results | Select-Object VaultName, Name, ContentType, Enabled, Updated | 
+                    Out-GridView -Title "SELECT SECRETS TO REVEAL (Hold Ctrl to select multiple)" -PassThru
+
+        if ($null -eq $Selected) { Write-Host "Selection cancelled."; return }
+
+        # 7. Reveal Decrypted Values
+        Write-Host "`nREVEALED SECRETS:" -ForegroundColor Cyan
+        Write-Host "--------------------------------------------------------"
+        foreach ($item in $Selected) {
+            try {
+                $val = Get-AzKeyVaultSecret -VaultName $item.VaultName -Name $item.Name -AsPlainText
+                Write-Host "Vault:    $($item.VaultName)"
+                Write-Host "Secret:   $($item.Name)"
+                Write-Host "Value:    " -NoNewline; Write-Host $val -BackgroundColor Yellow -ForegroundColor Black
+                Write-Host "--------------------------------------------------------"
+            } catch {
+                Write-Host "Error retrieving $($item.Name): $($_.Exception.Message)" -ForegroundColor Red
             }
         }
     }
     catch {
-        Write-Warning "Error accessing vault $($Vault.VaultName): $_"
-        continue
+        Write-Error "FATAL ERROR: $($_.Exception.Message)"
     }
 }
-
-Write-Host "`nSearch complete!" -ForegroundColor Green
-
-#.\Search-KeyVaultSecrets.ps1 -TenantId "your-tenant-id" -SubscriptionId "your-subscription-id" -ResourceGroupName "your-rg"
-#.\Search-KeyVaultSecrets.ps1
-#.\Search-KeyVaultSecrets.ps1 -TenantId "your-tenant-id" -SubscriptionId "your-subscription-id"
