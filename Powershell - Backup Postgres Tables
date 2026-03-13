@@ -1,118 +1,145 @@
+<#
+.SYNOPSIS
+    Backs up PostgreSQL tables with optional throttled parallelism and silent modes.
+
+.PARAMETER MaxParallel
+    The number of simultaneous backup processes (default is 1). Only applies when -Silent is used.
+.PARAMETER Silent
+    Skips all interactive prompts. Required for Parallel execution.
+#>
 function Backup-PostgreSQLTables {
+    [CmdletBinding()]
     param(
-        [string]$ServerName,
-        [string]$Username,
+        [Parameter(Mandatory=$true)][string]$ServerName,
+        [Parameter(Mandatory=$true)][string]$Username,
         [string]$Password,
-        [string]$DatabaseName,
-        [string]$TableNames,
+        [Parameter(Mandatory=$true)][string]$DatabaseName,
+        [Parameter(Mandatory=$true)][string]$TableNames,
         [string]$OutputPath = "C:\Backups",
         [string]$PgDumpPath = "C:\Program Files\pgAdmin 4\runtime\pg_dump.exe",
-        [string]$Port = "5432"
+        [string]$Port = "5432",
+        [int]$MaxParallel = 1,
+        [switch]$Silent
     )
 
-    $PsqlPath = Join-Path (Split-Path $PgDumpPath) "psql.exe"
-
-    if (-not (Test-Path $OutputPath)) {
-        New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
-    }
-
-    $tables = $TableNames -split ',' | ForEach-Object { $_.Trim() }
-    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $env:PGPASSWORD = $Password
-
-    foreach ($table in $tables) {
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Checking size for $table..." -ForegroundColor Gray
+    process {
+        if (-not (Test-Path $PgDumpPath)) { Write-Error "pg_dump.exe not found."; return }
         
-        # IMPROVED QUERY: Uses ::regclass to handle schema names correctly
-        # We wrap the table name in single quotes.
-        $sizeQuery = "SELECT pg_total_relation_size('$table'::regclass);"
-        $rawSizeBytes = 0
+        # 1. Handle Password
+        if ([string]::IsNullOrWhiteSpace($Password)) {
+            $securePass = Read-Host -Prompt "Enter password for $Username" -AsSecureString
+            $Password = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePass))
+        }
+
+        if (-not (Test-Path $OutputPath)) { New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null }
         
-        try {
-            # Execute psql and capture both output and potential errors
-            $dbResult = & $PsqlPath -h $ServerName -p $Port -U $Username -d $DatabaseName -t -A -c "$sizeQuery" 2>&1
+        $tables = $TableNames -split ',' | ForEach-Object { $_.Trim() }
+        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $env:PGPASSWORD = $Password
+
+        # --- MODE SELECTION ---
+        if (-not $Silent) {
+            # --- INTERACTIVE SEQUENTIAL MODE ---
+            Write-Host "[Mode: Interactive Sequential]" -ForegroundColor Yellow
+            $skipConfirmation = $false
+
+            foreach ($table in $tables) {
+                if (-not $skipConfirmation) {
+                    Write-Host "`n----------------------------------------------------------" -ForegroundColor Cyan
+                    Write-Host " Server: $ServerName | Table: $table"
+                    $Choices = [System.Management.Automation.Host.ChoiceDescription[]] @(
+                        New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", "Backup table."
+                        New-Object System.Management.Automation.Host.ChoiceDescription "Yes to &All", "Backup all remaining."
+                        New-Object System.Management.Automation.Host.ChoiceDescription "&No", "Skip table."
+                        New-Object System.Management.Automation.Host.ChoiceDescription "&Stop", "Exit."
+                    )
+                    $Decision = $host.ui.PromptForChoice("Confirmation", "Proceed with '$table'?", $Choices, 0)
+                    if ($Decision -eq 1) { $skipConfirmation = $true }
+                    elseif ($Decision -eq 2) { continue }
+                    elseif ($Decision -eq 3) { return }
+                }
+                
+                Execute-Backup -table $table -PgDumpPath $PgDumpPath -ServerName $ServerName -Port $Port -Username $Username -DatabaseName $DatabaseName -OutputPath $OutputPath -timestamp $timestamp -Password $Password
+            }
+        } 
+        else {
+            # --- SILENT PARALLEL MODE ---
+            Write-Host "[Mode: Silent Parallel (Max: $MaxParallel)]" -ForegroundColor Cyan
+            $jobs = @()
             
-            # Check if the result is a number
-            if ($dbResult -match '^\d+$') {
-                $rawSizeBytes = [long]($dbResult.Trim())
-            } else {
-                Write-Host "   [Warning] Could not get size. Database said: $dbResult" -ForegroundColor DarkYellow
+            foreach ($table in $tables) {
+                # Throttle logic: Wait if we have reached MaxParallel jobs
+                while (($jobs | Where-Object { $_.State -eq 'Running' }).Count -ge $MaxParallel) {
+                    Start-Sleep -Seconds 1
+                }
+
+                $jobs += Start-Job -Name "PG_$table" -ArgumentList $PgDumpPath, $ServerName, $Port, $Username, $DatabaseName, $table, $OutputPath, $timestamp, $Password -ScriptBlock {
+                    param($exe, $srv, $p, $usr, $db, $tbl, $out, $ts, $pass)
+                    $env:PGPASSWORD = $pass
+                    $cleanTbl = $tbl -replace '\W', '_'
+                    $file = Join-Path $out "${srv}_${db}_${cleanTbl}_${ts}.backup"
+                    
+                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                    $argList = "--file=`"$file`" --host=$srv --port=$p --username=$usr --format=c --table=`"$tbl`" $db"
+                    
+                    $proc = Start-Process -FilePath $exe -ArgumentList $argList -Wait -PassThru -NoNewWindow
+                    $sw.Stop()
+
+                    if ($proc.ExitCode -eq 0) {
+                        $size = (Get-Item $file).Length / 1MB
+                        return "SUCCESS: $tbl | Size: $([math]::Round($size,2)) MB | Time: $($sw.Elapsed.ToString('mm\:ss'))"
+                    } else {
+                        return "FAILED: $tbl"
+                    }
+                }
+                Write-Host "   > Queued: $table" -ForegroundColor Gray
             }
-        } catch {
-            Write-Host "   [Error] Size query failed: $($_.Exception.Message)" -ForegroundColor Red
+
+            # Wait for remaining jobs and output results
+            $null = Wait-Job $jobs
+            Write-Host "`n--- Parallel Results ---" -ForegroundColor Cyan
+            Receive-Job $jobs | Write-Host -ForegroundColor Green
+            Remove-Job $jobs
         }
 
-        # Determine Monitoring Interval & Pretty Size
-        $prettySize = "$([math]::Round($rawSizeBytes / 1GB, 2)) GB"
-        if ($rawSizeBytes -lt 1GB) { $prettySize = "$([math]::Round($rawSizeBytes / 1MB, 2)) MB" }
-
-        # Dynamic Interval: < 5GB = 30s, > 5GB = 120s
-        if ($rawSizeBytes -gt 0 -and $rawSizeBytes -lt 5GB) {
-            $monitorInterval = 30
-            $intervalText = "30 seconds"
-        } else {
-            $monitorInterval = 120 
-            $intervalText = "2 minutes"
-        }
-
-        $cleanTableName = $table -replace '\W', '_'
-        $fileName = Join-Path $OutputPath "$($ServerName -replace '\W','_')_$($DatabaseName -replace '\W','_')_${cleanTableName}_${timestamp}.backup"
-        
-        $argList = @(
-            "--file=`"$fileName`"",
-            "--host=$ServerName",
-            "--port=$Port",
-            "--username=$Username",
-            "--format=c",
-            "--large-objects",
-            "--verbose",
-            "--table=`"$table`"",
-            $DatabaseName
-        )
-
-        Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Starting backup for: $table" -ForegroundColor Cyan
-        Write-Host "   > Estimated table Size: $prettySize" -ForegroundColor Yellow
-        Write-Host "   > Updating progress every $intervalText." -ForegroundColor DarkGray
-        
-        $processInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $processInfo.FileName = $PgDumpPath
-        $processInfo.Arguments = $argList
-        $processInfo.RedirectStandardError = $true
-        $processInfo.UseShellExecute = $false
-        $processInfo.CreateNoWindow = $true
-        
-        $process = [System.Diagnostics.Process]::Start($processInfo)
-        
-        while (-not $process.HasExited) {
-            if (Test-Path $fileName) {
-                $currentSizeMB = (Get-Item $fileName).Length / 1MB
-                Write-Host "   > [$(Get-Date -Format 'HH:mm:ss')] Progress... Local File Size: $([math]::Round($currentSizeMB, 2)) MB" -ForegroundColor Gray
-            }
-            Start-Sleep -Seconds $monitorInterval
-        }
-
-        $stdErr = $process.StandardError.ReadToEnd()
-        if ($process.ExitCode -eq 0) {
-            $finalSize = (Get-Item $fileName).Length / 1MB
-            Write-Host "Successfully backed up $table ($([math]::Round($finalSize, 2)) MB)" -ForegroundColor Green
-        } else {
-            Write-Error "pg_dump failed for $table. Error details:`n$stdErr"
-        }
+        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+        Write-Host "`nAll operations completed." -ForegroundColor Green
     }
-
-    Remove-Item Env:\PGPASSWORD
-    Write-Host "`nAll tasks completed." -ForegroundColor Green
 }
+
+# Helper function for sequential logic to avoid code duplication
+function Execute-Backup {
+    param($table, $PgDumpPath, $ServerName, $Port, $Username, $DatabaseName, $OutputPath, $timestamp, $Password)
+    
+    $env:PGPASSWORD = $Password
+    $cleanTableName = $table -replace '\W', '_'
+    $fileName = Join-Path $OutputPath "${ServerName}_${DatabaseName}_${cleanTableName}_${timestamp}.backup"
+    
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Starting: $table" -ForegroundColor Gray
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    
+    $argList = @("--file=`"$fileName`"", "--host=$ServerName", "--port=$Port", "--username=$Username", "--format=c", "--table=`"$table`"", $DatabaseName)
+    $process = Start-Process -FilePath $PgDumpPath -ArgumentList $argList -Wait -PassThru -NoNewWindow
+    
+    $sw.Stop()
+    if ($process.ExitCode -eq 0) {
+        $size = (Get-Item $fileName).Length / 1MB
+        Write-Host "   > Success: $([math]::Round($size,2)) MB in $($sw.Elapsed.ToString('mm\:ss'))" -ForegroundColor Green
+    } else {
+        Write-Error "Failed to backup $table"
+    }
+}
+
 
 # --- Usage ---
 $params = @{
-    ServerName      = "ServerName"
+    ServerName      = "ServerName" 
     Username        = "UserName"
-    Password        = "SecretPass"
-    DatabaseName    = "DBName"
-    TableNames      = "public.table1, public.table2, public.table3"
+    Password        = "MyPass"
+    DatabaseName    = "DB"
+    TableNames      = "public.table1,public.table2,public.table3,public.table4,public.table5"
     OutputPath      = "D:\backups\"
     PgDumpPath      = "C:\Program Files\pgAdmin 4\runtime\pg_dump.exe"
 }
 
-Backup-PostgreSQLTables @params
+Backup-PostgreSQLTables @params -Silent -MaxParallel 3
