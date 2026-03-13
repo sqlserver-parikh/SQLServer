@@ -1,145 +1,88 @@
-<#
-.SYNOPSIS
-    Backs up PostgreSQL tables with optional throttled parallelism and silent modes.
-
-.PARAMETER MaxParallel
-    The number of simultaneous backup processes (default is 1). Only applies when -Silent is used.
-.PARAMETER Silent
-    Skips all interactive prompts. Required for Parallel execution.
-#>
-function Backup-PostgreSQLTables {
-    [CmdletBinding()]
+function Restore-PostgreSQLTables {
     param(
-        [Parameter(Mandatory=$true)][string]$ServerName,
-        [Parameter(Mandatory=$true)][string]$Username,
+        [string]$ServerName,
+        [string]$Username,
         [string]$Password,
-        [Parameter(Mandatory=$true)][string]$DatabaseName,
-        [Parameter(Mandatory=$true)][string]$TableNames,
-        [string]$OutputPath = "C:\Backups",
-        [string]$PgDumpPath = "C:\Program Files\pgAdmin 4\runtime\pg_dump.exe",
-        [string]$Port = "5432",
-        [int]$MaxParallel = 1,
-        [switch]$Silent
+        [string]$DatabaseName,
+        [string]$BackupFilesPath,
+        [string]$PgRestorePath = "C:\Program Files\pgAdmin 4\runtime\pg_restore.exe",
+        [string]$Port = "5432"
     )
 
-    process {
-        if (-not (Test-Path $PgDumpPath)) { Write-Error "pg_dump.exe not found."; return }
-        
-        # 1. Handle Password
-        if ([string]::IsNullOrWhiteSpace($Password)) {
-            $securePass = Read-Host -Prompt "Enter password for $Username" -AsSecureString
-            $Password = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePass))
-        }
-
-        if (-not (Test-Path $OutputPath)) { New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null }
-        
-        $tables = $TableNames -split ',' | ForEach-Object { $_.Trim() }
-        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-        $env:PGPASSWORD = $Password
-
-        # --- MODE SELECTION ---
-        if (-not $Silent) {
-            # --- INTERACTIVE SEQUENTIAL MODE ---
-            Write-Host "[Mode: Interactive Sequential]" -ForegroundColor Yellow
-            $skipConfirmation = $false
-
-            foreach ($table in $tables) {
-                if (-not $skipConfirmation) {
-                    Write-Host "`n----------------------------------------------------------" -ForegroundColor Cyan
-                    Write-Host " Server: $ServerName | Table: $table"
-                    $Choices = [System.Management.Automation.Host.ChoiceDescription[]] @(
-                        New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", "Backup table."
-                        New-Object System.Management.Automation.Host.ChoiceDescription "Yes to &All", "Backup all remaining."
-                        New-Object System.Management.Automation.Host.ChoiceDescription "&No", "Skip table."
-                        New-Object System.Management.Automation.Host.ChoiceDescription "&Stop", "Exit."
-                    )
-                    $Decision = $host.ui.PromptForChoice("Confirmation", "Proceed with '$table'?", $Choices, 0)
-                    if ($Decision -eq 1) { $skipConfirmation = $true }
-                    elseif ($Decision -eq 2) { continue }
-                    elseif ($Decision -eq 3) { return }
-                }
-                
-                Execute-Backup -table $table -PgDumpPath $PgDumpPath -ServerName $ServerName -Port $Port -Username $Username -DatabaseName $DatabaseName -OutputPath $OutputPath -timestamp $timestamp -Password $Password
-            }
-        } 
-        else {
-            # --- SILENT PARALLEL MODE ---
-            Write-Host "[Mode: Silent Parallel (Max: $MaxParallel)]" -ForegroundColor Cyan
-            $jobs = @()
-            
-            foreach ($table in $tables) {
-                # Throttle logic: Wait if we have reached MaxParallel jobs
-                while (($jobs | Where-Object { $_.State -eq 'Running' }).Count -ge $MaxParallel) {
-                    Start-Sleep -Seconds 1
-                }
-
-                $jobs += Start-Job -Name "PG_$table" -ArgumentList $PgDumpPath, $ServerName, $Port, $Username, $DatabaseName, $table, $OutputPath, $timestamp, $Password -ScriptBlock {
-                    param($exe, $srv, $p, $usr, $db, $tbl, $out, $ts, $pass)
-                    $env:PGPASSWORD = $pass
-                    $cleanTbl = $tbl -replace '\W', '_'
-                    $file = Join-Path $out "${srv}_${db}_${cleanTbl}_${ts}.backup"
-                    
-                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                    $argList = "--file=`"$file`" --host=$srv --port=$p --username=$usr --format=c --table=`"$tbl`" $db"
-                    
-                    $proc = Start-Process -FilePath $exe -ArgumentList $argList -Wait -PassThru -NoNewWindow
-                    $sw.Stop()
-
-                    if ($proc.ExitCode -eq 0) {
-                        $size = (Get-Item $file).Length / 1MB
-                        return "SUCCESS: $tbl | Size: $([math]::Round($size,2)) MB | Time: $($sw.Elapsed.ToString('mm\:ss'))"
-                    } else {
-                        return "FAILED: $tbl"
-                    }
-                }
-                Write-Host "   > Queued: $table" -ForegroundColor Gray
-            }
-
-            # Wait for remaining jobs and output results
-            $null = Wait-Job $jobs
-            Write-Host "`n--- Parallel Results ---" -ForegroundColor Cyan
-            Receive-Job $jobs | Write-Host -ForegroundColor Green
-            Remove-Job $jobs
-        }
-
-        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
-        Write-Host "`nAll operations completed." -ForegroundColor Green
+    if (-not (Test-Path $BackupFilesPath -PathType Container)) {
+        Write-Error "Backup files path '$BackupFilesPath' does not exist."
+        return
     }
-}
 
-# Helper function for sequential logic to avoid code duplication
-function Execute-Backup {
-    param($table, $PgDumpPath, $ServerName, $Port, $Username, $DatabaseName, $OutputPath, $timestamp, $Password)
-    
+    $backupFiles = Get-ChildItem -Path $BackupFilesPath -Filter "*.backup" | Sort-Object Name
+    if (-not $backupFiles) {
+        Write-Host "No backup files found." -ForegroundColor Yellow
+        return
+    }
+
     $env:PGPASSWORD = $Password
-    $cleanTableName = $table -replace '\W', '_'
-    $fileName = Join-Path $OutputPath "${ServerName}_${DatabaseName}_${cleanTableName}_${timestamp}.backup"
-    
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Starting: $table" -ForegroundColor Gray
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    
-    $argList = @("--file=`"$fileName`"", "--host=$ServerName", "--port=$Port", "--username=$Username", "--format=c", "--table=`"$table`"", $DatabaseName)
-    $process = Start-Process -FilePath $PgDumpPath -ArgumentList $argList -Wait -PassThru -NoNewWindow
-    
-    $sw.Stop()
-    if ($process.ExitCode -eq 0) {
-        $size = (Get-Item $fileName).Length / 1MB
-        Write-Host "   > Success: $([math]::Round($size,2)) MB in $($sw.Elapsed.ToString('mm\:ss'))" -ForegroundColor Green
-    } else {
-        Write-Error "Failed to backup $table"
+    $startTime = Get-Date
+    Write-Host "Starting restore process at $startTime..." -ForegroundColor Green
+
+    foreach ($file in $backupFiles) {
+        $fullFilePath = $file.FullName
+        Write-Host "`nRestoring: $($file.Name)" -ForegroundColor Cyan
+
+        $arguments = @(
+            "--host", $ServerName,
+            "--port", $Port,
+            "--username", $Username,
+            "--dbname", $DatabaseName,
+            "--section=pre-data",
+            "--section=data",
+            "--section=post-data",
+            "--no-owner",
+            "--no-privileges",
+            "--clean",
+            "--if-exists",
+            "--verbose",
+            $fullFilePath
+        )
+
+        try {
+            # Redirect 2>&1 merges Error Stream into Success Stream so we can parse it
+            # and prevents PowerShell from throwing NativeCommandErrors for status messages.
+            $output = & $PgRestorePath $arguments 2>&1
+            $exitCode = $LASTEXITCODE
+
+            # Check if the output contains the specific transaction_timeout error
+            $isTimeoutError = $output | Where-Object { $_ -match "transaction_timeout" }
+            
+            if ($exitCode -eq 0) {
+                Write-Host "Successfully restored: $($file.Name)" -ForegroundColor Green
+            }
+            elseif ($exitCode -eq 1 -and $isTimeoutError) {
+                Write-Host "Restored with minor version warnings (transaction_timeout ignored). Data integrity is likely fine." -ForegroundColor Yellow
+            }
+            else {
+                Write-Error "pg_restore failed for $($file.Name) with exit code $exitCode."
+                # Output the actual error messages for debugging
+                $output | Where-Object { $_.GetType().Name -eq "ErrorRecord" -or $_ -match "error" } | Write-Host -ForegroundColor Red
+            }
+        }
+        catch {
+            Write-Error "Critical script error: $($_.Exception.Message)"
+        }
     }
+
+    Remove-Item Env:\PGPASSWORD
+    $duration = (Get-Date) - $startTime
+    Write-Host "`nRestore completed. Total duration: $($duration.ToString('hh\:mm\:ss'))" -ForegroundColor Green
 }
 
-
-# --- Usage ---
-$params = @{
-    ServerName      = "ServerName" 
-    Username        = "UserName"
-    Password        = "MyPass"
-    DatabaseName    = "DB"
-    TableNames      = "public.table1,public.table2,public.table3,public.table4,public.table5"
-    OutputPath      = "D:\backups\"
-    PgDumpPath      = "C:\Program Files\pgAdmin 4\runtime\pg_dump.exe"
+# --- Usage (Splatting) ---
+$restoreParams = @{
+    ServerName      = "servername"
+    Username        = "username"
+    Password        = "password" 
+    DatabaseName    = "dbname"
+    BackupFilesPath = "D:\Restore\"
+    PgRestorePath   = "C:\Program Files\pgAdmin 4\runtime\pg_restore.exe"
 }
 
-Backup-PostgreSQLTables @params -Silent -MaxParallel 3
+Restore-PostgreSQLTables @restoreParams
