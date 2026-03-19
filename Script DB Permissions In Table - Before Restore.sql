@@ -1,6 +1,30 @@
-CREATE OR ALTER PROCEDURE usp_ScriptPermission
-    @DBName NVARCHAR(128) = NULL -- NULL = Loop through ALL databases
+USE TEMPDB 
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE OR ALTER PROCEDURE [dbo].[usp_ScriptPermission]
+    @DBName NVARCHAR(128) = NULL,
+    @SystemDBs BIT = 0
 AS
+/*********************************************************************************
+Name:       usp_ScriptPermission
+Date:       2024-05-22
+Version:    1.1
+Description: 
+    Scripts database-level permissions (Users, Roles, Object-level, Schema-level, 
+    and DB-level) and stores them in [dbo].[tbl_DBPermission].
+
+Parameters:
+    @DBName:    Specific database name to script. If NULL, scripts all databases.
+    @SystemDBs: If 1, includes master, model, and msdb. (tempdb is always excluded).
+
+Usage:
+    EXEC [dbo].[usp_ScriptPermission] @DBName = 'SalesDB';
+    EXEC [dbo].[usp_ScriptPermission] @SystemDBs = 1; -- Script all including system
+*********************************************************************************/
 BEGIN
     SET NOCOUNT ON;
 
@@ -10,56 +34,35 @@ BEGIN
     DECLARE @InnerScript NVARCHAR(MAX);
     DECLARE @NextSnapID INT;
 
-IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tbl_DBPermission]') AND type in (N'U'))
-BEGIN
-    CREATE TABLE [dbo].[tbl_DBPermission](
-        [ID] [int] IDENTITY(1,1) NOT NULL,
-        [DBName] [nvarchar](128) NULL,
-        [PermissionScript] [nvarchar](max) NULL,
-        [ScriptDate] [datetime] NULL CONSTRAINT [DF_tbl_DBPermission_ScriptDate] DEFAULT (GETDATE()),
-        [Servername] [nvarchar](128) NULL CONSTRAINT [DF_tbl_DBPermission_Servername] DEFAULT (@@SERVERNAME),
-        [DBSnapID] [int] NULL CONSTRAINT [DF_tbl_DBPermission_DBSnapID] DEFAULT ((1)),
-        CONSTRAINT [PK_tbl_DBPermission] PRIMARY KEY CLUSTERED 
-        (
-            [ID] ASC
-        ) WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
-    ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
-END
-    ---------------------------------------------------------------------------
-    -- 1. DEFINE THE CORE SCRIPT LOGIC
-    --    Changes: Removed empty spacer rows; Added ISNULL to all QUOTENAMEs
-    ---------------------------------------------------------------------------
+    -- Ensure logging table exists
+    IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tbl_DBPermission]') AND type in (N'U'))
+    BEGIN
+        CREATE TABLE [dbo].[tbl_DBPermission](
+            [ID] [int] IDENTITY(1,1) NOT NULL,
+            [DBName] [nvarchar](128) NULL,
+            [PermissionScript] [nvarchar](max) NULL,
+            [ScriptDate] [datetime] NULL CONSTRAINT [DF_tbl_DBPermission_ScriptDate] DEFAULT (GETDATE()),
+            [Servername] [nvarchar](128) NULL CONSTRAINT [DF_tbl_DBPermission_Servername] DEFAULT (@@SERVERNAME),
+            [DBSnapID] [int] NULL,
+            CONSTRAINT [PK_tbl_DBPermission] PRIMARY KEY CLUSTERED ([ID] ASC)
+        ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY];
+    END
+
+    -- Define the Core Scripting Logic
     SET @InnerScript = N'
-        /*********************************************/
-        /*********   DB CONTEXT STATEMENT    *********/
-        /*********************************************/
         SELECT ''-- [-- DB CONTEXT --] --'' AS [ScriptLine], 1 AS [SortOrder]
         UNION ALL
         SELECT  ''USE '' + QUOTENAME(DB_NAME()) + '';'', 1
-
-        /*********************************************/
-        /*********     DB USER CREATION      *********/
-        /*********************************************/
         UNION ALL SELECT ''-- [-- DB USERS --] --'', 3
         UNION ALL
         SELECT  ''IF NOT EXISTS (SELECT [name] FROM sys.database_principals WHERE [name] = '' + N'''''''' + [name] + N'''''''' + '') BEGIN CREATE USER '' + QUOTENAME([name]) + '' FOR LOGIN '' + QUOTENAME([name]) + '' WITH DEFAULT_SCHEMA = '' + ISNULL(QUOTENAME([default_schema_name]), ''[dbo]'') + '' END; '', 4
         FROM    sys.database_principals
-        WHERE [type] IN (''U'', ''S'', ''G'')
-        AND   [name] IS NOT NULL -- Safety check
-
-        /*********************************************/
-        /*********    DB ROLE PERMISSIONS    *********/
-        /*********************************************/
+        WHERE [type] IN (''U'', ''S'', ''G'') AND [name] NOT IN (''sys'', ''INFORMATION_SCHEMA'', ''guest'')
         UNION ALL SELECT ''-- [-- DB ROLES --] --'', 6
         UNION ALL
         SELECT  ''EXEC sp_addrolemember @rolename = '' + ISNULL(QUOTENAME(USER_NAME(rm.role_principal_id), ''''''''), ''[UnknownRole]'') + '', @membername = '' + ISNULL(QUOTENAME(USER_NAME(rm.member_principal_id), ''''''''), ''[UnknownUser]'') + '';'', 7
         FROM    sys.database_role_members AS rm
-        WHERE   USER_NAME(rm.member_principal_id) IS NOT NULL 
-        AND     USER_NAME(rm.role_principal_id) IS NOT NULL
-
-        /*********************************************/
-        /*********  OBJECT LEVEL PERMISSIONS *********/
-        /*********************************************/
+        WHERE   USER_NAME(rm.member_principal_id) NOT IN (''dbo'')
         UNION ALL SELECT ''-- [-- OBJECT LEVEL PERMISSIONS --] --'', 9
         UNION ALL
         SELECT  CASE WHEN perm.state <> ''W'' THEN perm.state_desc ELSE ''GRANT'' END
@@ -71,26 +74,14 @@ END
         INNER JOIN sys.objects AS obj ON perm.major_id = obj.[object_id]
         INNER JOIN sys.database_principals AS usr ON perm.grantee_principal_id = usr.principal_id
         LEFT JOIN sys.columns AS cl ON cl.column_id = perm.minor_id AND cl.[object_id] = perm.major_id
-        WHERE USER_NAME(usr.principal_id) IS NOT NULL
-
-        /*********************************************/
-        /*********    DB LEVEL PERMISSIONS   *********/
-        /*********************************************/
         UNION ALL SELECT ''-- [--DB LEVEL PERMISSIONS --] --'', 12
         UNION ALL
         SELECT  CASE WHEN perm.state <> ''W'' THEN perm.state_desc ELSE ''GRANT'' END
-                + '' '' + perm.permission_name + '' TO '' + ''['' + ISNULL(USER_NAME(usr.principal_id), ''UnknownUser'') + '']'' 
+                + '' '' + perm.permission_name + '' TO '' + QUOTENAME(USER_NAME(usr.principal_id)) 
                 + CASE WHEN perm.state <> ''W'' THEN '''' ELSE '' WITH GRANT OPTION'' END, 13
         FROM    sys.database_permissions AS perm
         INNER JOIN sys.database_principals AS usr ON perm.grantee_principal_id = usr.principal_id
-        WHERE   [perm].[major_id] = 0 
-        AND     [usr].[principal_id] > 4 
-        AND     [usr].[type] IN (''G'', ''S'', ''U'') 
-        AND     USER_NAME(usr.principal_id) IS NOT NULL
-
-        /*********************************************/
-        /*********  SCHEMA PERMISSIONS      *********/
-        /*********************************************/
+        WHERE   [perm].[major_id] = 0 AND [usr].[principal_id] > 4 AND [usr].[type] IN (''G'', ''S'', ''U'') 
         UNION ALL SELECT ''-- [--DB LEVEL SCHEMA PERMISSIONS --] --'', 15
         UNION ALL
         SELECT  CASE WHEN perm.state <> ''W'' THEN perm.state_desc ELSE ''GRANT'' END
@@ -102,58 +93,35 @@ END
         inner join sys.database_principals dbprin on perm.grantee_principal_id = dbprin.principal_id
         WHERE class = 3 ';
 
-    ---------------------------------------------------------------------------
-    -- 2. DETERMINE TARGET DATABASES
-    ---------------------------------------------------------------------------
+    -- Identify Target Databases
     DECLARE @TargetDatabases TABLE (DBName NVARCHAR(128));
-
     INSERT INTO @TargetDatabases (DBName)
-    SELECT name 
-    FROM sys.databases
-    WHERE 
-        (@DBName IS NULL OR name = @DBName)
-        AND name NOT IN ('master', 'model', 'msdb', 'tempdb', 'distribution')
-        AND state_desc = 'ONLINE'
-        AND user_access_desc = 'MULTI_USER'
-        AND is_read_only = 0
-        AND source_database_id IS NULL;
+    SELECT name FROM sys.databases
+    WHERE (@DBName IS NULL OR name = @DBName)
+      AND name NOT IN ('tempdb', 'distribution')
+      AND (
+            @SystemDBs = 1 
+            OR (name NOT IN ('master', 'model', 'msdb'))
+          )
+      AND state_desc = 'ONLINE'
+      AND is_read_only = 0;
 
-    ---------------------------------------------------------------------------
-    -- 3. EXECUTE LOOP
-    ---------------------------------------------------------------------------
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR 
-    SELECT DBName FROM @TargetDatabases;
-
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT DBName FROM @TargetDatabases;
     OPEN db_cursor;
     FETCH NEXT FROM db_cursor INTO @CurrentDB;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        -- Calculate SnapID
-        SELECT @NextSnapID = ISNULL(MAX(DBSnapID), 0) + 1
-        FROM dbo.tbl_DBPermission
-        WHERE DBName = @CurrentDB;
+        SELECT @NextSnapID = ISNULL(MAX(DBSnapID), 0) + 1 FROM dbo.tbl_DBPermission WHERE DBName = @CurrentDB;
 
-        PRINT 'Processing: ' + @CurrentDB + ' (SnapID: ' + CAST(@NextSnapID AS VARCHAR(10)) + ')';
-
-        SET @DynamicSQL = N'
-        USE ' + QUOTENAME(@CurrentDB) + N';
-        
+        SET @DynamicSQL = N'USE ' + QUOTENAME(@CurrentDB) + N';
         INSERT INTO ' + QUOTENAME(@HostDB) + N'.dbo.tbl_DBPermission (DBName, PermissionScript, ScriptDate, Servername, DBSnapID)
-        SELECT 
-            ''' + @CurrentDB + N''', 
-            [ScriptLine], 
-            GETDATE(), 
-            @@SERVERNAME,
-            ' + CAST(@NextSnapID AS NVARCHAR(20)) + N'
-        FROM (
-            ' + @InnerScript + N'
-        ) AS FinalScript
-        ORDER BY [SortOrder];
-        ';
+        SELECT ''' + @CurrentDB + N''', [ScriptLine], GETDATE(), @@SERVERNAME, ' + CAST(@NextSnapID AS NVARCHAR(10)) + N'
+        FROM (' + @InnerScript + N') AS FinalScript ORDER BY [SortOrder];';
 
         BEGIN TRY
             EXEC sp_executesql @DynamicSQL;
+            PRINT 'Success: ' + @CurrentDB + ' (Snapshot ' + CAST(@NextSnapID AS VARCHAR(5)) + ')';
         END TRY
         BEGIN CATCH
             PRINT 'Error processing ' + @CurrentDB + ': ' + ERROR_MESSAGE();
@@ -164,68 +132,91 @@ END
 
     CLOSE db_cursor;
     DEALLOCATE db_cursor;
-
-    PRINT 'Done.';
 END
 GO
 
 
-CREATE OR ALTER PROCEDURE usp_RestorePermission
-    @CurrentDBName NVARCHAR(128), -- The DB Name stored in tbl_DBPermission
-    @NewDBName NVARCHAR(128),     -- The Target DB to apply permissions to
-    @DBSnapID INT,                -- The Snapshot ID to restore
-    @Execute BIT = 0              -- 0 = Print Script with Error Handling; 1 = Execute Directly
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE OR ALTER PROCEDURE [dbo].[usp_RestorePermission]
+    @CurrentDBName NVARCHAR(128) = 'lIVEBACKUP', 
+    @NewDBName     NVARCHAR(128) = NULL, 
+    @DBSnapID      INT = NULL,            
+    @Print         BIT = 1,              
+    @Execute       BIT = 1               
 AS
+/*********************************************************************************
+Name:       usp_RestorePermission
+Date:       2024-05-22
+Version:    1.1
+Description: 
+    Restores permissions from [dbo].[tbl_DBPermission] to a target database.
+
+Parameters:
+    @CurrentDBName: The database name as recorded in the logging table.
+    @NewDBName:     The target DB to apply permissions to. If NULL, uses @CurrentDBName.
+    @DBSnapID:      Specific snapshot ID. If NULL, defaults to the LATEST snapshot.
+    @Print:         If 1, prints the T-SQL script to the message window.
+    @Execute:       If 1, executes the T-SQL script against the target database.
+
+Usage:
+    -- Preview latest permissions for a DB
+    EXEC [dbo].[usp_RestorePermission] @CurrentDBName = 'SalesDB';
+
+    -- Restore latest permissions to a different DB (Execute)
+    EXEC [dbo].[usp_RestorePermission] @CurrentDBName = 'SalesDB', @NewDBName = 'SalesDB_New', @Execute = 1, @Print = 0;
+*********************************************************************************/
 BEGIN
     SET NOCOUNT ON;
 
-    -- 1. Validation
+    -- Default: If NewDBName is null, target is the original DB
+    IF @NewDBName IS NULL SET @NewDBName = @CurrentDBName;
+
+    -- Default: If SnapID is null, get the latest one
+    IF @DBSnapID IS NULL
+    BEGIN
+        SELECT @DBSnapID = MAX(DBSnapID) 
+        FROM dbo.tbl_DBPermission 
+        WHERE DBName = @CurrentDBName;
+    END
+
+    -- Validation
     IF DB_ID(@NewDBName) IS NULL
     BEGIN
-        RAISERROR('Target database [%s] does not exist.', 16, 1, @NewDBName);
+        RAISERROR('Target database [%s] does not exist or is offline.', 16, 1, @NewDBName);
         RETURN;
     END
 
-    IF NOT EXISTS (SELECT 1 FROM dbo.tbl_DBPermission WHERE DBName = @CurrentDBName AND DBSnapID = @DBSnapID)
+    IF @DBSnapID IS NULL OR NOT EXISTS (SELECT 1 FROM dbo.tbl_DBPermission WHERE DBName = @CurrentDBName AND DBSnapID = @DBSnapID)
     BEGIN
-        RAISERROR('No permissions found for DB [%s] with Snapshot ID [%d].', 16, 1, @CurrentDBName, @DBSnapID);
+        RAISERROR('No permission history found for DB [%s] with Snapshot ID [%d].', 16, 1, @CurrentDBName, @DBSnapID);
         RETURN;
     END
 
     DECLARE @ScriptLine NVARCHAR(MAX);
     DECLARE @DynamicSQL NVARCHAR(MAX);
-    DECLARE @ErrorMsg NVARCHAR(MAX);
     DECLARE @SuccessCount INT = 0;
     DECLARE @FailCount INT = 0;
 
-    -- 2. Header Information
-    IF @Execute = 1
+    -- Header
+    IF @Print = 1
     BEGIN
-        PRINT '-------------------------------------------------------------';
-        PRINT 'Restoring Permissions (EXECUTION MODE)';
-        PRINT 'Source: ' + @CurrentDBName + ' (SnapID: ' + CAST(@DBSnapID AS VARCHAR(10)) + ')';
-        PRINT 'Target: ' + @NewDBName;
-        PRINT '-------------------------------------------------------------';
-    END
-    ELSE
-    BEGIN
-        PRINT '-- -------------------------------------------------------------';
-        PRINT '-- Generated Restoration Script';
-        PRINT '-- Source: ' + @CurrentDBName + ' (SnapID: ' + CAST(@DBSnapID AS VARCHAR(10)) + ')';
-        PRINT '-- Target: ' + @NewDBName;
-        PRINT '-- -------------------------------------------------------------';
-        PRINT '';
+        PRINT '-- =============================================================';
+        PRINT '-- RESTORE SCRIPT FOR: ' + @NewDBName;
+        PRINT '-- SOURCE DATA: ' + @CurrentDBName + ' (Snapshot: ' + CAST(@DBSnapID AS VARCHAR(10)) + ')';
+        PRINT '-- GENERATED: ' + CAST(GETDATE() AS VARCHAR(30));
+        PRINT '-- =============================================================';
         PRINT 'USE ' + QUOTENAME(@NewDBName) + ';';
         PRINT 'GO';
-        PRINT '';
     END
 
-    -- 3. Cursor to loop through the stored script lines
     DECLARE cur_restore CURSOR LOCAL FAST_FORWARD FOR 
     SELECT PermissionScript 
     FROM dbo.tbl_DBPermission
-    WHERE DBName = @CurrentDBName 
-      AND DBSnapID = @DBSnapID
+    WHERE DBName = @CurrentDBName AND DBSnapID = @DBSnapID
     ORDER BY ID;
 
     OPEN cur_restore;
@@ -233,50 +224,35 @@ BEGIN
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        -- Filter out comments and blank lines
-        IF LEFT(LTRIM(@ScriptLine), 2) <> '--' AND LEN(LTRIM(@ScriptLine)) > 0
+        -- Ignore comments and 'USE' statements from the source log
+        IF LEFT(LTRIM(@ScriptLine), 2) <> '--' AND @ScriptLine NOT LIKE 'USE %' AND LEN(LTRIM(@ScriptLine)) > 0
         BEGIN
-            -- Skip the original "USE [OldDB]" statement from the source script
-            IF @ScriptLine NOT LIKE 'USE %'
+            
+            -- EXECUTION LOGIC
+            IF @Execute = 1
             BEGIN
-                
-                -- ==========================================================
-                -- MODE: EXECUTE (@Execute = 1)
-                -- ==========================================================
-                IF @Execute = 1
-                BEGIN
-                    SET @DynamicSQL = N'USE ' + QUOTENAME(@NewDBName) + N'; ' + @ScriptLine;
-
-                    BEGIN TRY
-                        EXEC sp_executesql @DynamicSQL;
-                        SET @SuccessCount = @SuccessCount + 1;
-                    END TRY
-                    BEGIN CATCH
-                        SET @FailCount = @FailCount + 1;
-                        SET @ErrorMsg = ERROR_MESSAGE();
-                        PRINT 'FAILED Statement: ' + LEFT(@ScriptLine, 100) + '...';
-                        PRINT '   Error: ' + @ErrorMsg;
-                        PRINT '-------------------------------------------------------------';
-                    END CATCH
-                END
-
-                -- ==========================================================
-                -- MODE: PRINT / GENERATE SCRIPT (@Execute = 0)
-                -- ==========================================================
-                ELSE
-                BEGIN
-                    -- We wrap the statement in TRY/CATCH so manual execution doesn't stop on error
-                    PRINT 'BEGIN TRY';
-                    PRINT '    ' + @ScriptLine;
-                    PRINT 'END TRY';
-                    PRINT 'BEGIN CATCH';
-                    -- We print the error inside the generated script for the user to see
-                    PRINT '    PRINT ''Error Executing: ' + LEFT(REPLACE(@ScriptLine, '''', ''), 50) + '...'';';
-                    PRINT '    PRINT ''Reason: '' + ERROR_MESSAGE();';
-                    PRINT 'END CATCH';
-                    PRINT ''; -- Empty line for readability
-                END
+                SET @DynamicSQL = N'USE ' + QUOTENAME(@NewDBName) + N'; ' + @ScriptLine;
+                BEGIN TRY
+                    EXEC sp_executesql @DynamicSQL;
+                    SET @SuccessCount = @SuccessCount + 1;
+                END TRY
+                BEGIN CATCH
+                    SET @FailCount = @FailCount + 1;
+                    PRINT 'EXECUTION ERROR on line: ' + @ScriptLine;
+                    PRINT 'ERROR DETAIL: ' + ERROR_MESSAGE();
+                END CATCH
             END
+
+            -- PRINT LOGIC
+            IF @Print = 1
+            BEGIN
+                PRINT 'BEGIN TRY ' + @ScriptLine + ' END TRY';
+                PRINT 'BEGIN CATCH PRINT ''Error on: ' + REPLACE(@ScriptLine, '''', '''''') + ''' + ERROR_MESSAGE() END CATCH;';
+            END
+        END
+        ELSE IF @Print = 1 -- Still print comments for readability if they exist
+        BEGIN
+            PRINT @ScriptLine;
         END
 
         FETCH NEXT FROM cur_restore INTO @ScriptLine;
@@ -285,53 +261,12 @@ BEGIN
     CLOSE cur_restore;
     DEALLOCATE cur_restore;
 
-    -- 4. Summary (Only needed for Execution Mode)
+    -- Summary
     IF @Execute = 1
     BEGIN
         PRINT '-------------------------------------------------------------';
-        PRINT 'Restore Complete.';
-        PRINT 'Successful Statements: ' + CAST(@SuccessCount AS VARCHAR(10));
-        PRINT 'Failed Statements:     ' + CAST(@FailCount AS VARCHAR(10));
+        PRINT 'Execution Summary: ' + CAST(@SuccessCount AS VARCHAR(10)) + ' succeeded, ' + CAST(@FailCount AS VARCHAR(10)) + ' failed.';
         PRINT '-------------------------------------------------------------';
-    END
-    ELSE
-    BEGIN
-        PRINT '-- -------------------------------------------------------------';
-        PRINT '-- End of Generated Script';
-        PRINT '-- -------------------------------------------------------------';
     END
 END
 GO
-
-
---/* 
---   ROLLBACK SCRIPT 
---   Removes: usp_RestorePermission, usp_ScriptPermission, tbl_DBPermission
---*/
-
---USE tempdb; -- Or your specific database name
---GO
-
----- 1. Drop the Restore Procedure
---IF OBJECT_ID('dbo.usp_RestorePermission', 'P') IS NOT NULL
---BEGIN
---    DROP PROCEDURE dbo.usp_RestorePermission;
---    PRINT 'Dropped procedure usp_RestorePermission';
---END
---GO
-
----- 2. Drop the Scripting Procedure
---IF OBJECT_ID('dbo.usp_ScriptPermission', 'P') IS NOT NULL
---BEGIN
---    DROP PROCEDURE dbo.usp_ScriptPermission;
---    PRINT 'Dropped procedure usp_ScriptPermission';
---END
---GO
-
----- 3. Drop the Table (Warning: This deletes all saved permission history)
---IF OBJECT_ID('dbo.tbl_DBPermission', 'U') IS NOT NULL
---BEGIN
---    DROP TABLE dbo.tbl_DBPermission;
---    PRINT 'Dropped table tbl_DBPermission';
---END
---GO
