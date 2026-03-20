@@ -1,4 +1,4 @@
-USE TEMPDB 
+USE tempdb 
 GO
 SET ANSI_NULLS ON
 GO
@@ -6,24 +6,27 @@ SET QUOTED_IDENTIFIER ON
 GO
 
 CREATE OR ALTER PROCEDURE [dbo].[usp_ScriptPermission]
-    @DBName NVARCHAR(128) = NULL,
-    @SystemDBs BIT = 0
+    @DBName        NVARCHAR(128) = NULL,
+    @SystemDBs     BIT = 0,
+    @RetentionDays INT = 30
 AS
 /*********************************************************************************
 Name:       usp_ScriptPermission
-Date:       2024-05-22
-Version:    1.1
+Date:       2024-05-22 (Updated: 2024-05-23)
+Version:    1.2
 Description: 
     Scripts database-level permissions (Users, Roles, Object-level, Schema-level, 
     and DB-level) and stores them in [dbo].[tbl_DBPermission].
+    Includes a cleanup mechanism for old history.
 
 Parameters:
-    @DBName:    Specific database name to script. If NULL, scripts all databases.
-    @SystemDBs: If 1, includes master, model, and msdb. (tempdb is always excluded).
+    @DBName:        Specific database name to script. If NULL, scripts all databases.
+    @SystemDBs:     If 1, includes master, model, and msdb. (tempdb is always excluded).
+    @RetentionDays: Number of days to keep history in tbl_DBPermission. Default is 30.
 
 Usage:
     EXEC [dbo].[usp_ScriptPermission] @DBName = 'SalesDB';
-    EXEC [dbo].[usp_ScriptPermission] @SystemDBs = 1; -- Script all including system
+    EXEC [dbo].[usp_ScriptPermission] @RetentionDays = 60; -- Script and keep 60 days
 *********************************************************************************/
 BEGIN
     SET NOCOUNT ON;
@@ -34,7 +37,7 @@ BEGIN
     DECLARE @InnerScript NVARCHAR(MAX);
     DECLARE @NextSnapID INT;
 
-    -- Ensure logging table exists
+    -- 1. Ensure logging table exists
     IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tbl_DBPermission]') AND type in (N'U'))
     BEGIN
         CREATE TABLE [dbo].[tbl_DBPermission](
@@ -48,7 +51,17 @@ BEGIN
         ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY];
     END
 
-    -- Define the Core Scripting Logic
+    -- 2. Cleanup old records based on retention parameter
+    IF @RetentionDays IS NOT NULL AND @RetentionDays >= 0
+    BEGIN
+        DELETE FROM [dbo].[tbl_DBPermission]
+        WHERE [ScriptDate] < DATEADD(DAY, -@RetentionDays, GETDATE());
+        
+        IF @@ROWCOUNT > 0
+            PRINT 'Cleanup: Removed records older than ' + CAST(@RetentionDays AS VARCHAR(10)) + ' days.';
+    END
+
+    -- 3. Define the Core Scripting Logic
     SET @InnerScript = N'
         SELECT ''-- [-- DB CONTEXT --] --'' AS [ScriptLine], 1 AS [SortOrder]
         UNION ALL
@@ -93,7 +106,7 @@ BEGIN
         inner join sys.database_principals dbprin on perm.grantee_principal_id = dbprin.principal_id
         WHERE class = 3 ';
 
-    -- Identify Target Databases
+    -- 4. Identify Target Databases
     DECLARE @TargetDatabases TABLE (DBName NVARCHAR(128));
     INSERT INTO @TargetDatabases (DBName)
     SELECT name FROM sys.databases
@@ -132,141 +145,5 @@ BEGIN
 
     CLOSE db_cursor;
     DEALLOCATE db_cursor;
-END
-GO
-
-
-SET ANSI_NULLS ON
-GO
-SET QUOTED_IDENTIFIER ON
-GO
-
-CREATE OR ALTER PROCEDURE [dbo].[usp_RestorePermission]
-    @CurrentDBName NVARCHAR(128) = 'lIVEBACKUP', 
-    @NewDBName     NVARCHAR(128) = NULL, 
-    @DBSnapID      INT = NULL,            
-    @Print         BIT = 1,              
-    @Execute       BIT = 1               
-AS
-/*********************************************************************************
-Name:       usp_RestorePermission
-Date:       2024-05-22
-Version:    1.1
-Description: 
-    Restores permissions from [dbo].[tbl_DBPermission] to a target database.
-
-Parameters:
-    @CurrentDBName: The database name as recorded in the logging table.
-    @NewDBName:     The target DB to apply permissions to. If NULL, uses @CurrentDBName.
-    @DBSnapID:      Specific snapshot ID. If NULL, defaults to the LATEST snapshot.
-    @Print:         If 1, prints the T-SQL script to the message window.
-    @Execute:       If 1, executes the T-SQL script against the target database.
-
-Usage:
-    -- Preview latest permissions for a DB
-    EXEC [dbo].[usp_RestorePermission] @CurrentDBName = 'SalesDB';
-
-    -- Restore latest permissions to a different DB (Execute)
-    EXEC [dbo].[usp_RestorePermission] @CurrentDBName = 'SalesDB', @NewDBName = 'SalesDB_New', @Execute = 1, @Print = 0;
-*********************************************************************************/
-BEGIN
-    SET NOCOUNT ON;
-
-    -- Default: If NewDBName is null, target is the original DB
-    IF @NewDBName IS NULL SET @NewDBName = @CurrentDBName;
-
-    -- Default: If SnapID is null, get the latest one
-    IF @DBSnapID IS NULL
-    BEGIN
-        SELECT @DBSnapID = MAX(DBSnapID) 
-        FROM dbo.tbl_DBPermission 
-        WHERE DBName = @CurrentDBName;
-    END
-
-    -- Validation
-    IF DB_ID(@NewDBName) IS NULL
-    BEGIN
-        RAISERROR('Target database [%s] does not exist or is offline.', 16, 1, @NewDBName);
-        RETURN;
-    END
-
-    IF @DBSnapID IS NULL OR NOT EXISTS (SELECT 1 FROM dbo.tbl_DBPermission WHERE DBName = @CurrentDBName AND DBSnapID = @DBSnapID)
-    BEGIN
-        RAISERROR('No permission history found for DB [%s] with Snapshot ID [%d].', 16, 1, @CurrentDBName, @DBSnapID);
-        RETURN;
-    END
-
-    DECLARE @ScriptLine NVARCHAR(MAX);
-    DECLARE @DynamicSQL NVARCHAR(MAX);
-    DECLARE @SuccessCount INT = 0;
-    DECLARE @FailCount INT = 0;
-
-    -- Header
-    IF @Print = 1
-    BEGIN
-        PRINT '-- =============================================================';
-        PRINT '-- RESTORE SCRIPT FOR: ' + @NewDBName;
-        PRINT '-- SOURCE DATA: ' + @CurrentDBName + ' (Snapshot: ' + CAST(@DBSnapID AS VARCHAR(10)) + ')';
-        PRINT '-- GENERATED: ' + CAST(GETDATE() AS VARCHAR(30));
-        PRINT '-- =============================================================';
-        PRINT 'USE ' + QUOTENAME(@NewDBName) + ';';
-        PRINT 'GO';
-    END
-
-    DECLARE cur_restore CURSOR LOCAL FAST_FORWARD FOR 
-    SELECT PermissionScript 
-    FROM dbo.tbl_DBPermission
-    WHERE DBName = @CurrentDBName AND DBSnapID = @DBSnapID
-    ORDER BY ID;
-
-    OPEN cur_restore;
-    FETCH NEXT FROM cur_restore INTO @ScriptLine;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        -- Ignore comments and 'USE' statements from the source log
-        IF LEFT(LTRIM(@ScriptLine), 2) <> '--' AND @ScriptLine NOT LIKE 'USE %' AND LEN(LTRIM(@ScriptLine)) > 0
-        BEGIN
-            
-            -- EXECUTION LOGIC
-            IF @Execute = 1
-            BEGIN
-                SET @DynamicSQL = N'USE ' + QUOTENAME(@NewDBName) + N'; ' + @ScriptLine;
-                BEGIN TRY
-                    EXEC sp_executesql @DynamicSQL;
-                    SET @SuccessCount = @SuccessCount + 1;
-                END TRY
-                BEGIN CATCH
-                    SET @FailCount = @FailCount + 1;
-                    PRINT 'EXECUTION ERROR on line: ' + @ScriptLine;
-                    PRINT 'ERROR DETAIL: ' + ERROR_MESSAGE();
-                END CATCH
-            END
-
-            -- PRINT LOGIC
-            IF @Print = 1
-            BEGIN
-                PRINT 'BEGIN TRY ' + @ScriptLine + ' END TRY';
-                PRINT 'BEGIN CATCH PRINT ''Error on: ' + REPLACE(@ScriptLine, '''', '''''') + ''' + ERROR_MESSAGE() END CATCH;';
-            END
-        END
-        ELSE IF @Print = 1 -- Still print comments for readability if they exist
-        BEGIN
-            PRINT @ScriptLine;
-        END
-
-        FETCH NEXT FROM cur_restore INTO @ScriptLine;
-    END
-
-    CLOSE cur_restore;
-    DEALLOCATE cur_restore;
-
-    -- Summary
-    IF @Execute = 1
-    BEGIN
-        PRINT '-------------------------------------------------------------';
-        PRINT 'Execution Summary: ' + CAST(@SuccessCount AS VARCHAR(10)) + ' succeeded, ' + CAST(@FailCount AS VARCHAR(10)) + ' failed.';
-        PRINT '-------------------------------------------------------------';
-    END
 END
 GO
