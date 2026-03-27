@@ -1,7 +1,11 @@
 USE tempdb 
 GO
+set  ANSI_WARNINGs on
+GO
+drop table if exists tblSQLInformation
+go
 CREATE OR ALTER PROCEDURE usp_SQLInformation
-(@LogToTable bit = 0, @Retention int = 26) 
+(@LogToTable bit = 1, @Retention int = 26) 
 AS
 BEGIN
 
@@ -52,6 +56,7 @@ CREATE TABLE [tblSQLInformation](
 NonStandardConfigurations varchar(max) NULL,
 	[WindowsName] [varchar](128) NULL,
 	[WindowsRDPPort] [int] NULL,
+    [PowerPlan] varchar(100),
 	[InstantFileInitialization] [varchar](40) NOT NULL,
 	[SystemManufacturer] [varchar](500) NOT NULL,
 	[Physica/Virtual] [varchar](8) NULL,
@@ -90,6 +95,13 @@ EXEC MASTER.dbo.xp_regread 'HKEY_LOCAL_MACHINE',
     'SYSTEM\CurrentControlSet\Control\TimeZoneInformation',
     'TimeZoneKeyName',
     @TimeZone OUTPUT;
+ DECLARE @PowerPlan VARCHAR(100);
+    EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE', 'SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes', 'ActivePowerScheme', @PowerPlan OUTPUT;
+    SET @PowerPlan = CASE 
+        WHEN @PowerPlan = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c' THEN 'High Performance'
+        WHEN @PowerPlan = '381b4222-f694-41f0-9685-ff5bb260df2e' THEN 'Balanced'
+        WHEN @PowerPlan = 'a1841308-3541-4fab-bc81-f71556f20b4a' THEN 'Power Saver'
+        ELSE 'Other/Unknown' END;
 
 -- Check if DST is currently in effect
 EXEC MASTER.dbo.xp_regread 'HKEY_LOCAL_MACHINE',
@@ -655,6 +667,7 @@ FROM sys.dm_os_sys_info) LockPagesInMemory,
            --, ISNULL(@SystemFamily,'VM') AS SystemFamily 
            @WinName WindowsName, 
            @WindowsRDP WindowsRDPPort,
+           @PowerPlan,
 		  case when @IFIValue = 1 then 
      'Instant file initialization is enabled.'
 else 
