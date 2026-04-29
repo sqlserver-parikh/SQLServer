@@ -1,4 +1,4 @@
-USE tempdb
+USE tenpdb
 GO
 
 -- ============================================================================
@@ -28,7 +28,7 @@ GO
 CREATE PROCEDURE [dbo].[usp_DefaultTrace]
 (
     @LogToTable        BIT  = 1,        -- 1 = Log to tables, 0 = Display Previews
-    @RetentionDays     INT  = 365,      -- Retention for Logs
+    @RetentionDays     INT  = 180,      -- Retention for Logs
     @IncludeTextData   BIT  = 1,        -- Keep SQL text for DDL events
     @IncludeSystem     BIT  = 0,        -- 0 = Exclude system DBs
     @MinStartTime      DATETIME = NULL  -- Force load from specific date
@@ -269,8 +269,8 @@ BEGIN
           AND src.EventName NOT LIKE 'Audit Login%'
           AND NOT EXISTS (SELECT 1 FROM dbo.tblAuditDefaultTrace T WHERE T.RowHash = HashVal.RowHash);
 
-        ---------------------------------------------------------------------------
-        -- 7. PROCESS: Login Stats
+       ---------------------------------------------------------------------------
+        -- 7. PROCESS: Login Stats (FIXED: Grouping matches ON clause)
         ---------------------------------------------------------------------------
         DECLARE @MaxLastUsed DATETIME;
         SELECT @MaxLastUsed = ISNULL(MAX(LastSeen), '2000-01-01') FROM dbo.tblLoginAudit WITH (NOLOCK);
@@ -278,25 +278,33 @@ BEGIN
         MERGE dbo.tblLoginAudit AS target
         USING (
             SELECT 
-                CAST(I.NTUserName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS NTUserName,
+                -- Grouping Columns (These match the ON clause)
                 CAST(I.LoginName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS LoginName,
                 CAST(ISNULL(I.HostName, 'Unknown') AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS HostName,
                 CAST(ISNULL(I.ApplicationName, 'Unknown') AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS ApplicationName,
-                CAST(I.SessionLoginName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS SessionLoginName,
                 CAST(ISNULL(I.DatabaseName, '') AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS DatabaseName,
                 CASE WHEN I.EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END AS Status,
+                CAST(S.sid AS VARBINARY(85)) AS sid,
+
+                -- Aggregated Columns (These prevent duplicate rows for the same "Identity")
+                MAX(CAST(I.NTUserName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS) AS NTUserName,
+                MAX(CAST(I.SessionLoginName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS) AS SessionLoginName,
                 MIN(I.StartTime) AS FirstSeen,
                 MAX(I.StartTime) AS LastSeen,
                 COUNT(*) AS EventCount,
-                S.principal_id,
-                S.sid,
-                CAST(S.type_desc AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS type_desc
+                MAX(S.principal_id) AS principal_id,
+                MAX(CAST(S.type_desc AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS) AS type_desc
             FROM #TraceRows I
             LEFT JOIN sys.server_principals S ON I.LoginSid = S.sid
-            WHERE I.LoginName IS NOT NULL AND I.StartTime > @MaxLastUsed
-            GROUP BY I.NTUserName, I.LoginName, I.SessionLoginName, I.DatabaseName,
+            WHERE I.LoginName IS NOT NULL 
+              AND I.StartTime > @MaxLastUsed
+            GROUP BY 
+                I.LoginName, 
+                I.HostName, 
+                I.ApplicationName, 
+                I.DatabaseName,
                 CASE WHEN I.EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END,
-                S.principal_id, S.sid, S.type_desc, I.HostName, I.ApplicationName
+                S.sid
         ) AS source
         ON (
             target.LoginName = source.LoginName
@@ -310,11 +318,13 @@ BEGIN
             UPDATE SET 
                 target.LastSeen = CASE WHEN source.LastSeen > target.LastSeen THEN source.LastSeen ELSE target.LastSeen END,
                 target.EventCount = target.EventCount + source.EventCount,
-                target.RunTimeUTC = GETUTCDATE()
+                target.RunTimeUTC = GETUTCDATE(),
+                -- Optional: Keep the latest metadata
+                target.NTUserName = source.NTUserName,
+                target.SessionLoginName = source.SessionLoginName
         WHEN NOT MATCHED THEN 
             INSERT (NTUserName, LoginName, HostName, ApplicationName, SessionLoginName, DatabaseName, Status, FirstSeen, LastSeen, EventCount, PrincipalID, SID, TypeDesc)
             VALUES (source.NTUserName, source.LoginName, source.HostName, source.ApplicationName, source.SessionLoginName, source.DatabaseName, source.Status, source.FirstSeen, source.LastSeen, source.EventCount, source.principal_id, source.sid, source.type_desc);
-
         ---------------------------------------------------------------------------
         -- 8. PROCESS: Configuration Changes
         ---------------------------------------------------------------------------
