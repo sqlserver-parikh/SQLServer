@@ -411,30 +411,15 @@ BEGIN
     PRINT '';
     PRINT '-- Starting cleanup of old partitions (older than ' + CONVERT(VARCHAR(10), @CleanupDate, 120) + ')';
     
-    -- Create a table to store the partitions to process
+    IF OBJECT_ID('tempdb..#PartitionsToProcess') IS NOT NULL DROP TABLE #PartitionsToProcess;
     CREATE TABLE #PartitionsToProcess (
-        RowId INT IDENTITY(1,1),
-        TableName VARCHAR(128),
-        BoundaryValue SQL_VARIANT,
-        PartitionFunctionName VARCHAR(128),
-        PartitionSchemeName VARCHAR(128),
-        RowCnt BIGINT,
-        PartitionNumber INT,
-        DataCompression VARCHAR(50),
-        FileGroupName VARCHAR(128)
+        RowId INT IDENTITY(1,1), TableName VARCHAR(128), SchemaName VARCHAR(128), BoundaryValue SQL_VARIANT,
+        PartitionFunctionName VARCHAR(128), PartitionSchemeName VARCHAR(128), RowCnt BIGINT,
+        PartitionNumber INT, DataCompression VARCHAR(50), FileGroupName VARCHAR(128), ObjectID INT
     );
     
-    -- Populate the table with partitions that need processing
-    INSERT INTO #PartitionsToProcess (TableName, BoundaryValue, PartitionFunctionName, PartitionSchemeName, RowCnt, PartitionNumber, DataCompression, FileGroupName)
-    SELECT DISTINCT 
-        t.name, 
-        r.value, 
-        f.name, 
-        s.name, 
-        p.rows, 
-        p.partition_number,
-        p.data_compression_desc,
-        fg.name
+    INSERT INTO #PartitionsToProcess (TableName, SchemaName, BoundaryValue, PartitionFunctionName, PartitionSchemeName, RowCnt, PartitionNumber, DataCompression, FileGroupName, ObjectID)
+    SELECT DISTINCT t.name, SCHEMA_NAME(t.schema_id), r.value, f.name, s.name, p.rows, p.partition_number, p.data_compression_desc, fg.name, t.object_id
     FROM sys.tables AS t
         INNER JOIN sys.indexes AS i ON t.object_id = i.object_id
         INNER JOIN sys.partitions AS p ON i.object_id = p.object_id AND i.index_id = p.index_id
@@ -443,273 +428,124 @@ BEGIN
         INNER JOIN sys.allocation_units AS au ON p.hobt_id = au.container_id
         INNER JOIN sys.filegroups AS fg ON au.data_space_id = fg.data_space_id
         LEFT OUTER JOIN sys.partition_range_values AS r ON f.function_id = r.function_id AND r.boundary_id = p.partition_number
-    WHERE 1 = 1
-        AND t.name LIKE @TableName
-        AND i.type <= 1
-        AND p.partition_number > 1  -- Exclude partition 1
-        AND r.value IS NOT NULL
-        AND r.value < @CleanupDate
-        AND p.partition_number < (
-            SELECT MAX(p2.partition_number) 
-            FROM sys.partitions p2 
-            INNER JOIN sys.indexes i2 ON p2.object_id = i2.object_id AND p2.index_id = i2.index_id
-            WHERE i2.object_id = i.object_id AND i2.index_id <= 1
-        )  -- Exclude the last partition
+    WHERE t.name LIKE @TableName AND i.type <= 1 AND p.partition_number > 1 AND r.value < @CleanupDate
+      AND p.partition_number < (SELECT MAX(p2.partition_number) FROM sys.partitions p2 WHERE p2.object_id = i.object_id)
     ORDER BY t.name, partition_number;
     
-    -- Process partitions using cursor
     DECLARE @PartitionCursor CURSOR;
+    DECLARE @CurrentSchema VARCHAR(128), @CurrentObjID INT;
     
     SET @PartitionCursor = CURSOR FOR
-        SELECT 
-            TableName,
-            BoundaryValue,
-            PartitionFunctionName,
-            PartitionSchemeName,
-            RowCnt,
-            PartitionNumber,
-            DataCompression,
-            FileGroupName
+        SELECT TableName, SchemaName, BoundaryValue, PartitionFunctionName, PartitionSchemeName, RowCnt, PartitionNumber, DataCompression, FileGroupName, ObjectID
         FROM #PartitionsToProcess;
     
-    DECLARE @PartitionsProcessed INT = 0;
-    
     OPEN @PartitionCursor;
-    FETCH NEXT FROM @PartitionCursor INTO 
-        @TableName,
-        @BOUNDARYvalue,
-        @fname,
-        @sname,
-        @rows,
-        @partition_number,
-        @TableCompression,
-        @FileGroupName;
+    FETCH NEXT FROM @PartitionCursor INTO @TableName, @CurrentSchema, @BOUNDARYvalue, @fname, @sname, @rows, @partition_number, @TableCompression, @FileGroupName, @CurrentObjID;
     
     WHILE @@FETCH_STATUS = 0
     BEGIN
+        SET @SwitchoutTableName = @TableName + '_SW_P' + CAST(@partition_number AS VARCHAR(10));
+
         BEGIN TRY
-            SET @PartitionsProcessed = @PartitionsProcessed + 1;
             PRINT '';
-            PRINT '-- Processing partition #' + CAST(@partition_number AS VARCHAR(10)) + 
-                  ' for table [' + @TableName + '] with boundary: ' + 
-                  CONVERT(VARCHAR(23), @BOUNDARYvalue, 121) +
-                  ' on filegroup: ' + @FileGroupName + ', RowCount: ' + convert(varchar(15),isnull( @rows,0));
+            PRINT '-- Processing partition #' + CAST(@partition_number AS VARCHAR(10)) + ' for table [' + @CurrentSchema + '].[' + @TableName + ']';
             
-            -- Create unique switchout table name for this partition
-            SET @SwitchoutTableName = @TableName + '_switchout_p' + CAST(@partition_number AS VARCHAR(10));
+            -- 1. Drop existing switchout table if it exists
+            SET @sql = 'IF OBJECT_ID(''' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@SwitchoutTableName) + ''') IS NOT NULL DROP TABLE ' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@SwitchoutTableName);
+            IF @Execute = 1 EXEC sp_executesql @sql; ELSE PRINT @sql;
+
+            -- 2. CREATE SWITCHOUT TABLE BASE
+            DECLARE @TableCreateSql NVARCHAR(MAX) = 'CREATE TABLE ' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@SwitchoutTableName) + ' (';
+            SELECT @TableCreateSql += QUOTENAME(c.name) + ' ' + types.name + 
+                CASE WHEN types.name IN ('varchar', 'nvarchar', 'char', 'nchar') THEN '(' + CASE WHEN c.max_length = -1 THEN 'MAX' ELSE CAST(CASE WHEN types.name IN ('nvarchar', 'nchar') THEN c.max_length/2 ELSE c.max_length END AS VARCHAR(10)) END + ')'
+                     WHEN types.name IN ('decimal', 'numeric') THEN '(' + CAST(c.precision AS VARCHAR(10)) + ', ' + CAST(c.scale AS VARCHAR(10)) + ')' ELSE '' END +
+                CASE WHEN c.is_nullable = 0 THEN ' NOT NULL' ELSE ' NULL' END + ', '
+            FROM sys.columns c JOIN sys.types ON c.system_type_id = types.system_type_id AND c.user_type_id = types.user_type_id
+            WHERE object_id = @CurrentObjID ORDER BY column_id;
             
-            -- Add to tracking list
-            INSERT INTO @SwitchoutTableList (TableName)
-            VALUES (@SwitchoutTableName);
+            SET @TableCreateSql = LEFT(@TableCreateSql, LEN(@TableCreateSql)-1) + ') ON ' + QUOTENAME(@FileGroupName);
+            IF @TableCompression != 'NONE' SET @TableCreateSql += ' WITH (DATA_COMPRESSION = ' + @TableCompression + ')';
+            IF @Execute = 1 EXEC sp_executesql @TableCreateSql; ELSE PRINT @TableCreateSql;
+
+            -- 3. DYNAMICALLY SCRIPT ALL INDEXES
+            DECLARE @IdxID INT, @IdxName SYSNAME, @IsUnique BIT, @IdxTypeDesc VARCHAR(60), @IsPK BIT;
+            -- FIXED: Use LOCAL cursor to prevent scope leaks
+            DECLARE IndexCursor CURSOR LOCAL FAST_FORWARD FOR 
+                SELECT index_id, name, is_unique, type_desc, is_primary_key FROM sys.indexes WHERE object_id = @CurrentObjID AND type > 0;
             
-            -- Create switchout table if it doesn't exist
-            IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = @SwitchoutTableName)
+            OPEN IndexCursor;
+            FETCH NEXT FROM IndexCursor INTO @IdxID, @IdxName, @IsUnique, @IdxTypeDesc, @IsPK;
+            WHILE @@FETCH_STATUS = 0
             BEGIN
-                -- Create table schema script
-                DECLARE @SchemaScript NVARCHAR(MAX) = '';
-                SET @SchemaScript = 'CREATE TABLE ' + QUOTENAME(@SwitchoutTableName) + ' (';
+                DECLARE @IdxSQL NVARCHAR(MAX) = '';
+                -- FIXED: Ensure Index/Constraint name is UNIQUE database-wide by appending table and partition number
+                DECLARE @UniqueConstraintName SYSNAME = LEFT(@IdxName, 100) + '_SW_P' + CAST(@partition_number AS VARCHAR(10));
+                IF @IsPK = 1 SET @IdxSQL = 'ALTER TABLE ' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@SwitchoutTableName) + ' ADD CONSTRAINT ' + QUOTENAME(@UniqueConstraintName) + ' PRIMARY KEY ' + @IdxTypeDesc + ' (';
+                ELSE SET @IdxSQL = 'CREATE ' + CASE WHEN @IsUnique = 1 THEN 'UNIQUE ' ELSE '' END + @IdxTypeDesc + ' INDEX ' + QUOTENAME(@UniqueConstraintName) + ' ON ' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@SwitchoutTableName) + ' (';
                 
-                -- Add columns
-                SELECT @SchemaScript = @SchemaScript + 
-                    CASE WHEN columns.column_id > 1 THEN ', ' ELSE '' END +
-                    QUOTENAME(columns.name) + ' ' +
-                    types.name + 
-                    CASE 
-                        WHEN types.name IN ('varchar', 'nvarchar', 'char', 'nchar') 
-                            THEN '(' + CASE WHEN columns.max_length = -1 THEN 'MAX' ELSE CAST(
-                                CASE WHEN types.name IN ('nvarchar', 'nchar') 
-                                    THEN columns.max_length/2 
-                                    ELSE columns.max_length 
-                                END AS VARCHAR(10)) 
-                            END + ')'
-                        WHEN types.name IN ('decimal', 'numeric') 
-                            THEN '(' + CAST(columns.precision AS VARCHAR(10)) + ', ' + CAST(columns.scale AS VARCHAR(10)) + ')'
-                        ELSE ''
-                    END +
-                    CASE WHEN columns.is_nullable = 0 THEN ' NOT NULL' ELSE ' NULL' END
-                FROM sys.columns
-                JOIN sys.types ON columns.system_type_id = types.system_type_id AND columns.user_type_id = types.user_type_id
-                WHERE object_id = OBJECT_ID(@TableName)
-                ORDER BY column_id;
-                
-                SET @SchemaScript = @SchemaScript + ') ON ' + QUOTENAME(@FileGroupName);
-                
-                -- Add compression if applicable
-                IF @TableCompression != 'NONE'
+                SELECT @IdxSQL += QUOTENAME(c.name) + CASE WHEN ic.is_descending_key = 1 THEN ' DESC, ' ELSE ' ASC, ' END
+                FROM sys.index_columns ic JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                WHERE ic.object_id = @CurrentObjID AND ic.index_id = @IdxID AND ic.is_included_column = 0 ORDER BY ic.key_ordinal;
+                SET @IdxSQL = LEFT(@IdxSQL, LEN(@IdxSQL)-1) + ')';
+
+                -- Handle Included Columns
+                IF EXISTS (SELECT 1 FROM sys.index_columns WHERE object_id = @CurrentObjID AND index_id = @IdxID AND is_included_column = 1)
                 BEGIN
-                    SET @SchemaScript = @SchemaScript + ' WITH (DATA_COMPRESSION = ' + @TableCompression + ')';
+                    SET @IdxSQL += ' INCLUDE (';
+                    SELECT @IdxSQL += QUOTENAME(c.name) + ', '
+                    FROM sys.index_columns ic JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                    WHERE ic.object_id = @CurrentObjID AND ic.index_id = @IdxID AND is_included_column = 1 ORDER BY ic.index_column_id;
+                    SET @IdxSQL = LEFT(@IdxSQL, LEN(@IdxSQL)-1) + ')';
                 END
+
+                SET @IdxSQL += ' ON ' + QUOTENAME(@FileGroupName);
+                IF @TableCompression != 'NONE' SET @IdxSQL += ' WITH (DATA_COMPRESSION = ' + @TableCompression + ')';
+                IF @Execute = 1 EXEC sp_executesql @IdxSQL; ELSE PRINT @IdxSQL;
                 
-                PRINT '-- Creating switchout table: ' + @SwitchoutTableName + ' on filegroup: ' + @FileGroupName;
-                IF @Execute = 1
-                BEGIN
-                    EXEC sp_executesql @SchemaScript;
-                END
-                ELSE
-                    PRINT @SchemaScript;
-                
-                -- Add primary key/clustered index
-                DECLARE @PrimaryKeyScript NVARCHAR(MAX) = '';
-                SELECT @PrimaryKeyScript = 'ALTER TABLE ' + QUOTENAME(@SwitchoutTableName) + 
-                    ' ADD CONSTRAINT ' + QUOTENAME('PK_' + @SwitchoutTableName) + 
-                    ' PRIMARY KEY ' + CASE WHEN indexes.type_desc = 'CLUSTERED' THEN 'CLUSTERED' ELSE 'NONCLUSTERED' END + ' ('
-                FROM sys.indexes
-                WHERE object_id = OBJECT_ID(@TableName) AND is_primary_key = 1;
-                
-                IF @PrimaryKeyScript <> ''
-                BEGIN
-                    -- Add columns to PK constraint
-                    SELECT @PrimaryKeyScript = @PrimaryKeyScript + 
-                        CASE WHEN index_columns.key_ordinal > 1 THEN ', ' ELSE '' END +
-                        QUOTENAME(columns.name) + 
-                        CASE WHEN index_columns.is_descending_key = 1 THEN ' DESC' ELSE ' ASC' END
-                    FROM sys.index_columns
-                    JOIN sys.columns ON index_columns.object_id = columns.object_id AND index_columns.column_id = columns.column_id
-                    JOIN sys.indexes ON index_columns.object_id = indexes.object_id AND index_columns.index_id = indexes.index_id
-                    WHERE indexes.object_id = OBJECT_ID(@TableName) AND indexes.is_primary_key = 1
-                    ORDER BY index_columns.key_ordinal;
-                    
-                    SET @PrimaryKeyScript = @PrimaryKeyScript + ')';
-                    
-                    IF @TableCompression != 'NONE'
-                    BEGIN
-                        SET @PrimaryKeyScript = @PrimaryKeyScript + ' WITH (DATA_COMPRESSION = ' + @TableCompression + ')';
-                    END
-                    
-                    PRINT '-- Adding primary key to switchout table';
-                    IF @Execute = 1
-                    BEGIN
-                        BEGIN TRY
-                            EXEC sp_executesql @PrimaryKeyScript;
-                        END TRY
-                        BEGIN CATCH
-                            PRINT '-- Warning: Could not add primary key: ' + ERROR_MESSAGE();
-                        END CATCH
-                    END
-                    ELSE
-                        PRINT @PrimaryKeyScript;
-                END
+                FETCH NEXT FROM IndexCursor INTO @IdxID, @IdxName, @IsUnique, @IdxTypeDesc, @IsPK;
             END
-            ELSE
+            CLOSE IndexCursor; DEALLOCATE IndexCursor;
+
+            -- 4. SWITCH PARTITION
+            IF @rows <> 0 OR @Execute = 1
             BEGIN
-                PRINT '-- Truncating existing switchout table: ' + @SwitchoutTableName;
-                IF @Execute = 1
-                BEGIN
-                    SET @sql = 'TRUNCATE TABLE ' + QUOTENAME(@SwitchoutTableName);
-                    EXEC sp_executesql @sql;
-                END
+                SET @sql = 'ALTER TABLE ' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@TableName) + ' SWITCH PARTITION ' + CAST(@partition_number AS VARCHAR(10)) + ' TO ' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@SwitchoutTableName) + ';';
+                IF @Execute = 1 EXEC sp_executesql @sql; ELSE PRINT @sql;
             END
-            
-            -- Switch partition
-            IF @rows <> 0
-            SET @sql = 'ALTER TABLE ' + QUOTENAME(@TableName) + ' SWITCH PARTITION ' + 
-                       CONVERT(VARCHAR(6), @partition_number) + ' TO ' + 
-                       QUOTENAME(@SwitchoutTableName) + ';';
-            ELSE SET @sql = ''
-            IF @Execute = 1
+
+            -- 5. MERGE RANGE
+            IF (@rows = 0 OR @Execute = 1) AND @MergeRange = 1
             BEGIN
-                PRINT '-- Switching partition #' + CAST(@partition_number AS VARCHAR(10)) + ' to ' + @SwitchoutTableName;
-                BEGIN TRY
-                    EXEC sp_executesql @sql;
-                    PRINT '-- Switch operation succeeded.';
-                END TRY
-                BEGIN CATCH
-                    PRINT '-- ERROR during partition switch: ' + ERROR_MESSAGE();
-                    PRINT '-- Skipping boundary merge and table drop for this partition.';
-                    GOTO DropSwitchoutTable;
-                END CATCH
+                SET @boundary = CASE WHEN SQL_VARIANT_PROPERTY(@BOUNDARYvalue, 'basetype') = 'datetimeoffset' THEN FORMAT(CAST(@BOUNDARYvalue AS DATETIMEOFFSET(7)), 'yyyy-MM-dd HH:mm:ss.fffffff zzz') ELSE CONVERT(VARCHAR(23), @BOUNDARYvalue, 121) END;
+                SET @sql = 'ALTER PARTITION FUNCTION ' + QUOTENAME(@fname) + '() MERGE RANGE (''' + @boundary + ''');';
+                IF @Execute = 1 EXEC sp_executesql @sql; ELSE PRINT @sql;
             END
-            ELSE
-                PRINT '-- Will switch partition: ' + CHAR(13) + CHAR(10) + @sql;
-            
-            -- Merge range if partition is empty
-            IF @rows = 0 OR @Execute = 1
-            BEGIN
-                IF(SQL_VARIANT_PROPERTY(@BOUNDARYvalue, 'basetype') = 'datetimeoffset')
-                    SET @boundary = FORMAT(CAST(@BOUNDARYvalue AS DATETIMEOFFSET(7)), 'yyyy-MM-dd HH:mm:ss.fffffff zzz');
-                ELSE
-                    SET @boundary = CONVERT(VARCHAR(23), @BOUNDARYvalue, 121);
-                
-                IF @MergeRange = 1
-                SET @sql = 'ALTER PARTITION FUNCTION ' + QUOTENAME(@fname) + '() MERGE RANGE (''' + @boundary + '''); -- ' + @TableName;
-                ELSE 
-                SET @sql = ''
-                IF @Execute = 1
-                BEGIN
-                    PRINT '-- Merging partition boundary';
-                    BEGIN TRY
-                        IF @MergeRange = 1
-                        BEGIN
-                            EXEC sp_executesql @sql;
-                            PRINT '-- Merge operation succeeded.';
-                        END
-                        ELSE
-                        BEGIN
-                            PRINT @sql;
-                            PRINT '-- MergeRange is 0 so just printing merge command';
-                        END
-                    END TRY
-                    BEGIN CATCH
-                        PRINT '-- ERROR during partition merge: ' + ERROR_MESSAGE();
-                    END CATCH
-                END
-                ELSE
-                    PRINT '-- Will merge boundary: ' + CHAR(13) + CHAR(10) + @sql;
-            END
-            
-DropSwitchoutTable:
-            -- Drop switchout table
-            PRINT '-- Dropping switchout table: ' + @SwitchoutTableName;
-            SET @sql = 'DROP TABLE ' + QUOTENAME(@SwitchoutTableName);
-            IF @Execute = 1
-            BEGIN
-                BEGIN TRY
-                    IF EXISTS (SELECT 1 FROM sys.tables WHERE name = @SwitchoutTableName)
-                    BEGIN
-                        EXEC sp_executesql @sql;
-                        PRINT '-- Switchout table dropped successfully.';
-                    END
-                END TRY
-                BEGIN CATCH
-                    PRINT '-- Error dropping switchout table: ' + ERROR_MESSAGE();
-                END CATCH
-            END
-            ELSE
-                PRINT '-- Will drop switchout table: ' + CHAR(13) + CHAR(10) + @sql;
-            
+
+            -- 6. Cleanup switchout table
+            SET @sql = 'DROP TABLE ' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@SwitchoutTableName);
+            IF @Execute = 1 EXEC sp_executesql @sql; ELSE PRINT @sql;
+
         END TRY
         BEGIN CATCH
-            PRINT '-- ERROR during partition processing:';
-            PRINT '-- ' + ERROR_MESSAGE();
-            PRINT '-- Command that failed: ' + ISNULL(@sql, 'N/A');
+            PRINT '-- [ERROR] Partition processing failed for #' + CAST(@partition_number AS VARCHAR(10)) + ': ' + ERROR_MESSAGE();
+            
+            -- EMERGENCY CURSOR CLEANUP: Check if the index cursor is still open and kill it
+            IF (SELECT CURSOR_STATUS('local', 'IndexCursor')) >= 0 
+            BEGIN
+                CLOSE IndexCursor;
+                DEALLOCATE IndexCursor;
+            END
+
+            -- Cleanup the switchout table so it doesn't block the next run
+            SET @sql = 'IF OBJECT_ID(''' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@SwitchoutTableName) + ''') IS NOT NULL DROP TABLE ' + QUOTENAME(@CurrentSchema) + '.' + QUOTENAME(@SwitchoutTableName);
+            IF @Execute = 1 EXEC sp_executesql @sql;
         END CATCH;
-        
-        FETCH NEXT FROM @PartitionCursor INTO 
-            @TableName,
-            @BOUNDARYvalue,
-            @fname,
-            @sname,
-            @rows,
-            @partition_number,
-            @TableCompression,
-            @FileGroupName;
+
+        FETCH NEXT FROM @PartitionCursor INTO @TableName, @CurrentSchema, @BOUNDARYvalue, @fname, @sname, @rows, @partition_number, @TableCompression, @FileGroupName, @CurrentObjID;
     END
-    
-    CLOSE @PartitionCursor;
-    DEALLOCATE @PartitionCursor;
-    
-    -- Clean up temp table
-    DROP TABLE #PartitionsToProcess;
-    
-    IF @PartitionsProcessed = 0
-        PRINT '-- No partitions found that are older than ' + CONVERT(VARCHAR(10), @CleanupDate, 120);
+    CLOSE @PartitionCursor; DEALLOCATE @PartitionCursor;
 END
-ELSE
-BEGIN
-    PRINT '';
-    PRINT '-- Cleanup operations skipped (@Cleanup = 0)';
-END        
-        -- If we're not executing, just print the info about switchout tables that would be created/dropped
+-- If we're not executing, just print the info about switchout tables that would be created/dropped
         IF @Execute = 0 AND @Cleanup = 1
         BEGIN
             -- Print the drop commands
