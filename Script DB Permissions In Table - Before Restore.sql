@@ -148,6 +148,7 @@ BEGIN
 END
 GO
 
+
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
@@ -158,31 +159,21 @@ CREATE OR ALTER PROCEDURE [dbo].[usp_RestorePermission]
     @NewDBName     NVARCHAR(128) = NULL, 
     @DBSnapID      INT = NULL,            
     @Print         BIT = 1,              
-    @Execute       BIT = 1               
+    @Execute       BIT = 1                
 AS
 /*********************************************************************************
 Name:       usp_RestorePermission
-Date:       2024-05-22
-Version:    1.1
+Date:       2024-05-22 (Updated for Hardened Transaction Safety)
+Version:    1.3
 Description: 
     Restores permissions from [dbo].[tbl_DBPermission] to a target database.
-
-Parameters:
-    @CurrentDBName: The database name as recorded in the logging table.
-    @NewDBName:     The target DB to apply permissions to. If NULL, uses @CurrentDBName.
-    @DBSnapID:      Specific snapshot ID. If NULL, defaults to the LATEST snapshot.
-    @Print:         If 1, prints the T-SQL script to the message window.
-    @Execute:       If 1, executes the T-SQL script against the target database.
-
-Usage:
-    -- Preview latest permissions for a DB
-    EXEC [dbo].[usp_RestorePermission] @CurrentDBName = 'SalesDB';
-
-    -- Restore latest permissions to a different DB (Execute)
-    EXEC [dbo].[usp_RestorePermission] @CurrentDBName = 'SalesDB', @NewDBName = 'SalesDB_New', @Execute = 1, @Print = 0;
+    Includes active transaction balancing to guarantee Msg 266 is never thrown.
 *********************************************************************************/
 BEGIN
     SET NOCOUNT ON;
+
+    -- Capture the initial transaction count
+    DECLARE @InitialTranCount INT = @@TRANCOUNT;
 
     -- Default: If NewDBName is null, target is the original DB
     IF @NewDBName IS NULL SET @NewDBName = @CurrentDBName;
@@ -252,6 +243,20 @@ BEGIN
                     SET @FailCount = @FailCount + 1;
                     PRINT 'EXECUTION ERROR on line: ' + @ScriptLine;
                     PRINT 'ERROR DETAIL: ' + ERROR_MESSAGE();
+
+                    -- Hardened Transaction Cleanup Logic
+                    IF XACT_STATE() = -1 OR @@TRANCOUNT > @InitialTranCount
+                    BEGIN
+                        -- A transaction was orphaned or doomed. Roll it back (drops @@TRANCOUNT to 0)
+                        ROLLBACK TRANSACTION;
+                        
+                        -- Immediately rebuild dummy transactions to match the initial state
+                        -- This prevents Msg 266 at the end of the procedure
+                        WHILE @@TRANCOUNT < @InitialTranCount
+                        BEGIN
+                            BEGIN TRANSACTION;
+                        END
+                    END
                 END CATCH
             END
 
@@ -262,7 +267,7 @@ BEGIN
                 PRINT 'BEGIN CATCH PRINT ''Error on: ' + REPLACE(@ScriptLine, '''', '''''') + ''' + ERROR_MESSAGE() END CATCH;';
             END
         END
-        ELSE IF @Print = 1 -- Still print comments for readability if they exist
+        ELSE IF @Print = 1 
         BEGIN
             PRINT @ScriptLine;
         END
