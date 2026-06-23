@@ -1,17 +1,78 @@
-$params = @{
-    # SOURCE
-    SqlInstance         = "Server.domain.COM"
-    Database            = "dbname"
-    Table               = "dbo.table1"
+# 1. Configuration
+$sourceServer = "servera"
+$sourceDb     = "dbz"
 
-    # DESTINATION
-    Destination         = "destserver.domain.COM"
-    DestinationDatabase = "dbname"
-    
-    # OPTIONS
-    Truncate            = $true   # Empties the table before copy
-    AutoCreateTable     = $true   # Creates the table if it's missing
-    KeepIdentity        = $true   # Copies the exact ID values from Source
+$destServer   = "serverb"
+$destDb       = "dby"
+
+$tables = @(
+    "dbo.tablea"
+)
+
+# Initialize results collection
+$migrationSummary = @()
+
+Write-Host "--- Starting Migration Process ---" -ForegroundColor Cyan
+Write-Host "Source: $sourceServer | Database: $sourceDb"
+Write-Host "Target: $destServer   | Database: $destDb`n"
+
+# 2. Execution Loop
+foreach ($table in $tables) {
+    Write-Host "Processing $table..." -NoNewline
+
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+
+    try {
+        $result = Copy-DbaDbTableData `
+            -SqlInstance $sourceServer `
+            -Database $sourceDb `
+            -Table $table `
+            -Destination $destServer `
+            -DestinationDatabase $destDb `
+            -Truncate `
+            -AutoCreateTable `
+            -KeepIdentity `
+            -BatchSize 100000 `
+            -BulkCopyTimeout 0
+
+        $timer.Stop()
+
+        $migrationSummary += [PSCustomObject]@{
+            TableName   = $table
+            RowsCopied  = $result.RowsCopied
+            Duration    = "$([Math]::Round($timer.Elapsed.TotalSeconds, 2)) sec"
+            Status      = "Success"
+            Source      = $sourceServer
+            Destination = $destServer
+        }
+
+        Write-Host " Done." -ForegroundColor Green
+    }
+    catch {
+        $timer.Stop()
+
+        $migrationSummary += [PSCustomObject]@{
+            TableName   = $table
+            RowsCopied  = 0
+            Duration    = "$([Math]::Round($timer.Elapsed.TotalSeconds, 2)) sec"
+            Status      = "FAILED: $($_.Exception.Message)"
+            Source      = $sourceServer
+            Destination = $destServer
+        }
+
+        Write-Host " FAILED." -ForegroundColor Red
+    }
 }
 
-Copy-DbaDbTableData @params
+# 3. Final Summary Report
+Write-Host "`n================ MIGRATION SUMMARY REPORT ================" -ForegroundColor Cyan
+
+$migrationSummary |
+    Format-Table TableName, RowsCopied, Duration, Status, Source, Destination -AutoSize
+
+$totalRows = ($migrationSummary | Measure-Object RowsCopied -Sum).Sum
+
+Write-Host "Total Tables Processed: $($tables.Count)"
+Write-Host "Total Rows Migrated:    $totalRows"
+Write-Host "Process Completed at:   $(Get-Date)"
+Write-Host "==========================================================" -ForegroundColor Cyan
