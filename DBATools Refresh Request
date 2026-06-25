@@ -1,0 +1,366 @@
+<#
+=============================================================================
+DBA REFRESH SCRIPT
+=============================================================================
+This script has been hardened for enterprise environments based on community 
+DBA best practices. Here is exactly what is included in this final version:
+
+1. Guaranteed Cleanup (try/catch/finally): 
+   Cleanup logic is in a 'finally' block so massive backup files are deleted 
+   even if the restore fails halfway through (prevents storage alerts).
+2. Environment Contamination Prevention: 
+   Automatically flips the target DB to SIMPLE recovery and sets the owner 
+   to 'sa' to prevent bringing over production log-chain baggage.
+3. Active Connection Blocking: 
+   Proactively kills active connections to the target database before the 
+   restore using Stop-DbaProcess to prevent lock-ups.
+4. Comprehensive Pathing & New DB Support:
+   Handles custom jump server paths, UNC shares, direct restores, and gracefully 
+   skips permission scripting if the destination database is brand new.
+=============================================================================
+#>
+
+<#
+.SYNOPSIS
+    Automates the refresh of a SQL Server database from one instance to another using dbatools.
+
+.DESCRIPTION
+    Invoke-DbaRefreshRequest performs an end-to-end database refresh. It extracts existing target 
+    permissions, executes a Copy-Only backup on the source, securely transfers the file using UNC paths, 
+    restores the database, resets the environment state (Simple Recovery, 'sa' owner), fixes orphaned users, 
+    and guarantees file cleanup via a try/catch/finally block.
+#>
+function Invoke-DbaRefreshRequest {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Source SQL Server Instance")]
+        [string]$SourceServer,
+
+        [Parameter(Mandatory = $true, HelpMessage = "Source Database Name")]
+        [string]$SourceDB,
+
+        [Parameter(Mandatory = $true, HelpMessage = "Destination SQL Server Instance")]
+        [string]$DestServer,
+
+        [Parameter(Mandatory = $true, HelpMessage = "Destination Database Name")]
+        [string]$DestDB,
+
+        [Parameter(Mandatory = $false, HelpMessage = "Optional: Custom path for source backup. Defaults to instance default.")]
+        [string]$SourceBackupPath,
+
+        [Parameter(Mandatory = $false, HelpMessage = "Optional: UNC share or local path on destination. Defaults to SQL default backup dir.")]
+        [string]$DestBackupPath,
+
+        [Parameter(Mandatory = $false, HelpMessage = "Optional: Skip file copy and restore directly from source UNC path.")]
+        [switch]$DirectRestore,
+        
+        [Parameter(Mandatory = $false, HelpMessage = "Optional: Custom path for permission scripts. Defaults to Dest SQL Error Log dir.")]
+        [string]$PermissionScriptPath,
+
+        [Parameter(Mandatory = $false, HelpMessage = "Deletes the backup file from the source location after completion.")]
+        [switch]$RemoveSourceBackup,
+
+        [Parameter(Mandatory = $false, HelpMessage = "Deletes the copied backup file from the destination location after completion.")]
+        [switch]$RemoveDestBackup,
+
+        [Parameter(Mandatory = $false, HelpMessage = "Deletes the generated permission script file after completion.")]
+        [switch]$RemovePermissionScript,
+
+        [Parameter(Mandatory = $false, HelpMessage = "Outputs the commands to run manually instead of executing them")]
+        [switch]$DebugOnly
+    )
+
+    # Clean up any accidental trailing periods
+    $SourceServer = $SourceServer.TrimEnd('.')
+    $DestServer = $DestServer.TrimEnd('.')
+    $Timestamp = Get-Date -Format 'yyyyMMdd_HHmm'
+
+    # Initialize tracking variables for the 'finally' block
+    $UncSourcePath = $null
+    $DestBackupFilePath = $null
+    $PermScriptFile = $null
+
+    # =========================================================================
+    # PATH RESOLUTION: DESTINATION BACKUP FOLDER
+    # =========================================================================
+    if (-not $DirectRestore) {
+        if ([string]::IsNullOrWhiteSpace($DestBackupPath)) {
+            if (-not $DebugOnly) { Write-Host "No destination path provided. Querying $DestServer for default backup directory..." -ForegroundColor Cyan }
+            $DestLocalPath = (Get-DbaDefaultPath -SqlInstance $DestServer).Backup
+            if (-not $DestLocalPath) {
+                Write-Error "Could not determine the default backup path on $DestServer. Please specify -DestBackupPath explicitly."
+                return
+            }
+            if ($DestLocalPath -match '^\\\\') { $DestSharePath = $DestLocalPath } 
+            else { $DestSharePath = "\\$DestServer\" + $DestLocalPath.Replace(':', '$') }
+        } else {
+            if ($DestBackupPath -match '^[a-zA-Z]:\\') { $DestSharePath = "\\$DestServer\" + $DestBackupPath.Replace(':', '$') } 
+            else { $DestSharePath = $DestBackupPath }
+        }
+    } else {
+        $DestSharePath = "N/A (Direct Restore)"
+    }
+
+    # =========================================================================
+    # PATH RESOLUTION: PERMISSION SCRIPT FOLDER
+    # =========================================================================
+    if ([string]::IsNullOrWhiteSpace($PermissionScriptPath)) {
+        if (-not $DebugOnly) { Write-Host "No script path provided. Querying $DestServer for Error Log directory..." -ForegroundColor Cyan }
+        
+        $ErrorLogFile = Invoke-DbaQuery -SqlInstance $DestServer -Query "SELECT CAST(SERVERPROPERTY('ErrorLogFileName') AS NVARCHAR(MAX)) AS LogPath" | Select-Object -ExpandProperty LogPath
+        $DestErrorLogDir = Split-Path $ErrorLogFile
+        
+        if ($DestErrorLogDir -match '^[a-zA-Z]:\\') {
+            $PermissionScriptDir = "\\$DestServer\" + $DestErrorLogDir.Replace(':', '$')
+        } else {
+            $PermissionScriptDir = $DestErrorLogDir
+        }
+    } else {
+        $PermissionScriptDir = $PermissionScriptPath
+    }
+    
+    $PermScriptFile = Join-Path $PermissionScriptDir "${DestDB}_Permissions_${Timestamp}.sql"
+
+    # =========================================================================
+    # DEBUG ONLY MODE
+    # =========================================================================
+    if ($DebugOnly) {
+        Write-Host "=======================================================" -ForegroundColor Yellow
+        Write-Host "DEBUG MODE: Exact Commands to Run Manually from Jump Server" -ForegroundColor Yellow
+        Write-Host "=======================================================" -ForegroundColor Yellow
+        
+        $DebugCommands = @"
+# 1. Take COPY_ONLY backup on Source Server
+`$BackupResult = Backup-DbaDatabase -SqlInstance "$SourceServer" -Database "$SourceDB" -Type Full -CopyOnly -Compress -IgnoreFileChecks
+`$SourceLocalPath = `$BackupResult.Path
+`$UncSourcePath = if (`$SourceLocalPath -match '^\\\\') { `$SourceLocalPath } else { "\\$SourceServer\" + `$SourceLocalPath.Replace(':', '`$') }
+
+# 2. File Copy / Path assignment
+$($if ($DirectRestore) { "`$DestBackupFilePath = `$UncSourcePath" } else { "`$CopiedFile = Copy-Item -Path `$UncSourcePath -Destination `"$DestSharePath`" -PassThru -Force`n`$DestBackupFilePath = Join-Path -Path `"$DestSharePath`" -ChildPath `$CopiedFile.Name" })
+
+# 3. Check if Destination DB exists & Script Permissions
+`$TargetDb = Get-DbaDatabase -SqlInstance "$DestServer" -Database "$DestDB" -ErrorAction SilentlyContinue
+`$IsNewDatabase = `$null -eq `$TargetDb
+
+if (-not `$IsNewDatabase) {
+    if (!(Test-Path "$PermissionScriptDir")) { New-Item -ItemType Directory -Path "$PermissionScriptDir" | Out-Null }
+    Get-DbaDbUser -SqlInstance "$DestServer" -Database "$DestDB" -ExcludeSystemUser | Export-DbaScript -FilePath "$PermScriptFile" -Append
+    Get-DbaDbRoleMember -SqlInstance "$DestServer" -Database "$DestDB" | Export-DbaScript -FilePath "$PermScriptFile" -Append
+    
+    # Proactively kill active connections before restore
+    Stop-DbaProcess -SqlInstance "$DestServer" -Database "$DestDB" -Confirm:`$false
+}
+
+# 4. Restore database with REPLACE
+Restore-DbaDatabase -SqlInstance "$DestServer" -DatabaseName "$DestDB" -Path `$DestBackupFilePath -WithReplace
+
+# 5. Environment Sanitization & Permission Restore
+Set-DbaDbRecoveryModel -SqlInstance "$DestServer" -Database "$DestDB" -RecoveryModel Simple
+Set-DbaDbOwner -SqlInstance "$DestServer" -Database "$DestDB" -TargetLogin "sa"
+
+if (-not `$IsNewDatabase) {
+    Invoke-DbaQuery -SqlInstance "$DestServer" -Database "$DestDB" -File "$PermScriptFile" -ErrorAction SilentlyContinue
+}
+Repair-DbaDbOrphanUser -SqlInstance "$DestServer" -Database "$DestDB"
+
+# 6. Guaranteed Cleanup Operations
+$($if ($RemoveSourceBackup) { "Remove-Item -Path `$UncSourcePath -Force -ErrorAction SilentlyContinue" })
+$($if ($RemoveDestBackup -and -not $DirectRestore) { "Remove-Item -Path `$DestBackupFilePath -Force -ErrorAction SilentlyContinue" })
+$($if ($RemovePermissionScript -and -not `$IsNewDatabase) { "Remove-Item -Path `"$PermScriptFile`" -Force -ErrorAction SilentlyContinue" })
+"@
+        Write-Host $DebugCommands -ForegroundColor Cyan
+        return
+    }
+
+    # =========================================================================
+    # NORMAL EXECUTION MODE
+    # =========================================================================
+    Write-Host "Starting Refresh: $SourceServer\$SourceDB -> $DestServer\$DestDB" -ForegroundColor Cyan
+    
+    $TargetDb = Get-DbaDatabase -SqlInstance $DestServer -Database $DestDB -ErrorAction SilentlyContinue
+    $IsNewDatabase = $null -eq $TargetDb
+
+    if ($IsNewDatabase) { Write-Host "NOTE: Database '$DestDB' will be created as new." -ForegroundColor Yellow }
+
+    $TotalStartTime = Get-Date
+    $SrcCleanupStatus = "Retained"
+    $DstCleanupStatus = if ($DirectRestore) { "N/A (Direct Restore)" } else { "Retained" }
+    $ScrCleanupStatus = if ($IsNewDatabase) { "N/A (New DB)" } else { "Retained" }
+    
+    $TimeBackup = $TimeCopy = $TimeScript = $TimeRestore = $TimeApply = $TimeCleanup = "Failed/Skipped"
+
+    try {
+        # STEP 1: BACKUP
+        Write-Host "[1/6] Initiating Copy-Only backup on $SourceServer..."
+        $Step1Start = Get-Date
+        
+        $BackupParams = @{ SqlInstance = $SourceServer; Database = $SourceDB; Type = 'Full'; CopyOnly = $true; Compress = $true; IgnoreFileChecks = $true }
+        if (-not [string]::IsNullOrWhiteSpace($SourceBackupPath)) { $BackupParams.BackupDirectory = $SourceBackupPath }
+
+        $BackupResult = Backup-DbaDatabase @BackupParams
+        if (-not $BackupResult -or -not $BackupResult.Path) { throw "Backup failed. Verify SQL Server error log on $SourceServer." }
+        
+        $SourceLocalPath = $BackupResult.Path
+        $UncSourcePath = if ($SourceLocalPath -match '^\\\\') { $SourceLocalPath } else { "\\$SourceServer\" + $SourceLocalPath.Replace(':', '$') }
+        $TimeBackup = '{0:hh\:mm\:ss}' -f ((Get-Date) - $Step1Start)
+        
+        # STEP 2: COPY OR BYPASS
+        $Step2Start = Get-Date
+        if ($DirectRestore) {
+            Write-Host "[2/6] Bypassing file copy (-DirectRestore active)." -ForegroundColor Yellow
+            $DestBackupFilePath = $UncSourcePath
+            $TimeCopy = "Skipped (Direct Restore)"
+        } else {
+            Write-Host "[2/6] Copying backup file from source to $DestSharePath..."
+            $CopiedFile = Copy-Item -Path $UncSourcePath -Destination $DestSharePath -PassThru -Force
+            $DestBackupFilePath = Join-Path -Path $DestSharePath -ChildPath $CopiedFile.Name
+            $TimeCopy = '{0:hh\:mm\:ss}' -f ((Get-Date) - $Step2Start)
+        }
+
+        # STEP 3: SCRIPT PERMISSIONS & KILL CONNECTIONS
+        $Step3Start = Get-Date
+        if ($IsNewDatabase) {
+            Write-Host "[3/6] Target DB is new. Skipping permissions & connection drops." -ForegroundColor Yellow
+            $TimeScript = "Skipped (New DB)"
+            $PermScriptStatus = "N/A - New Database Baseline"
+        } else {
+            Write-Host "[3/6] Scripting out permissions and terminating active connections on $DestDB..."
+            if (!(Test-Path $PermissionScriptDir)) { New-Item -ItemType Directory -Path $PermissionScriptDir | Out-Null }
+            Get-DbaDbUser -SqlInstance $DestServer -Database $DestDB -ExcludeSystemUser | Export-DbaScript -FilePath $PermScriptFile -Append
+            Get-DbaDbRoleMember -SqlInstance $DestServer -Database $DestDB | Export-DbaScript -FilePath $PermScriptFile -Append
+            $PermScriptStatus = $PermScriptFile
+            
+            # Kill active connections before restore to prevent locking errors
+            Stop-DbaProcess -SqlInstance $DestServer -Database $DestDB -Confirm:$false | Out-Null
+            $TimeScript = '{0:hh\:mm\:ss}' -f ((Get-Date) - $Step3Start)
+        }
+
+        # STEP 4: RESTORE
+        Write-Host "[4/6] Restoring $DestDB on $DestServer with REPLACE..."
+        $Step4Start = Get-Date
+        Restore-DbaDatabase -SqlInstance $DestServer -DatabaseName $DestDB -Path $DestBackupFilePath -WithReplace | Out-Null
+        $TimeRestore = '{0:hh\:mm\:ss}' -f ((Get-Date) - $Step4Start)
+
+        # STEP 5: ENVIRONMENT SANITIZATION & RE-APPLY PERMISSIONS
+        $Step5Start = Get-Date
+        Write-Host "[5/6] Sanitizing environment (Simple Recovery, 'sa' Owner) and fixing users..."
+        
+        Set-DbaDbRecoveryModel -SqlInstance $DestServer -Database $DestDB -RecoveryModel Simple | Out-Null
+        Set-DbaDbOwner -SqlInstance $DestServer -Database $DestDB -TargetLogin "sa" | Out-Null
+
+        if (-not $IsNewDatabase) {
+            Invoke-DbaQuery -SqlInstance $DestServer -Database $DestDB -File $PermScriptFile -ErrorAction SilentlyContinue | Out-Null
+        }
+        Repair-DbaDbOrphanUser -SqlInstance $DestServer -Database $DestDB | Out-Null
+        $TimeApply = '{0:hh\:mm\:ss}' -f ((Get-Date) - $Step5Start)
+
+    } catch {
+        Write-Error "An error occurred during the refresh process: $_"
+    } finally {
+        # STEP 6: GUARANTEED CLEANUP (Runs even if script fails mid-way)
+        Write-Host "[6/6] Executing guaranteed cleanup tasks..."
+        $Step6Start = Get-Date
+        
+        if ($RemoveSourceBackup -and $null -ne $UncSourcePath -and (Test-Path $UncSourcePath)) {
+            Write-Host "      Removing source backup file: $UncSourcePath"
+            Remove-Item -Path $UncSourcePath -Force -ErrorAction SilentlyContinue
+            $SrcCleanupStatus = "Deleted"
+        }
+
+        if ($RemoveDestBackup -and -not $DirectRestore -and $null -ne $DestBackupFilePath -and (Test-Path $DestBackupFilePath)) {
+            Write-Host "      Removing destination backup file: $DestBackupFilePath"
+            Remove-Item -Path $DestBackupFilePath -Force -ErrorAction SilentlyContinue
+            $DstCleanupStatus = "Deleted"
+        }
+
+        if ($RemovePermissionScript -and -not $IsNewDatabase -and $null -ne $PermScriptFile -and (Test-Path $PermScriptFile)) {
+            Write-Host "      Removing permission script: $PermScriptFile"
+            Remove-Item -Path $PermScriptFile -Force -ErrorAction SilentlyContinue
+            $ScrCleanupStatus = "Deleted"
+        }
+        $TimeCleanup = '{0:hh\:mm\:ss}' -f ((Get-Date) - $Step6Start)
+        $TotalDuration = '{0:hh\:mm\:ss}' -f ((Get-Date) - $TotalStartTime)
+
+        # Build Parameter String for Documentation
+        $DocParams = @()
+        if ($DirectRestore) { $DocParams += "-DirectRestore" }
+        if (-not [string]::IsNullOrWhiteSpace($PermissionScriptPath)) { $DocParams += "-PermissionScriptPath" }
+        if ($RemoveSourceBackup) { $DocParams += "-RemoveSourceBackup" }
+        if ($RemoveDestBackup) { $DocParams += "-RemoveDestBackup" }
+        if ($RemovePermissionScript) { $DocParams += "-RemovePermissionScript" }
+        $UsedParamsStr = if ($DocParams.Count -gt 0) { $DocParams -join ", " } else { "None (Default Behavior)" }
+
+        # TICKET SUMMARY OUTPUT
+        $SummaryOutput = @"
+
+======================================================================
+DATABASE REFRESH SUMMARY (TICKET DOCUMENTATION)
+======================================================================
+Source Environment : $SourceServer \ $SourceDB
+Target Environment : $DestServer \ $DestDB
+Switches Used      : $UsedParamsStr
+
+Backup Source Path : $UncSourcePath
+Restore Read Path  : $DestBackupFilePath
+Permission Script  : $PermScriptStatus
+
+CLEANUP STATUS (Guaranteed via Finally Block):
+Source Backup File : $SrcCleanupStatus
+Dest Backup File   : $DstCleanupStatus
+Permission Script  : $ScrCleanupStatus
+
+EXECUTION TIMES (HH:MM:SS):
+[1] Backup Phase            : $TimeBackup
+[2] Network File Copy       : $TimeCopy
+[3] Script Out & Drop SPIDs : $TimeScript
+[4] Database Restore        : $TimeRestore
+[5] Sanitize & Apply Users  : $TimeApply
+[6] File Cleanup            : $TimeCleanup
+----------------------------------------------------------------------
+TOTAL DURATION              : $TotalDuration
+======================================================================
+"@
+        Write-Host $SummaryOutput -ForegroundColor Green
+    }
+}
+
+<#
+=============================================================================
+EXECUTION EXAMPLES & GITHUB DOCUMENTATION
+=============================================================================
+Uncomment the lines below to test specific scenarios, or copy this block 
+directly into your GitHub repository documentation.
+
+# 1. The Standard Refresh (Default Settings)
+# Performs the refresh using default SQL backup directories and the target's 
+# Error Log folder for the permission script.
+# Invoke-DbaRefreshRequest -SourceServer "PROD-SQL-01" -SourceDB "AppDB" -DestServer "DEV-SQL-01" -DestDB "AppDB_Dev"
+
+# 2. The Dry Run (Debug Mode)
+# Generates the exact PowerShell commands needed to perform the refresh without 
+# executing them. Perfect for validating paths or preparing a manual runbook.
+# Invoke-DbaRefreshRequest -SourceServer "PROD-SQL-01" -SourceDB "AppDB" -DestServer "DEV-SQL-01" -DestDB "AppDB_Dev" -DebugOnly
+
+# 3. The Performance Run (Direct Restore)
+# Bypasses the network file copy phase. The destination server restores the 
+# database by reading the backup file directly from the source server's UNC share. 
+# (Requires the destination SQL service account to have read access to the source share).
+# Invoke-DbaRefreshRequest -SourceServer "PROD-SQL-01" -SourceDB "AppDB" -DestServer "DEV-SQL-01" -DestDB "AppDB_Dev" -DirectRestore
+
+# 4. The "Leave No Trace" Run (Full Cleanup)
+# Executes the standard refresh, but ensures the source backup, the copied destination 
+# backup, and the generated permission script are all permanently deleted upon completion.
+# Invoke-DbaRefreshRequest -SourceServer "PROD-SQL-01" -SourceDB "AppDB" -DestServer "DEV-SQL-01" -DestDB "AppDB_Dev" -RemoveSourceBackup -RemoveDestBackup -RemovePermissionScript
+
+# 5. Advanced File Routing (Custom Paths)
+# Overrides default pathing. Forces the source backup to a specific drive, copies it to 
+# a custom network share, and saves the permission script locally to the jump server's Temp dir.
+# Invoke-DbaRefreshRequest -SourceServer "PROD-SQL-01" -SourceDB "AppDB" -DestServer "DEV-SQL-01" -DestDB "AppDB_Dev" -SourceBackupPath "F:\SpecialBackups" -DestBackupPath "\\SharedStorage\DBA\Refreshes" -PermissionScriptPath "C:\Temp\SQLScripts"
+
+# 6. The Hybrid (Direct Restore + Partial Cleanup)
+# Performs a fast direct restore, saves the permission script to a central network 
+# repository for auditing, and cleans up the heavy source backup file to reclaim storage space.
+# Invoke-DbaRefreshRequest -SourceServer "PROD-SQL-01" -SourceDB "AppDB" -DestServer "DEV-SQL-01" -DestDB "AppDB_Dev" -DirectRestore -PermissionScriptPath "\\CentralIT\DBA\Audits\Permissions" -RemoveSourceBackup
+
+=============================================================================
+#>
