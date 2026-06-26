@@ -17,26 +17,11 @@ ALTER PROCEDURE [dbo].[usp_FixOrphanUsers]
     @DatabaseName NVARCHAR(255) = NULL,
     @Print        BIT = 0,
     @Execute      BIT = 1,
-    @RaiseError   BIT = 0 -- If 1, fails the batch/job on error. If 0, logs and continues.
+    @RaiseError   BIT = 0 -- 1: Fails the batch on FIRST error. 0: Rolls back the failed DB, logs it, and moves to the next.
 AS
-/*********************************************************************************
-    Ola Hallengren Style Documentation
-    
-    Description: Identifies and fixes orphaned users.
-                 - If a matching Login exists, it re-links the User.
-                 - If no matching Login exists, it transfers all owned schema 
-                   and custom role ownership to dbo, then drops the User.
-
-    Parameters:
-    @DatabaseName: Specific database to process. If NULL/empty, all user databases.
-    @Print:        Print the generated T-SQL commands.
-    @Execute:      Execute the generated T-SQL commands.
-    @RaiseError:   If 1, unhandled errors break execution (great for SQL Agent).
-*********************************************************************************/
 BEGIN
     SET NOCOUNT ON;
 
-    -- Validate input database if specified
     IF @DatabaseName IS NOT NULL AND @DatabaseName <> ''
     BEGIN
         IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @DatabaseName AND state_desc = 'ONLINE')
@@ -49,7 +34,7 @@ BEGIN
     DECLARE @CurrentDBName NVARCHAR(128);
     DECLARE @UserName      NVARCHAR(128);
     DECLARE @DynamicSQL    NVARCHAR(MAX);
-    DECLARE @ErrorMessage  NVARCHAR(MAX);
+    DECLARE @ErrorMessage  NVARCHAR(2048);
 
     IF OBJECT_ID('tempdb..#OrphanUsers') IS NOT NULL 
         DROP TABLE #OrphanUsers;
@@ -59,7 +44,6 @@ BEGIN
         UserName NVARCHAR(128)
     );
 
-    -- Database Discovery (Safer database filtering exclusion)
     DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
     SELECT name
     FROM sys.databases
@@ -73,14 +57,15 @@ BEGIN
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
+        -- ADDED 'G' to catch orphaned Windows Groups
         SET @DynamicSQL = N'
             INSERT INTO #OrphanUsers (DBName, UserName)
             SELECT
                 @DBName AS DBName,
                 name AS UserName
             FROM ' + QUOTENAME(@CurrentDBName) + N'.sys.database_principals
-            WHERE type IN (''S'', ''U'')
-              AND authentication_type IN (1, 2)
+            WHERE type IN (''S'', ''U'', ''G'') 
+              AND authentication_type IN (1, 2, 3) 
               AND sid IS NOT NULL AND sid <> 0x0
               AND SUSER_SNAME(sid) IS NULL
               AND name NOT IN (''dbo'', ''guest'', ''INFORMATION_SCHEMA'', ''sys'')';
@@ -93,7 +78,6 @@ BEGIN
     CLOSE db_cursor;
     DEALLOCATE db_cursor;
 
-    -- Processing Orphans
     DECLARE user_cursor CURSOR LOCAL FAST_FORWARD FOR
     SELECT UserName, DBName FROM #OrphanUsers;
 
@@ -102,36 +86,50 @@ BEGIN
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        -- Check if a matching server login exists
-        IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @UserName AND type IN ('S', 'U'))
+        IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @UserName AND type IN ('S', 'U', 'G'))
         BEGIN
-            -- Relink User to Login
             SET @DynamicSQL = N'ALTER USER ' + QUOTENAME(@UserName) + N' WITH LOGIN = ' + QUOTENAME(@UserName) + N';';
         END
         ELSE
         BEGIN
-            -- Dynamic script built cleanly utilizing STRING_AGG to avoid nested cursors entirely
+            -- Transaction wrapping added inside the dynamic execution context
             SET @DynamicSQL = N'
                 DECLARE @SchemaFixes NVARCHAR(MAX) = '''';
                 DECLARE @RoleFixes   NVARCHAR(MAX) = '''';
-                DECLARE @FinalDrop   NVARCHAR(MAX) = N''DROP USER '' + QUOTENAME(' + QUOTENAME(@UserName, '''') + N');;
+                DECLARE @FinalDrop   NVARCHAR(MAX) = N''DROP USER ' + QUOTENAME(@UserName) + N';'';
 
-                -- Aggregating all schema ownership transfers into a single block
-                SELECT @SchemaFixes = COALESCE(STRING_AGG(N''ALTER AUTHORIZATION ON SCHEMA::'' + QUOTENAME(name) + N'' TO [dbo];'', CHAR(13)), '''')
-                FROM sys.schemas 
-                WHERE principal_id = USER_ID(' + QUOTENAME(@UserName, '''') + N');
+                SELECT @SchemaFixes = ISNULL(STUFF((
+                    SELECT CHAR(13) + N''ALTER AUTHORIZATION ON SCHEMA::'' + QUOTENAME(name) + N'' TO [dbo];''
+                    FROM sys.schemas 
+                    WHERE principal_id = USER_ID(@TargetUser)
+                    FOR XML PATH(N''''), TYPE).value(N''.'', N''NVARCHAR(MAX)''), 1, 1, N''''), '''');
 
-                -- Aggregating all custom role ownership transfers into a single block
-                SELECT @RoleFixes = COALESCE(STRING_AGG(N''ALTER AUTHORIZATION ON ROLE::'' + QUOTENAME(name) + N'' TO [dbo];'', CHAR(13)), '''')
-                FROM sys.database_principals 
-                WHERE type = ''R'' AND owning_principal_id = USER_ID(' + QUOTENAME(@UserName, '''') + N');
+                SELECT @RoleFixes = ISNULL(STUFF((
+                    SELECT CHAR(13) + N''ALTER AUTHORIZATION ON ROLE::'' + QUOTENAME(name) + N'' TO [dbo];''
+                    FROM sys.database_principals 
+                    WHERE type = ''R'' AND owning_principal_id = USER_ID(@TargetUser)
+                    FOR XML PATH(N''''), TYPE).value(N''.'', N''NVARCHAR(MAX)''), 1, 1, N''''), '''');
 
-                -- Combine and execute everything sequentially in one execution window
                 DECLARE @FullTask NVARCHAR(MAX) = ISNULL(@SchemaFixes, '''') + CHAR(13) + ISNULL(@RoleFixes, '''') + CHAR(13) + @FinalDrop;
-                EXEC sp_executesql @FullTask;';
+                
+                IF @ExecuteInner = 1
+                BEGIN
+                    BEGIN TRY
+                        BEGIN TRAN;
+                            EXEC sp_executesql @FullTask;
+                        COMMIT TRAN;
+                    END TRY
+                    BEGIN CATCH
+                        IF @@TRANCOUNT > 0 ROLLBACK TRAN;
+                        THROW; -- Re-throw to be caught by the outer loop
+                    END CATCH
+                END
+                ELSE
+                BEGIN
+                    PRINT @FullTask; 
+                END';
         END
 
-        -- Output Formatting
         IF @Print = 1
         BEGIN
             PRINT '-- =================================================='
@@ -140,20 +138,27 @@ BEGIN
             PRINT @DynamicSQL;
         END
 
-        IF @Execute = 1
+        IF @Execute = 1 OR @Print = 1
         BEGIN
             BEGIN TRY
                 DECLARE @ExecContext NVARCHAR(500) = QUOTENAME(@CurrentDBName) + N'..sp_executesql';
-                EXEC @ExecContext @DynamicSQL;
+                
+                EXEC @ExecContext @DynamicSQL, 
+                                  N'@TargetUser NVARCHAR(128), @ExecuteInner BIT', 
+                                  @TargetUser = @UserName, 
+                                  @ExecuteInner = @Execute;
             END TRY
             BEGIN CATCH
-                SET @ErrorMessage = 'Error in DB ' + @CurrentDBName + ' for User ' + @UserName + ': ' + ERROR_MESSAGE();
-                PRINT @ErrorMessage;
+                -- Custom error payload so SQL Agent actually tells you what failed
+                SET @ErrorMessage = ERROR_MESSAGE();
+                DECLARE @CustomError NVARCHAR(2048) = N'Failed to process User [' + @UserName + N'] in DB [' + @CurrentDBName + N']. Original Error: ' + @ErrorMessage;
                 
-                -- Re-throw if the calling system needs to know it failed
+                PRINT @CustomError;
+                
                 IF @RaiseError = 1
                 BEGIN
-                    THROW;
+                    -- Throws the CUSTOM error, breaking the batch.
+                    THROW 50000, @CustomError, 1;
                 END
             END CATCH
         END
