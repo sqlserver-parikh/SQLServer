@@ -233,7 +233,7 @@ $restoreParams = @{
     DatabaseName    = "DBName"
     BackupFilesPath = "C:\Restore\"
     PgBinPath       = "C:\Program Files\pgAdmin 4\runtime"
-    TargetOwner     = "OwnerName"  
+    TargetOwner     = "OwnerName"  # Uncomment to force a specific owner across all tables
 }
 
 Restore-PostgreSQLTables @restoreParams
