@@ -1,88 +1,239 @@
+#region Helper Function for Ownership Logic
+function Get-TableOwner {
+    param(
+        [string]$Server, [string]$Port, [string]$Username, [string]$DatabaseName,
+        [string]$PsqlPath, [string]$Schema, [string]$TableName, [string]$ForcedOwner
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ForcedOwner)) { return $ForcedOwner }
+
+    $getOwnerQuery = "SELECT r.rolname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner WHERE n.nspname = '$Schema' AND c.relname = '$TableName';"
+    $ownerResult = & $PsqlPath --host $Server --port $Port --username $Username --dbname $DatabaseName -t -A -c $getOwnerQuery 2>&1
+    
+    if ($LASTEXITCODE -eq 0 -and $ownerResult -is [string] -and -not [string]::IsNullOrWhiteSpace($ownerResult)) {
+        return $ownerResult.Trim()
+    }
+
+    $getSchemaOwnersQuery = "SELECT r.rolname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner WHERE n.nspname = '$Schema';"
+    $schemaOwners = & $PsqlPath --host $Server --port $Port --username $Username --dbname $DatabaseName -t -A -c $getSchemaOwnersQuery 2>&1
+
+    if ($LASTEXITCODE -eq 0 -and $schemaOwners) {
+        $majority = $schemaOwners | Group-Object | Sort-Object Count -Descending | Select-Object -First 1
+        if ($majority -and ($majority.Count / $schemaOwners.Length) -gt 0.51) {
+            return $majority.Name.Trim()
+        }
+    }
+    
+    return $null
+}
+#endregion
+
 function Restore-PostgreSQLTables {
     param(
-        [string]$ServerName,
-        [string]$Username,
-        [string]$Password,
-        [string]$DatabaseName,
-        [string]$BackupFilesPath,
-        [string]$PgRestorePath = "C:\Program Files\pgAdmin 4\runtime\pg_restore.exe",
+        [Parameter(Mandatory=$true)][string[]]$ServerNames,
+        [Parameter(Mandatory=$true)][string]$Username,
+        [Parameter(Mandatory=$true)][string]$DatabaseName,
+        [Parameter(Mandatory=$true)][string]$BackupFilesPath,
+        [string]$TargetOwner,
+        [string]$PgBinPath = "C:\Program Files\pgAdmin 4\runtime",
         [string]$Port = "5432"
     )
 
-    if (-not (Test-Path $BackupFilesPath -PathType Container)) {
-        Write-Error "Backup files path '$BackupFilesPath' does not exist."
-        return
-    }
-
+    if (-not (Test-Path $BackupFilesPath -PathType Container)) { Write-Error "Backup path not found."; return }
     $backupFiles = Get-ChildItem -Path $BackupFilesPath -Filter "*.backup" | Sort-Object Name
-    if (-not $backupFiles) {
-        Write-Host "No backup files found." -ForegroundColor Yellow
-        return
+    if (-not $backupFiles) { Write-Warning "No .backup files found."; return }
+    
+    $validFilesCount = @($backupFiles | Where-Object { $_.Length -ge 1024 }).Count
+
+    Write-Host "Please enter the database password for user '$Username'" -ForegroundColor Cyan
+    $SecurePassword = Read-Host "Password" -AsSecureString
+    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
+    $PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+
+    $jobs = @()
+    $globalStartTime = Get-Date
+    
+    Write-Host "`nStart Time: $($globalStartTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Yellow
+    Write-Host "Starting parallel restore jobs for $($ServerNames.Count) server(s):" -ForegroundColor Green
+    foreach ($srv in $ServerNames) {
+        Write-Host "  -> $srv" -ForegroundColor DarkGray
     }
+    Write-Host ""
 
-    $env:PGPASSWORD = $Password
-    $startTime = Get-Date
-    Write-Host "Starting restore process at $startTime..." -ForegroundColor Green
+    $scriptBlock = {
+        param($server, $Username, $DatabaseName, $BackupFilesPath, $PgBinPath, $TargetOwner, $PlainPassword, $Port)
 
-    foreach ($file in $backupFiles) {
-        $fullFilePath = $file.FullName
-        Write-Host "`nRestoring: $($file.Name)" -ForegroundColor Cyan
+        # Embedded helper function
+        function Get-TableOwner {
+            param([string]$Server, [string]$Port, [string]$Username, [string]$DatabaseName, [string]$PsqlPath, [string]$Schema, [string]$TableName, [string]$ForcedOwner)
+            if (-not [string]::IsNullOrWhiteSpace($ForcedOwner)) { return $ForcedOwner }
+            $getOwnerQuery = "SELECT r.rolname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner WHERE n.nspname = '$Schema' AND c.relname = '$TableName';"
+            $ownerResult = & $PsqlPath --host $Server --port $Port --username $Username --dbname $DatabaseName -t -A -c $getOwnerQuery 2>&1
+            if ($LASTEXITCODE -eq 0 -and $ownerResult -is [string] -and -not [string]::IsNullOrWhiteSpace($ownerResult)) { return $ownerResult.Trim() }
+            $getSchemaOwnersQuery = "SELECT r.rolname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner WHERE n.nspname = '$Schema';"
+            $schemaOwners = & $PsqlPath --host $Server --port $Port --username $Username --dbname $DatabaseName -t -A -c $getSchemaOwnersQuery 2>&1
+            if ($LASTEXITCODE -eq 0 -and $schemaOwners) {
+                $majority = $schemaOwners | Group-Object | Sort-Object Count -Descending | Select-Object -First 1
+                if ($majority -and ($majority.Count / $schemaOwners.Length) -gt 0.51) { return $majority.Name.Trim() }
+            }
+            return $null
+        }
 
-        $arguments = @(
-            "--host", $ServerName,
-            "--port", $Port,
-            "--username", $Username,
-            "--dbname", $DatabaseName,
-            "--section=pre-data",
-            "--section=data",
-            "--section=post-data",
-            "--no-owner",
-            "--no-privileges",
-            "--clean",
-            "--if-exists",
-            "--verbose",
-            $fullFilePath
-        )
+        $jobStartTime = Get-Date
+        $env:PGPASSWORD = $PlainPassword
+        $PgRestorePath = Join-Path -Path $PgBinPath -ChildPath "pg_restore.exe"
+        $PsqlPath      = Join-Path -Path $PgBinPath -ChildPath "psql.exe"
+        $backupFiles  = Get-ChildItem -Path $BackupFilesPath -Filter "*.backup" | Sort-Object Name
+        
+        $tableDetails = @() 
+        $shortServer = ($server -split '\.')[0] # Short name for cleaner live logging
 
-        try {
-            # Redirect 2>&1 merges Error Stream into Success Stream so we can parse it
-            # and prevents PowerShell from throwing NativeCommandErrors for status messages.
-            $output = & $PgRestorePath $arguments 2>&1
-            $exitCode = $LASTEXITCODE
+        # Test connection
+        & $PsqlPath --host $server --port $Port --username $Username --dbname $DatabaseName -c "SELECT 1;" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Output "[$shortServer] ERROR: Connection failed."
+            return [PSCustomObject]@{ Server = $server; Status = "Failed (Connection)"; Duration = ((Get-Date) - $jobStartTime).ToString('hh\:mm\:ss'); Details = $tableDetails }
+        }
 
-            # Check if the output contains the specific transaction_timeout error
-            $isTimeoutError = $output | Where-Object { $_ -match "transaction_timeout" }
+        foreach ($file in $backupFiles) {
+            if ($file.Length -lt 1024) { continue }
             
-            if ($exitCode -eq 0) {
-                Write-Host "Successfully restored: $($file.Name)" -ForegroundColor Green
+            $listOutput = & $PgRestorePath -l $file.FullName 2>$null
+            $objectLine = $listOutput | Where-Object { $_ -match '\s+(TABLE|VIEW|MATERIALIZED VIEW|SEQUENCE)\s+' } | Select-Object -First 1
+            
+            if ($objectLine -match '\s+(TABLE|VIEW|MATERIALIZED VIEW|SEQUENCE)\s+(\S+)\s+(\S+)') {
+                $objectType = $matches[1]; $schema = $matches[2]; $objectName = $matches[3]
+            } elseif ($file.Name -match "_([a-zA-Z0-9]+)_(.+)_\d{8}_\d{6}\.backup$") {
+                $objectType = "TABLE"; $schema = $matches[1]; $objectName = $matches[2]
+            } else { continue }
+
+            $finalOwner = Get-TableOwner -Server $server -Port $Port -Username $Username -DatabaseName $DatabaseName -PsqlPath $PsqlPath -Schema $schema -TableName $objectName -ForcedOwner $TargetOwner
+            $displayOwner = if ($finalOwner) { $finalOwner } else { "None" }
+
+            # ---- LIVE STREAMING OUTPUT TO MAIN SCRIPT ----
+            Write-Output "[$shortServer] [START] Restoring '$($schema).$($objectName)' at $(Get-Date -Format 'HH:mm:ss')"
+
+            $arguments = @("--host=$server", "--port=$Port", "--username=$Username", "--dbname=$DatabaseName", "--section=pre-data", "--section=data", "--section=post-data", "--no-owner", "--no-privileges", "--clean", "--if-exists", "--verbose", $file.FullName)
+            $output = & $PgRestorePath $arguments 2>&1
+            
+            if ($LASTEXITCODE -gt 1) { 
+                Write-Output "[$shortServer] [ERROR] Failed restoring '$($schema).$($objectName)' at $(Get-Date -Format 'HH:mm:ss')"
+                $tableDetails += [PSCustomObject]@{ Schema = $schema; Table = $objectName; OwnerApplied = $displayOwner; Status = "Failed" }
+                return [PSCustomObject]@{ Server = $server; Status = "Failed on $($file.Name)"; Duration = ((Get-Date) - $jobStartTime).ToString('hh\:mm\:ss'); Details = $tableDetails }
             }
-            elseif ($exitCode -eq 1 -and $isTimeoutError) {
-                Write-Host "Restored with minor version warnings (transaction_timeout ignored). Data integrity is likely fine." -ForegroundColor Yellow
+
+            if ($finalOwner) {
+                $alterCommand = "ALTER $objectType `"$schema`".`"$objectName`" OWNER TO `"$finalOwner`";"
+                & $PsqlPath --host $server --port $Port --username $Username --dbname $DatabaseName -c $alterCommand 2>&1 | Out-Null
             }
-            else {
-                Write-Error "pg_restore failed for $($file.Name) with exit code $exitCode."
-                # Output the actual error messages for debugging
-                $output | Where-Object { $_.GetType().Name -eq "ErrorRecord" -or $_ -match "error" } | Write-Host -ForegroundColor Red
-            }
+            
+            # ---- LIVE STREAMING OUTPUT TO MAIN SCRIPT ----
+            Write-Output "[$shortServer] [ DONE] Restored '$($schema).$($objectName)' (Owner: $displayOwner) at $(Get-Date -Format 'HH:mm:ss')"
+
+            $tableDetails += [PSCustomObject]@{ Schema = $schema; Table = $objectName; OwnerApplied = $displayOwner; Status = "Success" }
         }
-        catch {
-            Write-Error "Critical script error: $($_.Exception.Message)"
-        }
+        return [PSCustomObject]@{ Server = $server; Status = "Success"; Duration = ((Get-Date) - $jobStartTime).ToString('hh\:mm\:ss'); Details = $tableDetails }
     }
 
-    Remove-Item Env:\PGPASSWORD
-    $duration = (Get-Date) - $startTime
-    Write-Host "`nRestore completed. Total duration: $($duration.ToString('hh\:mm\:ss'))" -ForegroundColor Green
+    foreach ($server in $ServerNames) {
+        $jobArgs = @($server, $Username, $DatabaseName, $BackupFilesPath, $PgBinPath, $TargetOwner, $PlainPassword, $Port)
+        $jobs += Start-Job -Name "Restore-$server" -ScriptBlock $scriptBlock -ArgumentList $jobArgs
+    }
+
+    # =====================================================================
+    # LIVE POLLING ENGINE (Reads output while jobs run in parallel)
+    # =====================================================================
+    $results = @()
+    while (($jobs | Where-Object State -eq 'Running').Count -gt 0) {
+        $stream = Receive-Job -Job $jobs
+        foreach ($item in $stream) {
+            if ($item -is [string]) { 
+                Write-Host $item -ForegroundColor Cyan 
+            } else { 
+                $results += $item # Save the final custom objects for the report
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+    
+    # Catch any remaining output after the loop finishes
+    $stream = Receive-Job -Job $jobs
+    foreach ($item in $stream) {
+        if ($item -is [string]) { 
+            Write-Host $item -ForegroundColor Cyan 
+        } else { 
+            $results += $item 
+        }
+    }
+    Remove-Job -Job $jobs
+
+    $globalEndTime = Get-Date
+    $globalDuration = $globalEndTime - $globalStartTime
+    
+    # =========================================================================================
+    # TICKET-READY COMPREHENSIVE REPORT GENERATION
+    # =========================================================================================
+    
+    $report = [System.Text.StringBuilder]::new()
+    [void]$report.AppendLine("===============================================================================")
+    [void]$report.AppendLine("                  POSTGRESQL PARALLEL RESTORE AUDIT REPORT                     ")
+    [void]$report.AppendLine("===============================================================================")
+    [void]$report.AppendLine("EXECUTION TIMELINE")
+    [void]$report.AppendLine("-------------------------------------------------------------------------------")
+    [void]$report.AppendLine("Start Time       : $($globalStartTime.ToString('yyyy-MM-dd HH:mm:ss'))")
+    [void]$report.AppendLine("End Time         : $($globalEndTime.ToString('yyyy-MM-dd HH:mm:ss'))")
+    [void]$report.AppendLine("Total Duration   : $($globalDuration.ToString('hh\:mm\:ss'))")
+    [void]$report.AppendLine()
+    [void]$report.AppendLine("INPUT PARAMETERS USED")
+    [void]$report.AppendLine("-------------------------------------------------------------------------------")
+    [void]$report.AppendLine("Database Name    : $DatabaseName")
+    [void]$report.AppendLine("Admin Username   : $Username")
+    [void]$report.AppendLine("Target Port      : $Port")
+    [void]$report.AppendLine("Backup Path      : $BackupFilesPath")
+    [void]$report.AppendLine("Valid Files      : $validFilesCount table backup(s) found in path")
+    [void]$report.AppendLine("Target Owner     : " + (if ($TargetOwner) { "'$TargetOwner' (Forced override)" } else { "Dynamic Inference (Original/Majority)" }))
+    [void]$report.AppendLine("Target Servers   :")
+    foreach ($srv in $ServerNames) { [void]$report.AppendLine("                   - $srv") }
+    [void]$report.AppendLine()
+    [void]$report.AppendLine("SERVER & TABLE DETAILS")
+    [void]$report.AppendLine("-------------------------------------------------------------------------------")
+    
+    foreach ($res in $results) {
+        [void]$report.AppendLine("SERVER: $($res.Server)")
+        [void]$report.AppendLine("   Job Status   : $($res.Status)")
+        [void]$report.AppendLine("   Job Duration : $($res.Duration)")
+        [void]$report.AppendLine("   Tables Processed:")
+        
+        if ($res.Details -and $res.Details.Count -gt 0) {
+            foreach ($td in $res.Details) {
+                $statusTag = if ($td.Status -eq "Success") { "[SUCCESS]" } else { "[FAILED] " }
+                [void]$report.AppendLine("      $statusTag $($td.Schema).$($td.Table) --> Owner Applied: $($td.OwnerApplied)")
+            }
+        } else {
+            [void]$report.AppendLine("      No tables successfully processed.")
+        }
+        [void]$report.AppendLine("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
+    }
+
+    Write-Host "`n"
+    Write-Host $report.ToString() -ForegroundColor White
 }
 
-# --- Usage (Splatting) ---
+# --- Usage ---
+$servers = @(
+    "ServerA",
+    "ServerB",
+    "ServerC"
+)
+
 $restoreParams = @{
-    ServerName      = "ServerName"
-    Username        = "DBAccountName"
-    Password        = "ComplexPassword" 
+    ServerNames     = $servers
+    Username        = "UserName"
     DatabaseName    = "DBName"
-    BackupFilesPath = "D:\Restore\"
-    PgRestorePath   = "C:\Program Files\pgAdmin 4\runtime\pg_restore.exe"
+    BackupFilesPath = "C:\Restore\"
+    PgBinPath       = "C:\Program Files\pgAdmin 4\runtime"
+    TargetOwner     = "OwnerName"  
 }
 
 Restore-PostgreSQLTables @restoreParams
