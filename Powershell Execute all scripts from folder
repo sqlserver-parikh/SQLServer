@@ -1,0 +1,305 @@
+<#
+.SYNOPSIS
+    Executes SQL deployment scripts in a strict order using dbatools.
+.DESCRIPTION
+    Purpose:
+    - Execute SQL files using Invoke-DbaQuery.
+    - Each file runs inside its own explicit transaction.
+    - If any error occurs in a file, that file is rolled back completely via XACT_ABORT.
+    - Previously committed files remain committed.
+    - Remaining files are skipped.
+    - Detailed logs, a Master SQL output log, and a Ticket Summary are generated.
+#>
+[CmdletBinding()]
+param
+(
+    [Parameter(Mandatory=$true, HelpMessage="Target SQL Server Instance")]
+    [string]$ServerInstance,
+
+    [Parameter(Mandatory=$true, HelpMessage="Target Database")]
+    [string]$Database,
+
+    [Parameter(HelpMessage="Directory containing the .sql files. Defaults to current directory.")]
+    [string]$ScriptsRoot = (Get-Location).Path,
+
+    [Parameter(HelpMessage="Optional explicit list of script names. If empty, runs all .sql files in directory alphabetically.")]
+    [string[]]$ScriptList = @(),
+
+    [int]$QueryTimeout = 0,
+    
+    [switch]$ValidateOnly
+)
+
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = "Stop"
+
+# =====================================================================
+# Logging Setup
+# =====================================================================
+$RunStartTime = Get-Date
+$RunStamp = $RunStartTime.ToString("yyyyMMdd_HHmmss")
+$LogFolder = Join-Path $ScriptsRoot "SQL_Execution_Log_$($Database)_$RunStamp"
+
+New-Item -Path $LogFolder -ItemType Directory -Force | Out-Null
+
+$MasterLogFile    = Join-Path $LogFolder "MasterExecutionLog.txt"
+$MasterSqlLogFile = Join-Path $LogFolder "MasterSqlOutputLog.txt"
+$SummaryCsvFile   = Join-Path $LogFolder "ExecutionSummary.csv"
+$TicketFile       = Join-Path $LogFolder "TicketSummary.txt"
+$PreCheckFile     = Join-Path $LogFolder "PreCheckSummary.txt"
+
+$ExecutionSummary = New-Object System.Collections.Generic.List[object]
+
+# Ensure the Master SQL Log exists with a header
+"SQL Deployment Master Output Log - $($RunStartTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n" | Out-File -FilePath $MasterSqlLogFile -Encoding UTF8
+
+# =====================================================================
+# Helper Functions
+# =====================================================================
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $line = "[{0}] [{1}] {2}" -f (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"), $Level, $Message
+    Write-Host $line
+    Add-Content -Path $MasterLogFile -Value $line
+}
+
+function Get-SafeFileName {
+    param([string]$FileName)
+    return ($FileName -replace '[\\/:*?"<>| ]', '_')
+}
+
+function Write-TicketSummary {
+    param (
+        [string]$RunStatus,
+        [string]$FailureScriptName = "",
+        [int]$FailureScriptNumber = 0,
+        [string]$FailureError = "",
+        [string]$FailureLogFile = ""
+    )
+
+    $RunEndTime = Get-Date
+    $TotalDuration = New-TimeSpan -Start $RunStartTime -End $RunEndTime
+
+    $summaryTable = $ExecutionSummary | Format-Table ScriptNumber, ScriptName, Status, DurationSeconds -AutoSize | Out-String -Width 5000
+    $skippedScripts = $ExecutionSummary | Where-Object { $_.Status -eq "SKIPPED" } | Select-Object -ExpandProperty ScriptName
+
+    if ($RunStatus -eq "FAILED") {
+        $skippedText = if ($skippedScripts.Count -gt 0) { $skippedScripts -join "`r`n" } else { "None" }
+        $resultSection = @"
+Failure Point
+----------------------------------------------------------------------
+Failed Script      : $FailureScriptName
+Script Number      : $FailureScriptNumber of $($ScriptList.Count)
+Error              : $FailureError
+
+Rollback Result
+----------------------------------------------------------------------
+The failed script was wrapped in XACT_ABORT ON and an explicit transaction.
+Because an error occurred, SQL Server automatically rolled back the uncommitted batch.
+Previously completed scripts remain committed.
+Remaining scripts were skipped.
+
+Skipped Scripts
+----------------------------------------------------------------------
+$skippedText
+
+Failed Script Log
+----------------------------------------------------------------------
+$FailureLogFile
+"@
+    }
+    elseif ($RunStatus -eq "VALIDATION_ONLY") {
+        $resultSection = "Validation completed successfully. No SQL executed."
+    }
+    else {
+        $resultSection = "All scripts completed successfully in the requested order."
+    }
+
+@"
+SQL Deployment Ticket Summary
+======================================================================
+Server          : $ServerInstance
+Database        : $Database
+Run Status      : $RunStatus
+Run Start       : $($RunStartTime.ToString("yyyy-MM-dd HH:mm:ss"))
+Run End         : $($RunEndTime.ToString("yyyy-MM-dd HH:mm:ss"))
+Total Duration  : $($TotalDuration.ToString())
+
+$resultSection
+
+Execution Summary
+----------------------------------------------------------------------
+$summaryTable
+======================================================================
+"@ | Set-Content -Path $TicketFile -Encoding UTF8
+}
+
+# =====================================================================
+# Main Execution
+# =====================================================================
+try {
+    Write-Log "Starting dbatools SQL Deployment Execution"
+    
+    # 1. Resolve Script List
+    if ($ScriptList.Count -eq 0) {
+        Write-Log "No explicit ScriptList provided. Auto-discovering .sql files in alphabetical order."
+        $ScriptList = (Get-ChildItem -Path $ScriptsRoot -Filter "*.sql" | Sort-Object Name).Name
+        
+        if ($ScriptList.Count -eq 0) {
+            throw "No .sql files found in directory: $ScriptsRoot"
+        }
+    }
+
+    # 2. Pre-Check Module
+    if (-not (Get-Module -ListAvailable dbatools)) {
+        throw "The 'dbatools' module is not installed or available. Please install it to proceed."
+    }
+
+    # 3. Pre-Check Files
+    Write-Log "Running File Pre-Checks..."
+    $precheckProblems = New-Object System.Collections.Generic.List[string]
+
+    foreach ($ScriptName in $ScriptList) {
+        $ScriptPath = Join-Path $ScriptsRoot $ScriptName
+        if (-not (Test-Path -Path $ScriptPath -PathType Leaf)) {
+            $precheckProblems.Add("Missing required file: $ScriptName")
+        }
+    }
+
+    # 4. Pre-Check Connection via dbatools
+    Write-Log "Testing SQL Connection..."
+    $connTest = Test-DbaConnection -SqlInstance $ServerInstance
+    if (-not $connTest.ConnectSuccess) {
+        $precheckProblems.Add("Could not connect to instance: $ServerInstance")
+    }
+
+    if ($precheckProblems.Count -gt 0) {
+        $precheckProblems | ForEach-Object { Write-Log $_ "ERROR" }
+        throw "Pre-check failed. No scripts were executed."
+    }
+    Write-Log "Pre-checks passed successfully."
+
+    if ($ValidateOnly) {
+        Write-Log "Validation-only mode completed."
+        Write-TicketSummary -RunStatus "VALIDATION_ONLY"
+        exit 0
+    }
+
+    # 5. Execute Scripts
+    $ScriptNumber = 0
+    $FailureOccurred = $false
+
+    # Ensure PowerShell captures SQL PRINT statements into the output stream
+    $InformationPreference = 'Continue'
+
+    foreach ($ScriptName in $ScriptList) {
+        $ScriptNumber++
+
+        if ($FailureOccurred) {
+            $ExecutionSummary.Add([pscustomobject]@{
+                ScriptNumber    = $ScriptNumber
+                ScriptName      = $ScriptName
+                Status          = "SKIPPED"
+                DurationSeconds = ""
+            })
+            continue
+        }
+
+        $ScriptPath = Join-Path $ScriptsRoot $ScriptName
+        $SafeName = Get-SafeFileName $ScriptName
+        $ScriptLogFile = Join-Path $LogFolder ("{0:00}_{1}.log" -f $ScriptNumber, $SafeName)
+        
+        Write-Log "Executing script #${ScriptNumber}: $ScriptName"
+        $ScriptStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+        try {
+            $RawSql = Get-Content -Path $ScriptPath -Raw -Encoding UTF8
+
+            $TransactionWrapper = @"
+SET XACT_ABORT ON;
+GO
+BEGIN TRAN;
+GO
+$RawSql
+GO
+IF @@TRANCOUNT > 0 COMMIT TRAN;
+GO
+"@
+            # Execute script and redirect ALL streams (*>&1) to the individual file log
+            Invoke-DbaQuery -SqlInstance $ServerInstance -Database $Database -Query $TransactionWrapper -QueryTimeout $QueryTimeout -EnableException *>&1 | Out-File -FilePath $ScriptLogFile -Encoding UTF8
+            
+            # Append the individual script output to the Master SQL Output Log
+            $ScriptOutput = Get-Content -Path $ScriptLogFile -Raw -ErrorAction SilentlyContinue
+            $MasterHeader = "`r`n======================================================================`r`nSCRIPT #${ScriptNumber}: $ScriptName`r`n======================================================================`r`n"
+            Add-Content -Path $MasterSqlLogFile -Value "$MasterHeader$ScriptOutput"
+            
+            $ScriptStopWatch.Stop()
+            Write-Log "SUCCESS: $ScriptName committed in $([math]::Round($ScriptStopWatch.Elapsed.TotalSeconds, 2))s"
+
+            $ExecutionSummary.Add([pscustomobject]@{
+                ScriptNumber    = $ScriptNumber
+                ScriptName      = $ScriptName
+                Status          = "SUCCESS"
+                DurationSeconds = [math]::Round($ScriptStopWatch.Elapsed.TotalSeconds, 2)
+            })
+        }
+        catch {
+            $ScriptStopWatch.Stop()
+            $ErrorMessage = $_.Exception.Message
+            
+            Write-Log "FAILED: $ScriptName" "ERROR"
+            Write-Log "Error: $ErrorMessage" "ERROR"
+            Write-Log "XACT_ABORT forced a rollback of the uncommitted batches." "ERROR"
+
+            # Append the error details to the Master SQL Output Log
+            $MasterHeader = "`r`n======================================================================`r`nSCRIPT #${ScriptNumber}: $ScriptName (FAILED)`r`n======================================================================`r`n"
+            Add-Content -Path $MasterSqlLogFile -Value "$MasterHeader$ErrorMessage"
+
+            $ExecutionSummary.Add([pscustomobject]@{
+                ScriptNumber    = $ScriptNumber
+                ScriptName      = $ScriptName
+                Status          = "FAILED (ROLLED BACK)"
+                DurationSeconds = [math]::Round($ScriptStopWatch.Elapsed.TotalSeconds, 2)
+            })
+
+            $FailureOccurred = $true
+
+            $ExecutionSummary | Export-Csv -Path $SummaryCsvFile -NoTypeInformation
+            Write-TicketSummary -RunStatus "FAILED" -FailureScriptName $ScriptName -FailureScriptNumber $ScriptNumber -FailureError $ErrorMessage -FailureLogFile $ScriptLogFile
+            
+            Write-Log "Execution stopped. Remaining scripts skipped." "ERROR"
+            exit 1
+        }
+    }
+
+    # 6. Success Finalization
+    $ExecutionSummary | Export-Csv -Path $SummaryCsvFile -NoTypeInformation
+    Write-TicketSummary -RunStatus "SUCCESS"
+    Write-Log "SQL Deployment Execution Completed Successfully."
+    exit 0
+
+}
+catch {
+    Write-Log "Fatal error: $_" "ERROR"
+    exit 1
+}
+
+
+<#
+The "Auto-Discover" Run (Basic Usage)
+If you run the script from the same folder where your .sql files live, you only need to provide the server and database. It will automatically find all .sql files in the current directory and execute them in alphabetical order.
+
+PowerShell
+.\Deploy-SqlScripts.ps1 -ServerInstance "SQLPROD01\DEFAULT" -Database "ApplicationDB"
+
+The "Strict Order" Run (Explicit Array)
+If your file names do not naturally sort alphabetically (or you only want to run a subset of files), you can pass an explicit array of file names. The script will run them in the exact order you provide.
+
+PowerShell
+$myScripts = @(
+    "Create_Tables.sql",
+    "Create_Indexes.sql",
+    "Create_StoredProcs.sql"
+)
+.\Deploy-SqlScripts.ps1 -ServerInstance "SQLPROD01" -Database "ApplicationDB" -ScriptList
+#>
