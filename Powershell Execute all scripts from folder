@@ -8,10 +8,16 @@
     - Allow GO batch separators.
     - Stop immediately on the first failure.
     - Do not create artificial transaction wrappers.
-    - Generate an upfront Deployment Manifest for auditors.
+    - Generate upfront Deployment Manifests (TXT and CSV) for auditors.
     - Validate script files, dbatools availability, SQL connectivity, and database state.
     - Capture SQL output, PRINT messages, and raw PowerShell error records.
     - Fully document SUCCESS, FAILED, SKIPPED, MISSING, PRECHECK_FAILED, and VALIDATED states.
+
+.NOTES
+    CRITICAL: SQL scripts must not silently swallow errors. If TRY/CATCH is used 
+    inside a script, the CATCH block must rethrow the error using THROW or 
+    RAISERROR with a severity of 11 or higher, otherwise PowerShell will 
+    register the execution as a success.
 
 .PARAMETER ServerInstance
     Target SQL Server instance name or connection string.
@@ -19,6 +25,9 @@
 .PARAMETER Database
     Target database to execute scripts against. Must be ONLINE, READ_WRITE, and MULTI_USER.
     The caller must also have direct USE access to this database.
+
+.PARAMETER SqlCredential
+    Optional PSCredential object. If omitted, integrated Windows authentication is used.
 
 .PARAMETER ScriptsRoot
     Directory containing the .sql files. Defaults to the current working directory.
@@ -33,6 +42,7 @@
 
 .PARAMETER QueryTimeout
     Timeout in seconds for each SQL query execution. 0 means no timeout (default).
+    Warning: For controlled change windows, consider setting a finite value to prevent hanging.
 
 .PARAMETER ValidateOnly
     When specified, runs all pre-checks and generates the manifest without executing any SQL.
@@ -45,7 +55,8 @@
     .\Deploy-SqlScripts.ps1 -ServerInstance "SQLPROD01" -Database "AppDB" -ValidateOnly
 
 .EXAMPLE
-    .\Deploy-SqlScripts.ps1 -ServerInstance "SQLPROD01" -Database "AppDB" -ScriptList @("001_schema.sql","002_data.sql")
+    $myScripts = @("001_schema.sql", "002_data.sql")
+    .\Deploy-SqlScripts.ps1 -ServerInstance "SQLPROD01" -Database "AppDB" -ScriptList $myScripts
 #>
 
 [CmdletBinding()]
@@ -58,6 +69,9 @@ param
     [Parameter(Mandatory = $true, HelpMessage = "Target Database")]
     [ValidateNotNullOrEmpty()]
     [string]$Database,
+
+    [Parameter(HelpMessage = "Optional SQL or Windows Credential. Uses Integrated Auth if empty.")]
+    [System.Management.Automation.PSCredential]$SqlCredential,
 
     [Parameter(HelpMessage = "Directory containing the .sql files. Defaults to current directory.")]
     [string]$ScriptsRoot = (Get-Location).Path,
@@ -83,34 +97,17 @@ $ErrorActionPreference = "Stop"
 
 function Get-SafeFileName {
     param([Parameter(Mandatory = $true)][string]$FileName)
-
-    # Replaces Windows-forbidden characters and spaces with underscores.
-    # Forbidden characters: \ / : * ? " < > |
-    # Also replaces: space
     return ($FileName -replace '[\\/:*?"<>| ]', '_')
 }
 
 function Get-NaturalSortKey {
     param([Parameter(Mandatory = $true)][string]$Name)
-
-    return [regex]::Replace(
-        $Name,
-        '\d+',
-        {
-            param($m)
-            $m.Value.PadLeft(10, '0')
-        }
-    )
+    return [regex]::Replace($Name, '\d+', { param($m) $m.Value.PadLeft(10, '0') })
 }
 
 function Stop-SafeTranscript {
     if ($script:TranscriptStarted) {
-        try {
-            Stop-Transcript | Out-Null
-        }
-        catch {
-            # Transcript cleanup must never fail the deployment process.
-        }
+        try { Stop-Transcript | Out-Null } catch { }
     }
 }
 
@@ -119,7 +116,6 @@ function Write-Log {
         [Parameter(Mandatory = $true)][string]$Message,
         [string]$Level = "INFO"
     )
-
     $line = "[{0}] [{1}] {2}" -f (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"), $Level, $Message
     Write-Host $line
 
@@ -133,12 +129,12 @@ function Export-ExecutionSummary {
         $script:ExecutionSummary | Export-Csv -Path $script:SummaryCsvFile -NoTypeInformation -Encoding UTF8
     }
     else {
-        # Create an empty CSV with headers so the evidence package file always exists.
         [pscustomobject]@{
-            ScriptNumber = ""; ScriptName = ""; Status = ""; SizeKB = ""
-            StartTime = ""; EndTime = ""; DurationSeconds = ""; Hash = ""
-        } |
-            Export-Csv -Path $script:SummaryCsvFile -NoTypeInformation -Encoding UTF8
+            RunStamp = ""; ServerInstance = ""; Database = ""; ScriptNumber = "";
+            ScriptName = ""; ScriptPath = ""; Status = ""; SizeKB = "";
+            StartTime = ""; EndTime = ""; DurationSeconds = ""; Hash = "";
+            LogFile = ""; ErrorMessage = ""
+        } | Export-Csv -Path $script:SummaryCsvFile -NoTypeInformation -Encoding UTF8
 
         $headerLine = Get-Content -Path $script:SummaryCsvFile -TotalCount 1
         Set-Content -Path $script:SummaryCsvFile -Value $headerLine -Encoding UTF8
@@ -152,9 +148,7 @@ function Add-MasterSqlLog {
         [Parameter(Mandatory = $true)][string]$LogFilePath,
         [switch]$Failed
     )
-
     $statusText = if ($Failed) { " (FAILED)" } else { "" }
-
     $header = @"
 
 ======================================================================
@@ -162,7 +156,6 @@ SCRIPT #${ScriptNum}: $Name$statusText
 ======================================================================
 
 "@
-
     Add-Content -Path $script:MasterSqlLogFile -Value $header -Encoding UTF8
 
     if (Test-Path -Path $LogFilePath -PathType Leaf) {
@@ -175,10 +168,7 @@ SCRIPT #${ScriptNum}: $Name$statusText
 }
 
 function Write-DeploymentManifest {
-    $manifestOutput =
-        $script:ManifestData |
-        Format-Table Order, ScriptName, ScriptPath, SizeKB, Hash -AutoSize |
-        Out-String -Width 5000
+    $manifestOutput = $script:ManifestData | Format-Table Order, ScriptName, ScriptPath, SizeKB, Hash -AutoSize | Out-String -Width 5000
 
 @"
 ======================================================================
@@ -196,6 +186,9 @@ dbatools        : $script:DbatoolsVersion
 
 $manifestOutput
 "@ | Set-Content -Path $script:ManifestFile -Encoding UTF8
+
+    # Export CSV Manifest
+    $script:ManifestData | Export-Csv -Path $script:ManifestCsvFile -NoTypeInformation -Encoding UTF8
 }
 
 function Write-TicketSummary {
@@ -203,14 +196,11 @@ function Write-TicketSummary {
         [Parameter(Mandatory = $true)][string]$RunStatus,
         [string]$Details = ""
     )
-
     $runEndTime = Get-Date
     $totalDuration = New-TimeSpan -Start $script:RunStartTime -End $runEndTime
+    $summaryTable = $script:ExecutionSummary | Format-Table ScriptNumber, ScriptName, Status, SizeKB, StartTime, EndTime, DurationSeconds, Hash -AutoSize | Out-String -Width 5000
 
-    $summaryTable =
-        $script:ExecutionSummary |
-        Format-Table ScriptNumber, ScriptName, Status, SizeKB, StartTime, EndTime, DurationSeconds, Hash -AutoSize |
-        Out-String -Width 5000
+    $timeoutStr = if ($QueryTimeout -eq 0) { "0 (no timeout)" } else { "$QueryTimeout seconds" }
 
 @"
 ======================================================================
@@ -222,15 +212,18 @@ Run Status      : $RunStatus
 Run Start       : $($script:RunStartTime.ToString("yyyy-MM-dd HH:mm:ss"))
 Run End         : $($runEndTime.ToString("yyyy-MM-dd HH:mm:ss"))
 Total Duration  : $($totalDuration.ToString())
+Query Timeout   : $timeoutStr
 
 ----------------------------------------------------------------------
 Execution Evidence Package
 ----------------------------------------------------------------------
 Log Folder      : $script:LogFolder
 Manifest File   : $script:ManifestFile
+Manifest CSV    : $script:ManifestCsvFile
 Master SQL Log  : $script:MasterSqlLogFile
 Summary CSV     : $script:SummaryCsvFile
 Transcript      : $script:TranscriptFile
+Transcript Used : $script:TranscriptStarted
 
 ----------------------------------------------------------------------
 Details
@@ -244,54 +237,53 @@ $summaryTable
 "@ | Set-Content -Path $script:TicketFile -Encoding UTF8
 }
 
+function Get-SummaryRecord {
+    param(
+        [int]$Num, [string]$Name, [string]$Path, [string]$Status, 
+        [string]$Size, [string]$Start, [string]$End, [string]$Dur, 
+        [string]$Hash, [string]$Log, [string]$Err
+    )
+    return [pscustomobject]@{
+        RunStamp = $script:RunStamp; ServerInstance = $ServerInstance; Database = $Database;
+        ScriptNumber = $Num; ScriptName = $Name; ScriptPath = $Path; Status = $Status;
+        SizeKB = $Size; StartTime = $Start; EndTime = $End; DurationSeconds = $Dur;
+        Hash = $Hash; LogFile = $Log; ErrorMessage = $Err
+    }
+}
+
 # =====================================================================
 # State Initialization
 # =====================================================================
 
 $script:RunStartTime = Get-Date
 $script:RunStamp = $script:RunStartTime.ToString("yyyyMMddHHmmss")
-
 $script:ExecutionSummary = New-Object System.Collections.Generic.List[object]
 $script:ManifestData = New-Object System.Collections.Generic.List[object]
 $script:ManifestLookup = @{}
 $script:PrecheckProblems = New-Object System.Collections.Generic.List[string]
-
 $script:DbatoolsVersion = "NOT AVAILABLE"
 $script:TranscriptStarted = $false
 $script:LoggingInitialized = $false
 
-$script:ExecutedBy = try {
-    [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-}
-catch {
-    "$env:USERDOMAIN\$env:USERNAME"
-}
+$script:ExecutedBy = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { "$env:USERDOMAIN\$env:USERNAME" }
+
+# Base connection params to splat across all dbatools calls
+$script:ConnParams = @{ SqlInstance = $ServerInstance }
+if ($SqlCredential) { $script:ConnParams.SqlCredential = $SqlCredential }
 
 # =====================================================================
 # Phase Functions
 # =====================================================================
 
 function Initialize-Logging {
-    if (-not (Test-Path -Path $ScriptsRoot -PathType Container)) {
-        throw "ScriptsRoot does not exist or is not a directory: $ScriptsRoot"
-    }
-
-    if ([string]::IsNullOrWhiteSpace($LogPath)) {
-        throw "LogPath is empty or invalid."
-    }
-
+    if (-not (Test-Path -Path $ScriptsRoot -PathType Container)) { throw "ScriptsRoot does not exist or is not a directory: $ScriptsRoot" }
+    if ([string]::IsNullOrWhiteSpace($LogPath)) { throw "LogPath is empty or invalid." }
     if (-not (Test-Path -Path $LogPath -PathType Container)) {
-        try {
-            New-Item -Path $LogPath -ItemType Directory -Force | Out-Null
-        }
-        catch {
-            throw "Could not create LogPath directory '$LogPath': $_"
-        }
+        try { New-Item -Path $LogPath -ItemType Directory -Force | Out-Null } catch { throw "Could not create LogPath directory '$LogPath': $_" }
     }
 
     $safeDatabaseName = Get-SafeFileName -FileName $Database
     $script:LogFolder = Join-Path $LogPath "SQLExecutionLog_${safeDatabaseName}_$($script:RunStamp)"
-
     New-Item -Path $script:LogFolder -ItemType Directory -Force | Out-Null
 
     $script:MasterLogFile    = Join-Path $script:LogFolder "MasterExecutionLog.txt"
@@ -299,10 +291,10 @@ function Initialize-Logging {
     $script:SummaryCsvFile   = Join-Path $script:LogFolder "ExecutionSummary.csv"
     $script:TicketFile       = Join-Path $script:LogFolder "TicketSummary.txt"
     $script:ManifestFile     = Join-Path $script:LogFolder "DeploymentManifest.txt"
+    $script:ManifestCsvFile  = Join-Path $script:LogFolder "DeploymentManifest.csv"
     $script:TranscriptFile   = Join-Path $script:LogFolder "PowerShellTranscript.txt"
 
-    "SQL Deployment Master Output Log - $($script:RunStartTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n" |
-        Out-File -FilePath $script:MasterSqlLogFile -Encoding UTF8
+    "SQL Deployment Master Output Log - $($script:RunStartTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n" | Out-File -FilePath $script:MasterSqlLogFile -Encoding UTF8
 
     $script:LoggingInitialized = $true
 
@@ -317,30 +309,19 @@ function Initialize-Logging {
 }
 
 function Resolve-ScriptList {
-    if ($ScriptList.Count -gt 0) {
-        return [string[]]$ScriptList
-    }
-
+    if ($ScriptList.Count -gt 0) { return [string[]]$ScriptList }
     Write-Log "No explicit ScriptList provided. Auto-discovering .sql files using natural sort."
-
-    $found =
-        Get-ChildItem -Path $ScriptsRoot -Filter "*.sql" -File |
-        Sort-Object { Get-NaturalSortKey -Name $_.Name } |
-        Select-Object -ExpandProperty Name
-
+    $found = Get-ChildItem -Path $ScriptsRoot -Filter "*.sql" -File | Sort-Object { Get-NaturalSortKey -Name $_.Name } | Select-Object -ExpandProperty Name
     if ($null -eq $found -or $found.Count -eq 0) {
         $script:PrecheckProblems.Add("No .sql files found in directory: $ScriptsRoot")
         return @()
     }
-
     return [string[]]$found
 }
 
 function Initialize-Manifest {
     param([Parameter(Mandatory = $true)][string[]]$ListToProcess)
-
     Write-Log "Generating Deployment Manifest."
-
     $orderCounter = 1
 
     foreach ($name in $ListToProcess) {
@@ -349,467 +330,65 @@ function Initialize-Manifest {
 
         if ($isMissing) {
             $script:PrecheckProblems.Add("Missing required file: $name")
-            $sizeKB = ""
-            $hash = "MISSING"
+            $sizeKB = ""; $hash = "MISSING"
         }
         else {
             $fileInfo = Get-Item -Path $scriptPath
             $sizeKB = [math]::Round(($fileInfo.Length / 1KB), 2)
             $hash = (Get-FileHash -Path $scriptPath -Algorithm SHA256).Hash
-
-            if ($fileInfo.Length -eq 0) {
-                $script:PrecheckProblems.Add("Script file is empty (0 bytes): $name")
-            }
+            if ($fileInfo.Length -eq 0) { $script:PrecheckProblems.Add("Script file is empty (0 bytes): $name") }
         }
 
-        $item = [pscustomobject]@{
-            Order      = $orderCounter
-            ScriptName = $name
-            ScriptPath = $scriptPath
-            SizeKB     = $sizeKB
-            Hash       = $hash
-        }
-
+        $item = [pscustomobject]@{ Order = $orderCounter; ScriptName = $name; ScriptPath = $scriptPath; SizeKB = $sizeKB; Hash = $hash }
         $script:ManifestData.Add($item)
         $script:ManifestLookup[$orderCounter] = $item
-
         $orderCounter++
     }
 }
 
 function Invoke-PreChecks {
-    <#
-    .SYNOPSIS
-        Runs staged pre-checks. Each stage stops if problems are found to prevent noise.
-
-        Stage 1: Script file existence and emptiness (already done in Initialize-Manifest).
-        Stage 2: dbatools module availability.
-        Stage 3: SQL connectivity, database state, and direct access.
-    #>
-
-    # ---------------------------------------------------------------
-    # Stage 1 gate: file-level problems already accumulated in
-    # Initialize-Manifest. If any file is missing or empty, stop here.
-    # ---------------------------------------------------------------
     if ($script:PrecheckProblems.Count -gt 0) {
         Write-Log "Pre-check stopped at Stage 1 (file validation). File-level problems detected." "WARN"
         return
     }
 
-    # ---------------------------------------------------------------
-    # Stage 2: dbatools module availability
-    # ---------------------------------------------------------------
-    $dbatoolsModule =
-        Get-Module -ListAvailable dbatools |
-        Sort-Object Version -Descending |
-        Select-Object -First 1
-
+    $dbatoolsModule = Get-Module -ListAvailable dbatools | Sort-Object Version -Descending | Select-Object -First 1
     if ($null -eq $dbatoolsModule) {
         $script:PrecheckProblems.Add("The 'dbatools' module is not installed or available.")
         Write-Log "Pre-check stopped at Stage 2. dbatools is not available." "WARN"
         return
     }
-
     $script:DbatoolsVersion = $dbatoolsModule.Version.ToString()
     Write-Log "dbatools version detected: $($script:DbatoolsVersion)"
 
-    # ---------------------------------------------------------------
-    # Stage 3: SQL connectivity, database state, and direct access
-    # ---------------------------------------------------------------
     Write-Log "Testing SQL connection, database state, and direct access."
+    try {
+        $connTest = Test-DbaConnection @script:ConnParams -ErrorAction Stop
+        if (-not $connTest.ConnectSuccess) { $script:PrecheckProblems.Add("Could not connect to instance: $ServerInstance"); return }
+    }
+    catch { $script:PrecheckProblems.Add("SQL connection test failed for instance '$ServerInstance'. $_"); return }
 
     try {
-        $connTest = Test-DbaConnection -SqlInstance $ServerInstance -ErrorAction Stop
+        $dbQuery = "SELECT state_desc, is_read_only, user_access_desc FROM sys.databases WHERE name = @DatabaseName;"
+        $dbCheck = Invoke-DbaQuery @script:ConnParams -Query $dbQuery -SqlParameter @{ DatabaseName = $Database } -EnableException -As PSObject
 
-        if (-not $connTest.ConnectSuccess) {
-            $script:PrecheckProblems.Add("Could not connect to instance: $ServerInstance")
-            return
-        }
-    }
-    catch {
-        $script:PrecheckProblems.Add("SQL connection test failed for instance '$ServerInstance'. $_")
-        return
-    }
-
-    # Check database metadata via sys.databases (does not require USE access).
-    try {
-        $dbQuery = @"
-SELECT
-    state_desc,
-    is_read_only,
-    user_access_desc
-FROM sys.databases
-WHERE name = @DatabaseName;
-"@
-
-        $dbCheck = Invoke-DbaQuery `
-            -SqlInstance $ServerInstance `
-            -Query $dbQuery `
-            -SqlParameter @{ DatabaseName = $Database } `
-            -EnableException `
-            -As PSObject
-
-        if ($null -eq $dbCheck) {
-            $script:PrecheckProblems.Add("Database '$Database' does not exist on instance '$ServerInstance'.")
-            return
-        }
-
+        if ($null -eq $dbCheck) { $script:PrecheckProblems.Add("Database '$Database' does not exist on instance '$ServerInstance'."); return }
         if ($dbCheck.state_desc -ne 'ONLINE' -or $dbCheck.is_read_only -eq $true -or $dbCheck.user_access_desc -ne 'MULTI_USER') {
-            $script:PrecheckProblems.Add(
-                "Database '$Database' is not ready. State: $($dbCheck.state_desc), ReadOnly: $($dbCheck.is_read_only), Access: $($dbCheck.user_access_desc)."
-            )
+            $script:PrecheckProblems.Add("Database '$Database' is not ready. State: $($dbCheck.state_desc), ReadOnly: $($dbCheck.is_read_only), Access: $($dbCheck.user_access_desc).")
             return
         }
     }
-    catch {
-        $script:PrecheckProblems.Add("Database metadata check failed for '$Database'. $_")
-        return
-    }
+    catch { $script:PrecheckProblems.Add("Database metadata check failed for '$Database'. $_"); return }
 
-    # Direct access check: prove the caller can actually USE the target database.
     try {
-        $accessCheck = Invoke-DbaQuery `
-            -SqlInstance $ServerInstance `
-            -Database $Database `
-            -Query "SELECT DB_NAME() AS CurrentDatabase;" `
-            -EnableException `
-            -As PSObject
-
+        $accessCheck = Invoke-DbaQuery @script:ConnParams -Database $Database -Query "SELECT DB_NAME() AS CurrentDatabase;" -EnableException -As PSObject
         if ($null -eq $accessCheck -or $accessCheck.CurrentDatabase -ne $Database) {
-            $expectedDb = $Database
             $actualDb = if ($null -ne $accessCheck) { $accessCheck.CurrentDatabase } else { "(null)" }
-            $script:PrecheckProblems.Add(
-                "Database context mismatch. Expected '$expectedDb', got '$actualDb'. The caller may not have USE permission."
-            )
-        }
-        else {
-            Write-Log "Direct database access verified for '$Database'."
-        }
+            $script:PrecheckProblems.Add("Database context mismatch. Expected '$Database', got '$actualDb'. The caller may not have USE permission.")
+        } else { Write-Log "Direct database access verified for '$Database'." }
     }
-    catch {
-        $script:PrecheckProblems.Add("Could not access target database '$Database' directly. $_")
-    }
+    catch { $script:PrecheckProblems.Add("Could not access target database '$Database' directly. $_") }
 }
 
 function Add-PrecheckExecutionSummary {
-    foreach ($item in $script:ManifestData) {
-        $script:ExecutionSummary.Add([pscustomobject]@{
-            ScriptNumber    = $item.Order
-            ScriptName      = $item.ScriptName
-            Status          = if ($item.Hash -eq "MISSING") { "MISSING - PRECHECK FAILED" } else { "NOT STARTED - PRECHECK FAILED" }
-            SizeKB          = $item.SizeKB
-            StartTime       = ""
-            EndTime         = ""
-            DurationSeconds = ""
-            Hash            = $item.Hash
-        })
-    }
-}
-
-function Add-ValidateOnlyExecutionSummary {
-    foreach ($item in $script:ManifestData) {
-        $script:ExecutionSummary.Add([pscustomobject]@{
-            ScriptNumber    = $item.Order
-            ScriptName      = $item.ScriptName
-            Status          = "VALIDATED - NOT EXECUTED"
-            SizeKB          = $item.SizeKB
-            StartTime       = ""
-            EndTime         = ""
-            DurationSeconds = ""
-            Hash            = $item.Hash
-        })
-    }
-}
-
-function Invoke-Deployment {
-    <#
-    .SYNOPSIS
-        Executes all scripts in order. Returns $true on full success, $false on failure.
-    #>
-    param([Parameter(Mandatory = $true)][string[]]$ListToProcess)
-
-    $scriptNumber = 0
-
-    foreach ($scriptName in $ListToProcess) {
-        $scriptNumber++
-
-        $manifestItem = $script:ManifestLookup[$scriptNumber]
-
-        if ($null -eq $manifestItem) {
-            throw "Manifest lookup failed for script number $scriptNumber."
-        }
-
-        $scriptPath = Join-Path $ScriptsRoot $scriptName
-        $safeName = Get-SafeFileName -FileName $scriptName
-        $scriptLogFile = Join-Path $script:LogFolder ("{0:00}_{1}.log" -f $scriptNumber, $safeName)
-
-        Write-Log "Executing script #${scriptNumber}: $scriptName ($($manifestItem.SizeKB)KB)"
-
-        $execStartTime = Get-Date
-        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-
-        try {
-            "SQL Script Output - $scriptName - $($execStartTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n" |
-                Out-File -FilePath $scriptLogFile -Encoding UTF8
-
-            # Merge all output streams into stdout and capture to log file.
-            # The *>&1 operator merges streams 1-6 (Success, Error, Warning,
-            # Verbose, Debug, Information) into the success stream for capture.
-            Invoke-DbaQuery `
-                -SqlInstance $ServerInstance `
-                -Database $Database `
-                -File $scriptPath `
-                -QueryTimeout $QueryTimeout `
-                -MessagesToOutput `
-                -EnableException *>&1 |
-                Out-File -FilePath $scriptLogFile -Append -Encoding UTF8
-
-            $stopwatch.Stop()
-            $execEndTime = Get-Date
-            $elapsedSec = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
-
-            Write-Log "SUCCESS: $scriptName finished in ${elapsedSec}s"
-
-            Add-MasterSqlLog `
-                -ScriptNum $scriptNumber `
-                -Name $scriptName `
-                -LogFilePath $scriptLogFile
-
-            $script:ExecutionSummary.Add([pscustomobject]@{
-                ScriptNumber    = $scriptNumber
-                ScriptName      = $scriptName
-                Status          = "SUCCESS"
-                SizeKB          = $manifestItem.SizeKB
-                StartTime       = $execStartTime.ToString("yyyy-MM-dd HH:mm:ss")
-                EndTime         = $execEndTime.ToString("yyyy-MM-dd HH:mm:ss")
-                DurationSeconds = $elapsedSec
-                Hash            = $manifestItem.Hash
-            })
-        }
-        catch {
-            $stopwatch.Stop()
-            $execEndTime = Get-Date
-            $elapsedSec = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
-            $errorMessage = $_.Exception.Message
-
-            Write-Log "FAILED: $scriptName" "ERROR"
-            Write-Log "Error: $errorMessage" "ERROR"
-
-            $fullErrorRecord = @"
-
-====================================================================
-POWERSHELL ERROR RECORD
-====================================================================
-$($_ | Format-List * -Force | Out-String -Width 5000)
-"@
-
-            Add-Content -Path $scriptLogFile -Value $fullErrorRecord -Encoding UTF8
-
-            Add-MasterSqlLog `
-                -ScriptNum $scriptNumber `
-                -Name $scriptName `
-                -LogFilePath $scriptLogFile `
-                -Failed
-
-            $script:ExecutionSummary.Add([pscustomobject]@{
-                ScriptNumber    = $scriptNumber
-                ScriptName      = $scriptName
-                Status          = "FAILED"
-                SizeKB          = $manifestItem.SizeKB
-                StartTime       = $execStartTime.ToString("yyyy-MM-dd HH:mm:ss")
-                EndTime         = $execEndTime.ToString("yyyy-MM-dd HH:mm:ss")
-                DurationSeconds = $elapsedSec
-                Hash            = $manifestItem.Hash
-            })
-
-            # Mark remaining scripts as SKIPPED with null guard.
-            for ($skipNum = $scriptNumber + 1; $skipNum -le $ListToProcess.Count; $skipNum++) {
-                $remainingItem = $script:ManifestLookup[$skipNum]
-
-                if ($null -eq $remainingItem) {
-                    Write-Log "WARNING: Manifest lookup returned null for skip index $skipNum." "WARN"
-                    continue
-                }
-
-                $script:ExecutionSummary.Add([pscustomobject]@{
-                    ScriptNumber    = $skipNum
-                    ScriptName      = $remainingItem.ScriptName
-                    Status          = "SKIPPED"
-                    SizeKB          = $remainingItem.SizeKB
-                    StartTime       = ""
-                    EndTime         = ""
-                    DurationSeconds = ""
-                    Hash            = $remainingItem.Hash
-                })
-            }
-
-            $failureDetails = @"
-Failed Script
-----------------------------------------------------------------------
-Script Name     : $scriptName
-Script Number   : $scriptNumber of $($ListToProcess.Count)
-Execution Time  : $elapsedSec seconds
-SHA256          : $($manifestItem.Hash)
-Log File        : $scriptLogFile
-
-Error
-----------------------------------------------------------------------
-$errorMessage
-
-Execution Status
-----------------------------------------------------------------------
-The script failed and execution was halted.
-No artificial rollbacks were attempted.
-Previously completed scripts remain as-is.
-Remaining scripts were explicitly marked as SKIPPED.
-"@
-
-            Export-ExecutionSummary
-            Write-TicketSummary -RunStatus "FAILED" -Details $failureDetails
-            Write-Log "Execution stopped on failure. Remaining scripts marked SKIPPED." "ERROR"
-
-            return $false
-        }
-    }
-
-    return $true
-}
-
-# =====================================================================
-# Main Controller
-# =====================================================================
-
-function Invoke-Main {
-    <#
-    .SYNOPSIS
-        Orchestrates the full deployment pipeline. Returns the process exit code.
-    .NOTES
-        Wrapped in a function so that 'return' exits the function — not the script —
-        ensuring that 'exit $exitCode' at the script level is always reached.
-    #>
-
-    try {
-        Initialize-Logging
-
-        Write-Log "Starting DBA-Grade SQL Deployment Execution."
-
-        $finalScriptList = Resolve-ScriptList
-
-        if ($finalScriptList.Count -gt 0) {
-            Initialize-Manifest -ListToProcess $finalScriptList
-        }
-
-        Invoke-PreChecks
-
-        Write-DeploymentManifest
-        Write-Log "Manifest generated at $script:ManifestFile"
-
-        # --- Pre-check gate ---
-        if ($script:PrecheckProblems.Count -gt 0) {
-            $script:PrecheckProblems | ForEach-Object {
-                Write-Log $_ "ERROR"
-            }
-
-            Add-PrecheckExecutionSummary
-
-            $precheckDetails = @"
-Pre-check failed. No SQL scripts were executed.
-
-Failure Details
-----------------------------------------------------------------------
-$($script:PrecheckProblems -join "`r`n")
-"@
-
-            Export-ExecutionSummary
-            Write-TicketSummary -RunStatus "PRECHECK_FAILED" -Details $precheckDetails
-            Write-Log "Pre-check failed. No scripts were executed." "ERROR"
-
-            return 1
-        }
-
-        # --- Validate-only gate ---
-        if ($ValidateOnly) {
-            Write-Log "Validation-only mode completed. All pre-checks passed."
-
-            Add-ValidateOnlyExecutionSummary
-            Export-ExecutionSummary
-
-            $validationDetails = @"
-Validation completed successfully.
-All pre-checks passed. No SQL scripts were executed.
-Scripts validated: $($script:ManifestData.Count)
-"@
-
-            Write-TicketSummary -RunStatus "VALIDATION_ONLY" -Details $validationDetails
-
-            return 0
-        }
-
-        # --- Execute ---
-        $success = Invoke-Deployment -ListToProcess $finalScriptList
-
-        if ($success) {
-            Export-ExecutionSummary
-
-            $successDetails = @"
-All $($finalScriptList.Count) scripts completed successfully in the requested order.
-"@
-
-            Write-TicketSummary -RunStatus "SUCCESS" -Details $successDetails
-            Write-Log "SQL Deployment Execution Completed Successfully."
-
-            return 0
-        }
-        else {
-            return 1
-        }
-    }
-    catch {
-        Write-Log "Fatal Error: $_" "ERROR"
-        Export-ExecutionSummary
-
-        $fatalDetails = @"
-A fatal PowerShell error occurred before the deployment runner completed normally.
-
-Error
-----------------------------------------------------------------------
-$_
-"@
-
-        try {
-            Write-TicketSummary -RunStatus "FATAL_ERROR" -Details $fatalDetails
-        }
-        catch {
-            # If ticket writing itself fails, master log and transcript remain.
-        }
-
-        return 1
-    }
-    finally {
-        Stop-SafeTranscript
-    }
-}
-
-# Invoke the main controller and propagate its exit code to the process.
-$processExitCode = Invoke-Main
-exit $processExitCode
-
-
-<#
-The "Auto-Discover" Run (Basic Usage)
-If you run the script from the same folder where your .sql files live, you only need to provide the server and database. It will automatically find all .sql files in the current directory and execute them in alphabetical order.
-
-PowerShell
-.\Deploy-SqlScripts.ps1 -ServerInstance "SQLPROD01\DEFAULT" -Database "ApplicationDB"
-
-The "Strict Order" Run (Explicit Array)
-If your file names do not naturally sort alphabetically (or you only want to run a subset of files), you can pass an explicit array of file names. The script will run them in the exact order you provide.
-
-PowerShell
-$myScripts = @(
-    "Create_Tables.sql",
-    "Create_Indexes.sql",
-    "Create_StoredProcs.sql"
-)
-.\Deploy-SqlScripts.ps1 -ServerInstance "SQLPROD01" -Database "ApplicationDB" -ScriptList
-#>
+    foreach ($item in $script:ManifestData)
