@@ -1,11 +1,10 @@
-USE tenpdb
+USE tempdb
 GO
 
 -- ============================================================================
 -- 1. CLEANUP / RESET 
 -- (Drops all objects first to ensure Schema is created correctly)
 -- ============================================================================
-
 -- Drop Procedures
 IF OBJECT_ID('dbo.usp_DefaultTrace', 'P') IS NOT NULL 
     DROP PROCEDURE dbo.usp_DefaultTrace;
@@ -28,6 +27,9 @@ GO
 CREATE PROCEDURE [dbo].[usp_DefaultTrace]
 (
     @LogToTable        BIT  = 1,        -- 1 = Log to tables, 0 = Display Previews
+    @LogDDLSecurity    BIT  = 1,        -- 1 = Create & Log tblAuditDefaultTrace, 0 = Skip
+    @LogLoginStats     BIT  = 1,        -- 1 = Create & Log tblLoginAudit, 0 = Skip
+    @LogConfigChanges  BIT  = 1,        -- 1 = Create & Log tblConfigChanges, 0 = Skip
     @RetentionDays     INT  = 180,      -- Retention for Logs
     @IncludeTextData   BIT  = 1,        -- Keep SQL text for DDL events
     @IncludeSystem     BIT  = 0,        -- 0 = Exclude system DBs
@@ -39,7 +41,6 @@ BEGIN
     SET XACT_ABORT ON;
 
     BEGIN TRY
-
         ---------------------------------------------------------------------------
         -- 1. Resolve Default Trace Path
         ---------------------------------------------------------------------------
@@ -83,12 +84,12 @@ BEGIN
         (22099,'SB Service'),(22601,'Index'),(22604,'Cert Login'),(22611,'XMLSchema'),(22868,'Type');
 
         ---------------------------------------------------------------------------
-        -- 3. Table Setup (Create if not exists)
+        -- 3. Table Setup (Create if not exists AND Parameter is 1)
         ---------------------------------------------------------------------------
         IF @LogToTable = 1
         BEGIN
             -- TABLE A: General DDL & Security Audit
-            IF OBJECT_ID('dbo.tblAuditDefaultTrace', 'U') IS NULL
+            IF @LogDDLSecurity = 1 AND OBJECT_ID('dbo.tblAuditDefaultTrace', 'U') IS NULL
             BEGIN
                 CREATE TABLE dbo.tblAuditDefaultTrace
                 (
@@ -119,8 +120,7 @@ BEGIN
             END
 
             -- TABLE B: Login Statistics
-            -- Note: NVARCHAR(128) used to prevent Index Key Limit (>1700 bytes) errors
-            IF OBJECT_ID('dbo.tblLoginAudit', 'U') IS NULL
+            IF @LogLoginStats = 1 AND OBJECT_ID('dbo.tblLoginAudit', 'U') IS NULL
             BEGIN
                 CREATE TABLE dbo.tblLoginAudit (
                     AuditID             BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
@@ -146,15 +146,14 @@ BEGIN
             END
 
             -- TABLE C: Configuration Changes
-            -- Updated: Added HostName column
-            IF OBJECT_ID('dbo.tblConfigChanges', 'U') IS NULL
+            IF @LogConfigChanges = 1 AND OBJECT_ID('dbo.tblConfigChanges', 'U') IS NULL
             BEGIN
                 CREATE TABLE dbo.tblConfigChanges(
                     ChangeID        BIGINT IDENTITY(1,1) PRIMARY KEY,
                     ConfigOption    NVARCHAR(MAX) NULL,
                     ChangeTime      DATETIME NULL,
                     LoginName       SYSNAME NOT NULL,
-                    HostName        NVARCHAR(128) NULL, -- Added Column
+                    HostName        NVARCHAR(128) NULL,
                     OldValue        NVARCHAR(MAX) NULL,
                     NewValue        NVARCHAR(MAX) NULL,
                     CapturedAt      DATETIME DEFAULT GETDATE()
@@ -213,7 +212,7 @@ BEGIN
                 OR
                 (
                     (@IncludeSystem = 1 OR T.DatabaseName IS NULL OR T.DatabaseName NOT IN (SELECT Name FROM @SystemDBs))
-                    AND (T.ObjectName NOT LIKE '_WA_Sys_%' OR T.ObjectName IS NULL)
+                    AND (T.ObjectName NOT LIKE '\_WA_Sys\_%' OR T.ObjectName IS NULL)
                 )
             );
 
@@ -222,148 +221,162 @@ BEGIN
         ---------------------------------------------------------------------------
         IF @LogToTable = 0 
         BEGIN
-            PRINT '>>> PREVIEW: Events for tblAuditDefaultTrace (DDL/Security) <<<';
-            SELECT StartTime, EventCategory, EventName, ObjectName, LoginName, TextData
-            FROM #TraceRows WHERE EventName NOT LIKE 'Audit Login%' AND EventCategory != 'Configuration'
-            ORDER BY StartTime DESC;
+            IF @LogDDLSecurity = 1
+            BEGIN
+                PRINT '>>> PREVIEW: Events for tblAuditDefaultTrace (DDL/Security) <<<';
+                SELECT StartTime, EventCategory, EventName, ObjectName, LoginName, TextData
+                FROM #TraceRows WHERE EventName NOT LIKE 'Audit Login%' AND EventCategory != 'Configuration'
+                ORDER BY StartTime DESC;
+            END
 
-            PRINT '>>> PREVIEW: Configuration Changes for tblConfigChanges <<<';
-            SELECT StartTime, LoginName, HostName, TextData FROM #TraceRows WHERE EventCategory = 'Configuration';
+            IF @LogConfigChanges = 1
+            BEGIN
+                PRINT '>>> PREVIEW: Configuration Changes for tblConfigChanges <<<';
+                SELECT StartTime, LoginName, HostName, TextData FROM #TraceRows WHERE EventCategory = 'Configuration';
+            END
             RETURN;
         END
 
         ---------------------------------------------------------------------------
         -- 6. PROCESS: General Audit (DDL & Security)
         ---------------------------------------------------------------------------
-        DECLARE @LastMaxDate DATETIME;
-        SELECT @LastMaxDate = MAX(EventTime) FROM dbo.tblAuditDefaultTrace;
-        SET @LastMaxDate = ISNULL(@LastMaxDate, '1900-01-01');
+        IF @LogToTable = 1 AND @LogDDLSecurity = 1
+        BEGIN
+            DECLARE @LastMaxDate DATETIME;
+            SELECT @LastMaxDate = MAX(EventTime) FROM dbo.tblAuditDefaultTrace;
+            SET @LastMaxDate = ISNULL(@LastMaxDate, '1900-01-01');
 
-        INSERT INTO dbo.tblAuditDefaultTrace
-        (
-            EventTime, EventCategory, EventName, EventSubClassName, ObjectType, 
-            DatabaseName, ObjectName, HostName, ApplicationName, LoginName, 
-            TargetLoginName, SPID, TextData, RowHash
-        )
-        SELECT DISTINCT
-            src.StartTime, src.EventCategory, src.EventName, src.EventSubClassName, src.ObjectType, 
-            src.DatabaseName, src.ObjectName, src.HostName, src.ApplicationName, src.LoginName, 
-            src.TargetLoginName, src.SPID, 
-            CASE WHEN @IncludeTextData=1 THEN src.TextData ELSE NULL END, 
-            HashVal.RowHash
-        FROM #TraceRows AS src
-        CROSS APPLY (
-            SELECT HASHBYTES('SHA2_256', CONCAT(
-                CONVERT(VARCHAR(33), src.StartTime, 126), '|',
-                ISNULL(src.EventName,'') , '|',
-                ISNULL(src.EventSubClassName,'') , '|',
-                ISNULL(src.DatabaseName,'') , '|',
-                ISNULL(src.ObjectName,'') , '|',
-                ISNULL(src.LoginName,'') , '|',
-                ISNULL(src.HostName,'') , '|',
-                ISNULL(SUBSTRING(src.TextData, 1, 4000),'') 
-            )) AS RowHash
-        ) AS HashVal
-        WHERE src.StartTime > @LastMaxDate
-          AND src.EventCategory IN ('DDL', 'Security') 
-          AND src.EventName NOT LIKE 'Audit Login%'
-          AND NOT EXISTS (SELECT 1 FROM dbo.tblAuditDefaultTrace T WHERE T.RowHash = HashVal.RowHash);
+            INSERT INTO dbo.tblAuditDefaultTrace
+            (
+                EventTime, EventCategory, EventName, EventSubClassName, ObjectType, 
+                DatabaseName, ObjectName, HostName, ApplicationName, LoginName, 
+                TargetLoginName, SPID, TextData, RowHash
+            )
+            SELECT DISTINCT
+                src.StartTime, src.EventCategory, src.EventName, src.EventSubClassName, src.ObjectType, 
+                src.DatabaseName, src.ObjectName, src.HostName, src.ApplicationName, src.LoginName, 
+                src.TargetLoginName, src.SPID, 
+                CASE WHEN @IncludeTextData=1 THEN src.TextData ELSE NULL END, 
+                HashVal.RowHash
+            FROM #TraceRows AS src
+            CROSS APPLY (
+                SELECT HASHBYTES('SHA2_256', CONCAT(
+                    CONVERT(VARCHAR(33), src.StartTime, 126), '|',
+                    ISNULL(src.EventName,'') , '|',
+                    ISNULL(src.EventSubClassName,'') , '|',
+                    ISNULL(src.DatabaseName,'') , '|',
+                    ISNULL(src.ObjectName,'') , '|',
+                    ISNULL(src.LoginName,'') , '|',
+                    ISNULL(src.HostName,'') , '|',
+                    ISNULL(SUBSTRING(src.TextData, 1, 4000),'') 
+                )) AS RowHash
+            ) AS HashVal
+            WHERE src.StartTime > @LastMaxDate
+              AND src.EventCategory IN ('DDL', 'Security') 
+              AND src.EventName NOT LIKE 'Audit Login%'
+              AND NOT EXISTS (SELECT 1 FROM dbo.tblAuditDefaultTrace T WHERE T.RowHash = HashVal.RowHash);
+        END
 
        ---------------------------------------------------------------------------
-        -- 7. PROCESS: Login Stats (FIXED: Grouping matches ON clause)
+        -- 7. PROCESS: Login Stats 
         ---------------------------------------------------------------------------
-        DECLARE @MaxLastUsed DATETIME;
-        SELECT @MaxLastUsed = ISNULL(MAX(LastSeen), '2000-01-01') FROM dbo.tblLoginAudit WITH (NOLOCK);
+        IF @LogToTable = 1 AND @LogLoginStats = 1
+        BEGIN
+            DECLARE @MaxLastUsed DATETIME;
+            SELECT @MaxLastUsed = ISNULL(MAX(LastSeen), '2000-01-01') FROM dbo.tblLoginAudit WITH (NOLOCK);
 
-        MERGE dbo.tblLoginAudit AS target
-        USING (
-            SELECT 
-                -- Grouping Columns (These match the ON clause)
-                CAST(I.LoginName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS LoginName,
-                CAST(ISNULL(I.HostName, 'Unknown') AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS HostName,
-                CAST(ISNULL(I.ApplicationName, 'Unknown') AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS ApplicationName,
-                CAST(ISNULL(I.DatabaseName, '') AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS DatabaseName,
-                CASE WHEN I.EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END AS Status,
-                CAST(S.sid AS VARBINARY(85)) AS sid,
+            MERGE dbo.tblLoginAudit AS target
+            USING (
+                SELECT 
+                    CAST(I.LoginName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS LoginName,
+                    CAST(ISNULL(I.HostName, 'Unknown') AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS HostName,
+                    CAST(ISNULL(I.ApplicationName, 'Unknown') AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS ApplicationName,
+                    CAST(ISNULL(I.DatabaseName, '') AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS AS DatabaseName,
+                    CASE WHEN I.EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END AS Status,
+                    CAST(S.sid AS VARBINARY(85)) AS sid,
+                    MAX(CAST(I.NTUserName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS) AS NTUserName,
+                    MAX(CAST(I.SessionLoginName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS) AS SessionLoginName,
+                    MIN(I.StartTime) AS FirstSeen,
+                    MAX(I.StartTime) AS LastSeen,
+                    COUNT(*) AS EventCount,
+                    MAX(S.principal_id) AS principal_id,
+                    MAX(CAST(S.type_desc AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS) AS type_desc
+                FROM #TraceRows I
+                LEFT JOIN sys.server_principals S ON I.LoginSid = S.sid
+                WHERE I.LoginName IS NOT NULL 
+                  AND I.StartTime > @MaxLastUsed
+                GROUP BY 
+                    I.LoginName, I.HostName, I.ApplicationName, I.DatabaseName,
+                    CASE WHEN I.EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END,
+                    S.sid
+            ) AS source
+            ON (
+                target.LoginName = source.LoginName
+                AND target.HostName = source.HostName
+                AND target.ApplicationName = source.ApplicationName
+                AND target.DatabaseName = source.DatabaseName
+                AND target.Status = source.Status
+                AND ISNULL(target.SID, 0x00) = ISNULL(source.sid, 0x00)
+            )
+            WHEN MATCHED THEN 
+                UPDATE SET 
+                    target.LastSeen = CASE WHEN source.LastSeen > target.LastSeen THEN source.LastSeen ELSE target.LastSeen END,
+                    target.EventCount = target.EventCount + source.EventCount,
+                    target.RunTimeUTC = GETUTCDATE(),
+                    target.NTUserName = source.NTUserName,
+                    target.SessionLoginName = source.SessionLoginName
+            WHEN NOT MATCHED THEN 
+                INSERT (NTUserName, LoginName, HostName, ApplicationName, SessionLoginName, DatabaseName, Status, FirstSeen, LastSeen, EventCount, PrincipalID, SID, TypeDesc)
+                VALUES (source.NTUserName, source.LoginName, source.HostName, source.ApplicationName, source.SessionLoginName, source.DatabaseName, source.Status, source.FirstSeen, source.LastSeen, source.EventCount, source.principal_id, source.sid, source.type_desc);
+        END
 
-                -- Aggregated Columns (These prevent duplicate rows for the same "Identity")
-                MAX(CAST(I.NTUserName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS) AS NTUserName,
-                MAX(CAST(I.SessionLoginName AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS) AS SessionLoginName,
-                MIN(I.StartTime) AS FirstSeen,
-                MAX(I.StartTime) AS LastSeen,
-                COUNT(*) AS EventCount,
-                MAX(S.principal_id) AS principal_id,
-                MAX(CAST(S.type_desc AS NVARCHAR(128)) COLLATE Latin1_General_CI_AS_KS_WS) AS type_desc
-            FROM #TraceRows I
-            LEFT JOIN sys.server_principals S ON I.LoginSid = S.sid
-            WHERE I.LoginName IS NOT NULL 
-              AND I.StartTime > @MaxLastUsed
-            GROUP BY 
-                I.LoginName, 
-                I.HostName, 
-                I.ApplicationName, 
-                I.DatabaseName,
-                CASE WHEN I.EventName LIKE '%Failed%' THEN 'Failed' ELSE 'Success' END,
-                S.sid
-        ) AS source
-        ON (
-            target.LoginName = source.LoginName
-            AND target.HostName = source.HostName
-            AND target.ApplicationName = source.ApplicationName
-            AND target.DatabaseName = source.DatabaseName
-            AND target.Status = source.Status
-            AND ISNULL(target.SID, 0x00) = ISNULL(source.sid, 0x00)
-        )
-        WHEN MATCHED THEN 
-            UPDATE SET 
-                target.LastSeen = CASE WHEN source.LastSeen > target.LastSeen THEN source.LastSeen ELSE target.LastSeen END,
-                target.EventCount = target.EventCount + source.EventCount,
-                target.RunTimeUTC = GETUTCDATE(),
-                -- Optional: Keep the latest metadata
-                target.NTUserName = source.NTUserName,
-                target.SessionLoginName = source.SessionLoginName
-        WHEN NOT MATCHED THEN 
-            INSERT (NTUserName, LoginName, HostName, ApplicationName, SessionLoginName, DatabaseName, Status, FirstSeen, LastSeen, EventCount, PrincipalID, SID, TypeDesc)
-            VALUES (source.NTUserName, source.LoginName, source.HostName, source.ApplicationName, source.SessionLoginName, source.DatabaseName, source.Status, source.FirstSeen, source.LastSeen, source.EventCount, source.principal_id, source.sid, source.type_desc);
         ---------------------------------------------------------------------------
         -- 8. PROCESS: Configuration Changes
         ---------------------------------------------------------------------------
-        DECLARE @LastConfigDate DATETIME;
-        SELECT @LastConfigDate = ISNULL(MAX(ChangeTime), '1900-01-01') FROM dbo.tblConfigChanges;
+        IF @LogToTable = 1 AND @LogConfigChanges = 1
+        BEGIN
+            DECLARE @LastConfigDate DATETIME;
+            SELECT @LastConfigDate = ISNULL(MAX(ChangeTime), '1900-01-01') FROM dbo.tblConfigChanges;
 
-        INSERT INTO dbo.tblConfigChanges (ConfigOption, ChangeTime, LoginName, HostName, OldValue, NewValue)
-        SELECT 
-            CASE EventClass
-                WHEN 116 THEN 'Trace Flag ' + SUBSTRING(TextData, PATINDEX('%(%', TextData), LEN(TextData)-PATINDEX('%(%', TextData)+1)
-                WHEN 22  THEN SUBSTRING(TextData, 58, PATINDEX('%changed from%', TextData)-60)
-            END AS ConfigOption,
-            StartTime AS ChangeTime,
-            LoginName,
-            HostName, -- Inserted HostName
-            CASE EventClass
-                WHEN 116 THEN '--'
-                WHEN 22  THEN SUBSTRING(SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)), PATINDEX('%changed from%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))+13, PATINDEX('%to%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))-PATINDEX('%from%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))-6)
-            END AS OldValue,
-            CASE EventClass
-                WHEN 116 THEN SUBSTRING(TextData, PATINDEX('%TRACE%', TextData)+5, PATINDEX('%(%', TextData)-PATINDEX('%TRACE%', TextData)-5)
-                WHEN 22  THEN SUBSTRING(SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)), PATINDEX('%to%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))+3, PATINDEX('%. Run%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))-PATINDEX('%to%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))-3)
-            END AS NewValue
-        FROM #TraceRows
-        WHERE StartTime > @LastConfigDate
-          AND (
-              (EventClass = 22 AND Error = 15457) 
-              OR 
-              (EventClass = 116 AND TextData LIKE '%TRACEO%(%')
-          );
+            INSERT INTO dbo.tblConfigChanges (ConfigOption, ChangeTime, LoginName, HostName, OldValue, NewValue)
+            SELECT 
+                CASE EventClass
+                    WHEN 116 THEN 'Trace Flag ' + SUBSTRING(TextData, PATINDEX('%(%', TextData), LEN(TextData)-PATINDEX('%(%', TextData)+1)
+                    WHEN 22  THEN SUBSTRING(TextData, 58, PATINDEX('%changed from%', TextData)-60)
+                END AS ConfigOption,
+                StartTime AS ChangeTime,
+                LoginName,
+                HostName,
+                CASE EventClass
+                    WHEN 116 THEN '--'
+                    WHEN 22  THEN SUBSTRING(SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)), PATINDEX('%changed from%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))+13, PATINDEX('%to%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))-PATINDEX('%from%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))-6)
+                END AS OldValue,
+                CASE EventClass
+                    WHEN 116 THEN SUBSTRING(TextData, PATINDEX('%TRACE%', TextData)+5, PATINDEX('%(%', TextData)-PATINDEX('%TRACE%', TextData)-5)
+                    WHEN 22  THEN SUBSTRING(SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)), PATINDEX('%to%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))+3, PATINDEX('%. Run%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))-PATINDEX('%to%', SUBSTRING(TextData, PATINDEX('%changed from%', TextData), LEN(TextData)-PATINDEX('%changed from%', TextData)))-3)
+                END AS NewValue
+            FROM #TraceRows
+            WHERE StartTime > @LastConfigDate
+              AND (
+                  (EventClass = 22 AND Error = 15457) 
+                  OR 
+                  (EventClass = 116 AND TextData LIKE '%TRACEO%(%')
+              );
+        END
 
         ---------------------------------------------------------------------------
-        -- 9. CLEANUP
+        -- 9. CLEANUP (Defensive Check for Table Existence)
         ---------------------------------------------------------------------------
-        IF @RetentionDays > 0
+        IF @RetentionDays > 0 AND @LogToTable = 1
         BEGIN
             DECLARE @CutoffDate DATETIME = DATEADD(DAY, -@RetentionDays, GETDATE());
-            DELETE FROM dbo.tblAuditDefaultTrace WHERE EventTime < @CutoffDate;
-            DELETE FROM dbo.tblConfigChanges WHERE ChangeTime < @CutoffDate;
+            
+            -- Defensive: Only run cleanup if the table actually exists in the database
+            IF OBJECT_ID('dbo.tblAuditDefaultTrace', 'U') IS NOT NULL
+                DELETE FROM dbo.tblAuditDefaultTrace WHERE EventTime < @CutoffDate;
+            
+            IF OBJECT_ID('dbo.tblConfigChanges', 'U') IS NOT NULL
+                DELETE FROM dbo.tblConfigChanges WHERE ChangeTime < @CutoffDate;
         END
         
         IF OBJECT_ID('tempdb..#TraceRows') IS NOT NULL DROP TABLE #TraceRows;
@@ -376,4 +389,3 @@ BEGIN
     END CATCH
 END
 GO
-exec usp_DefaultTrace
