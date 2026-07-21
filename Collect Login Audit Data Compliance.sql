@@ -389,3 +389,48 @@ BEGIN
     END CATCH
 END
 GO
+
+-- ============================================================================
+-- CREATE VIEW [vwLoginUsageStatistics]
+-- ============================================================================
+IF OBJECT_ID('dbo.vwLoginUsageStatistics', 'V') IS NOT NULL
+    DROP VIEW dbo.vwLoginUsageStatistics;
+GO
+
+CREATE VIEW dbo.vwLoginUsageStatistics
+AS
+SELECT 
+    sp.name AS LoginName,
+    sp.type_desc AS LoginType,
+    sp.is_disabled AS IsDisabled,
+    sp.create_date AS AccountCreatedDate,
+    sp.modify_date AS AccountModifiedDate,
+    
+    -- Aggregate dates and activity from the audit table
+    audit.FirstSeenUTC,
+    audit.LastSeenUTC,
+    ISNULL(audit.TotalSuccessfulLogins, 0) AS TotalSuccessfulLogins,
+    ISNULL(audit.TotalFailedLogins, 0) AS TotalFailedLogins,
+    ISNULL(audit.TotalLogins, 0) AS TotalLogins,
+    
+    -- Helper Status String
+    CASE 
+        WHEN sp.is_disabled = 1 THEN 'Disabled'
+        WHEN audit.LastSeenUTC IS NULL THEN 'Never Logged In'
+        ELSE 'Active'
+    END AS UsageStatus
+FROM sys.server_principals sp
+LEFT JOIN (
+    SELECT 
+        SID,
+        MIN(FirstSeen) AS FirstSeenUTC,
+        MAX(LastSeen) AS LastSeenUTC,
+        SUM(CASE WHEN Status = 'Success' THEN EventCount ELSE 0 END) AS TotalSuccessfulLogins,
+        SUM(CASE WHEN Status = 'Failed' THEN EventCount ELSE 0 END) AS TotalFailedLogins,
+        SUM(EventCount) AS TotalLogins
+    FROM dbo.tblLoginAudit
+    GROUP BY SID
+) audit ON sp.sid = audit.SID
+WHERE sp.type IN ('S', 'U', 'G') -- S = SQL Login, U = Windows Login, G = Windows Group
+  AND sp.name NOT LIKE '##%'     -- Exclude internal system principals (e.g., ##MS_PolicyEventProcessingLogin##)
+GO
