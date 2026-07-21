@@ -1,4 +1,4 @@
-USE tempdb
+USE tempdb 
 GO
 
 -- ============================================================================
@@ -27,10 +27,10 @@ GO
 CREATE PROCEDURE [dbo].[usp_DefaultTrace]
 (
     @LogToTable        BIT  = 1,        -- 1 = Log to tables, 0 = Display Previews
-    @LogDDLSecurity    BIT  = 1,        -- 1 = Create & Log tblAuditDefaultTrace, 0 = Skip
+    @LogDDLSecurity    BIT  = 0,        -- 1 = Create & Log tblAuditDefaultTrace, 0 = Skip
     @LogLoginStats     BIT  = 1,        -- 1 = Create & Log tblLoginAudit, 0 = Skip
-    @LogConfigChanges  BIT  = 1,        -- 1 = Create & Log tblConfigChanges, 0 = Skip
-    @RetentionDays     INT  = 180,      -- Retention for Logs
+    @LogConfigChanges  BIT  = 0,        -- 1 = Create & Log tblConfigChanges, 0 = Skip
+    @RetentionDays     INT  = 365,      -- Retention for Logs
     @IncludeTextData   BIT  = 1,        -- Keep SQL text for DDL events
     @IncludeSystem     BIT  = 0,        -- 0 = Exclude system DBs
     @MinStartTime      DATETIME = NULL  -- Force load from specific date
@@ -389,7 +389,8 @@ BEGIN
     END CATCH
 END
 GO
-
+[usp_DefaultTrace]
+GO
 -- ============================================================================
 -- CREATE VIEW [vwLoginUsageStatistics]
 -- ============================================================================
