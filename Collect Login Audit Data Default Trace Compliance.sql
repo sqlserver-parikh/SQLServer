@@ -391,8 +391,10 @@ END
 GO
 [usp_DefaultTrace]
 GO
+
+/*
 -- ============================================================================
--- CREATE VIEW [vwLoginUsageStatistics]
+-- CREATE VIEW [vwLoginUsageStatistics] (Enhanced Filtering)
 -- ============================================================================
 IF OBJECT_ID('dbo.vwLoginUsageStatistics', 'V') IS NOT NULL
     DROP VIEW dbo.vwLoginUsageStatistics;
@@ -418,7 +420,7 @@ SELECT
     CASE 
         WHEN sp.is_disabled = 1 THEN 'Disabled'
         WHEN audit.LastSeenUTC IS NULL THEN 'Never Logged In'
-        ELSE 'Active'
+        ELSE 'Active' 
     END AS UsageStatus
 FROM sys.server_principals sp
 LEFT JOIN (
@@ -432,6 +434,10 @@ LEFT JOIN (
     FROM dbo.tblLoginAudit
     GROUP BY SID
 ) audit ON sp.sid = audit.SID
-WHERE sp.type IN ('S', 'U', 'G') -- S = SQL Login, U = Windows Login, G = Windows Group
-  AND sp.name NOT LIKE '##%'     -- Exclude internal system principals (e.g., ##MS_PolicyEventProcessingLogin##)
+WHERE 
+    sp.type IN ('S', 'U', 'G')             -- Only SQL Logins, Windows Logins, and Windows Groups
+    AND sp.name NOT LIKE '##%'             -- Exclude MS internal system-created principals
+    AND sp.name NOT LIKE 'NT SERVICE\%'    -- Exclude service accounts (SQLWriter, MSSQLSERVER, etc.)
+    AND sp.name NOT LIKE 'NT AUTHORITY\%'  -- Exclude built-in system accounts (SYSTEM, NETWORK SERVICE)
 GO
+*/
