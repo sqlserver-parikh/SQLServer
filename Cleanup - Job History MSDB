@@ -3,12 +3,13 @@ GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_CleanupJobHistory
     @JobName NVARCHAR(128) = NULL,             -- Optional: name of the job
-    @KeepCount INT = 1000,                    -- Required: maximum total rows to keep per job (the final hard limit)
+    @KeepCount INT = 1000,                     -- Required: maximum total rows to keep per job (the final hard limit)
     @DeleteSuccessUnderSeconds INT = 60,     -- Optional: Delete successful jobs running less than X sec
     @KeepMinExecutions INT = 2,                -- Optional: Minimum number of recent executions to protect from targeted purges
-    @KeepMaxFailures INT = 5,                  -- NEW: Keep only the top X most recent failures (deletes older failures)
-    @GenerateReport BIT = 1,                   -- Optional: 1 = output a report of what will be/was found
-    @ExecuteDelete BIT = 1                   -- Optional: 1 = actually perform the deletions
+    @KeepMaxFailures INT = 5,                  -- Optional: Keep only the top X most recent failures (deletes older failures)
+    @KeepMaxSuccesses INT = 3,              -- NEW: Keep only the top X most recent successes (prevents bloat from frequent long runs)
+    @GenerateReport BIT = 0,                   -- Optional: 1 = output a report of what will be/was found
+    @ExecuteDelete BIT = 1                     -- Optional: 1 = actually perform the deletions
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -34,6 +35,12 @@ BEGIN
     IF @KeepMaxFailures IS NOT NULL AND @KeepMaxFailures < 0
     BEGIN
         RAISERROR('KeepMaxFailures must be a non-negative integer or NULL.', 16, 1);
+        RETURN;
+    END
+
+    IF @KeepMaxSuccesses IS NOT NULL AND @KeepMaxSuccesses < 0
+    BEGIN
+        RAISERROR('KeepMaxSuccesses must be a non-negative integer or NULL.', 16, 1);
         RETURN;
     END
 
@@ -65,7 +72,8 @@ BEGIN
                    run_duration,
                    LAG(instance_id) OVER (PARTITION BY job_id ORDER BY instance_id) AS prev_outcome_instance_id,
                    ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY instance_id DESC) AS execution_rn,
-                   ROW_NUMBER() OVER (PARTITION BY job_id, CASE WHEN run_status IN (0, 2, 3) THEN 1 ELSE 0 END ORDER BY instance_id DESC) AS status_group_rn
+                   ROW_NUMBER() OVER (PARTITION BY job_id, CASE WHEN run_status IN (0, 2, 3) THEN 1 ELSE 0 END ORDER BY instance_id DESC) AS failure_rn,
+                   ROW_NUMBER() OVER (PARTITION BY job_id, CASE WHEN run_status = 1 THEN 1 ELSE 0 END ORDER BY instance_id DESC) AS success_rn
             FROM msdb.dbo.sysjobhistory
             WHERE step_id = 0
               AND (@JobId IS NULL OR job_id = @JobId)
@@ -74,7 +82,11 @@ BEGIN
             SELECT job_id, 
                    outcome_instance_id, 
                    ISNULL(prev_outcome_instance_id, 0) AS prev_outcome_instance_id,
-                   CASE WHEN run_status = 1 THEN 'FastSuccess' ELSE 'ExcessFailure' END AS DeleteReason
+                   CASE 
+                        WHEN run_status = 1 AND @KeepMaxSuccesses IS NOT NULL AND success_rn > @KeepMaxSuccesses THEN 'ExcessSuccess'
+                        WHEN run_status = 1 THEN 'FastSuccess' 
+                        ELSE 'ExcessFailure' 
+                   END AS DeleteReason
             FROM JobOutcomes
             WHERE execution_rn > @KeepMinExecutions -- Protect the absolute most recent N executions regardless of status
               AND (
@@ -89,7 +101,14 @@ BEGIN
                   (
                       @KeepMaxFailures IS NOT NULL
                       AND run_status IN (0, 2, 3) 
-                      AND status_group_rn > @KeepMaxFailures
+                      AND failure_rn > @KeepMaxFailures
+                  )
+                  OR
+                  -- Target 3: Excess Long Successes
+                  (
+                      @KeepMaxSuccesses IS NOT NULL
+                      AND run_status = 1
+                      AND success_rn > @KeepMaxSuccesses
                   )
               )
         )
@@ -98,6 +117,7 @@ BEGIN
             COUNT(h.instance_id) AS TotalRows,
             SUM(CASE WHEN rtd.DeleteReason = 'FastSuccess' THEN 1 ELSE 0 END) AS FastSuccessRowsToDelete,
             SUM(CASE WHEN rtd.DeleteReason = 'ExcessFailure' THEN 1 ELSE 0 END) AS ExcessFailureRowsToDelete,
+            SUM(CASE WHEN rtd.DeleteReason = 'ExcessSuccess' THEN 1 ELSE 0 END) AS ExcessSuccessRowsToDelete,
             SUM(CASE 
                     WHEN CONVERT(DATETIME, 
                         STUFF(STUFF(CAST(h.run_date AS CHAR(8)), 5, 0, '-'), 8, 0, '-') + ' ' +
@@ -119,7 +139,6 @@ BEGIN
         GROUP BY j.name
         ORDER BY TotalRows DESC;
         
-        -- Notice: No RETURN statement here anymore, so the script naturally continues to the Delete phase if requested.
     END
 
     -- ==========================================
@@ -127,8 +146,8 @@ BEGIN
     -- ==========================================
     IF @ExecuteDelete = 1
     BEGIN
-        -- Cleanup logic Phase 1: Delete Fast Successes & Excess Failures in one pass
-        IF @DeleteSuccessUnderSeconds IS NOT NULL OR @KeepMaxFailures IS NOT NULL
+        -- Cleanup logic Phase 1: Delete Fast Successes, Excess Failures, and Excess Successes in one pass
+        IF @DeleteSuccessUnderSeconds IS NOT NULL OR @KeepMaxFailures IS NOT NULL OR @KeepMaxSuccesses IS NOT NULL
         BEGIN
             ;WITH JobOutcomes AS (
                 SELECT job_id, 
@@ -137,7 +156,8 @@ BEGIN
                        run_duration,
                        LAG(instance_id) OVER (PARTITION BY job_id ORDER BY instance_id) AS prev_outcome_instance_id,
                        ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY instance_id DESC) AS execution_rn,
-                       ROW_NUMBER() OVER (PARTITION BY job_id, CASE WHEN run_status IN (0, 2, 3) THEN 1 ELSE 0 END ORDER BY instance_id DESC) AS status_group_rn
+                       ROW_NUMBER() OVER (PARTITION BY job_id, CASE WHEN run_status IN (0, 2, 3) THEN 1 ELSE 0 END ORDER BY instance_id DESC) AS failure_rn,
+                       ROW_NUMBER() OVER (PARTITION BY job_id, CASE WHEN run_status = 1 THEN 1 ELSE 0 END ORDER BY instance_id DESC) AS success_rn
                 FROM msdb.dbo.sysjobhistory
                 WHERE step_id = 0
                   AND (@JobId IS NULL OR job_id = @JobId)
@@ -158,7 +178,13 @@ BEGIN
                       (
                           @KeepMaxFailures IS NOT NULL
                           AND run_status IN (0, 2, 3) 
-                          AND status_group_rn > @KeepMaxFailures
+                          AND failure_rn > @KeepMaxFailures
+                      )
+                      OR
+                      (
+                          @KeepMaxSuccesses IS NOT NULL
+                          AND run_status = 1
+                          AND success_rn > @KeepMaxSuccesses
                       )
                   )
             )
