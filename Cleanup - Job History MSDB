@@ -1,9 +1,14 @@
 USE tempdb;
 GO
+
 CREATE OR ALTER PROCEDURE dbo.usp_CleanupJobHistory
-    @JobName NVARCHAR(128) = NULL,  -- Optional: name of the job
-    @KeepCount INT = 50000,                 -- Required: number of rows to keep
-    @ReportOnly BIT = 1           -- Optional: 1 = report only, 0 = delete
+    @JobName NVARCHAR(128) = NULL,             -- Optional: name of the job
+    @KeepCount INT = 1000,                    -- Required: maximum total rows to keep per job (the final hard limit)
+    @DeleteSuccessUnderSeconds INT = 60,     -- Optional: Delete successful jobs running less than X sec
+    @KeepMinExecutions INT = 2,                -- Optional: Minimum number of recent executions to protect from targeted purges
+    @KeepMaxFailures INT = 5,                  -- NEW: Keep only the top X most recent failures (deletes older failures)
+    @GenerateReport BIT = 1,                   -- Optional: 1 = output a report of what will be/was found
+    @ExecuteDelete BIT = 1                   -- Optional: 1 = actually perform the deletions
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -14,43 +19,31 @@ BEGIN
         RETURN;
     END
 
-    IF @ReportOnly = 1
+    IF @DeleteSuccessUnderSeconds IS NOT NULL AND @DeleteSuccessUnderSeconds < 0
     BEGIN
-        -- Report mode
-        SELECT 
-            j.name AS JobName,
-            COUNT(h.instance_id) AS TotalRows,
-            SUM(CASE 
-                    WHEN CONVERT(DATETIME, 
-                        STUFF(STUFF(CAST(h.run_date AS CHAR(8)), 5, 0, '-'), 8, 0, '-') + ' ' +
-                        STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR(6)), 6), 3, 0, ':'), 6, 0, ':')
-                        ) >= DATEADD(DAY, -1, GETDATE()) THEN 1 ELSE 0 
-                END) AS RowsLast24Hours,
-            SUM(CASE 
-                    WHEN CONVERT(DATETIME, 
-                        STUFF(STUFF(CAST(h.run_date AS CHAR(8)), 5, 0, '-'), 8, 0, '-') + ' ' +
-                        STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR(6)), 6), 3, 0, ':'), 6, 0, ':')
-                        ) >= DATEADD(DAY, -7, GETDATE()) THEN 1 ELSE 0 
-                END) AS RowsLast7Days,
-            CASE 
-                WHEN COUNT(h.instance_id) > @KeepCount THEN 'Exceeds threshold'
-                ELSE 'Within threshold'
-            END AS Status
-        FROM msdb.dbo.sysjobhistory h
-        JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
-        WHERE (@JobName IS NULL OR j.name = @JobName)
-        GROUP BY j.name
-        HAVING COUNT(h.instance_id) > @KeepCount OR @JobName IS NOT NULL;
+        RAISERROR('DeleteSuccessUnderSeconds must be a non-negative integer or NULL.', 16, 1);
         RETURN;
     END
 
-    -- Cleanup logic
+    IF @KeepMinExecutions < 0
+    BEGIN
+        RAISERROR('KeepMinExecutions must be a non-negative integer.', 16, 1);
+        RETURN;
+    END
+    
+    IF @KeepMaxFailures IS NOT NULL AND @KeepMaxFailures < 0
+    BEGIN
+        RAISERROR('KeepMaxFailures must be a non-negative integer or NULL.', 16, 1);
+        RETURN;
+    END
+
+    -- Pre-calculate JobId for cleaner, faster joins
+    DECLARE @JobId UNIQUEIDENTIFIER = NULL;
+
     IF @JobName IS NOT NULL
     BEGIN
-        DECLARE @JobId UNIQUEIDENTIFIER;
-
-        SELECT @JobId = job_id
-        FROM msdb.dbo.sysjobs
+        SELECT @JobId = job_id 
+        FROM msdb.dbo.sysjobs 
         WHERE name = @JobName;
 
         IF @JobId IS NULL
@@ -58,26 +51,132 @@ BEGIN
             RAISERROR('Job name not found: %s', 16, 1, @JobName);
             RETURN;
         END
-
-        ;WITH OrderedHistory AS (
-            SELECT 
-                instance_id,
-                ROW_NUMBER() OVER (ORDER BY run_date DESC, run_time DESC) AS rn
-            FROM msdb.dbo.sysjobhistory
-            WHERE job_id = @JobId
-        )
-        DELETE FROM msdb.dbo.sysjobhistory
-        WHERE instance_id IN (
-            SELECT instance_id FROM OrderedHistory WHERE rn > @KeepCount
-        );
     END
-    ELSE
+
+    -- ==========================================
+    -- REPORTING PHASE
+    -- ==========================================
+    IF @GenerateReport = 1
     BEGIN
+        ;WITH JobOutcomes AS (
+            SELECT job_id, 
+                   instance_id AS outcome_instance_id, 
+                   run_status, 
+                   run_duration,
+                   LAG(instance_id) OVER (PARTITION BY job_id ORDER BY instance_id) AS prev_outcome_instance_id,
+                   ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY instance_id DESC) AS execution_rn,
+                   ROW_NUMBER() OVER (PARTITION BY job_id, CASE WHEN run_status IN (0, 2, 3) THEN 1 ELSE 0 END ORDER BY instance_id DESC) AS status_group_rn
+            FROM msdb.dbo.sysjobhistory
+            WHERE step_id = 0
+              AND (@JobId IS NULL OR job_id = @JobId)
+        ),
+        RunsToDelete AS (
+            SELECT job_id, 
+                   outcome_instance_id, 
+                   ISNULL(prev_outcome_instance_id, 0) AS prev_outcome_instance_id,
+                   CASE WHEN run_status = 1 THEN 'FastSuccess' ELSE 'ExcessFailure' END AS DeleteReason
+            FROM JobOutcomes
+            WHERE execution_rn > @KeepMinExecutions -- Protect the absolute most recent N executions regardless of status
+              AND (
+                  -- Target 1: Fast Successes
+                  (
+                      @DeleteSuccessUnderSeconds IS NOT NULL 
+                      AND run_status = 1 
+                      AND ( (run_duration / 10000) * 3600 + ((run_duration % 10000) / 100) * 60 + (run_duration % 100) ) < @DeleteSuccessUnderSeconds
+                  )
+                  OR
+                  -- Target 2: Excess Failures (Status 0=Failed, 2=Retry, 3=Canceled)
+                  (
+                      @KeepMaxFailures IS NOT NULL
+                      AND run_status IN (0, 2, 3) 
+                      AND status_group_rn > @KeepMaxFailures
+                  )
+              )
+        )
+        SELECT 
+            j.name AS JobName,
+            COUNT(h.instance_id) AS TotalRows,
+            SUM(CASE WHEN rtd.DeleteReason = 'FastSuccess' THEN 1 ELSE 0 END) AS FastSuccessRowsToDelete,
+            SUM(CASE WHEN rtd.DeleteReason = 'ExcessFailure' THEN 1 ELSE 0 END) AS ExcessFailureRowsToDelete,
+            SUM(CASE 
+                    WHEN CONVERT(DATETIME, 
+                        STUFF(STUFF(CAST(h.run_date AS CHAR(8)), 5, 0, '-'), 8, 0, '-') + ' ' +
+                        STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR(6)), 6), 3, 0, ':'), 6, 0, ':')
+                        ) >= DATEADD(DAY, -1, GETDATE()) THEN 1 ELSE 0 
+            END) AS RowsLast24Hours,
+            CASE 
+                -- Calculate remaining rows to see if it still exceeds the final KeepCount threshold
+                WHEN (COUNT(h.instance_id) - SUM(CASE WHEN rtd.job_id IS NOT NULL THEN 1 ELSE 0 END)) > @KeepCount THEN 'Exceeds threshold'
+                ELSE 'Within threshold'
+            END AS StatusAfterTargetedPurge
+        FROM msdb.dbo.sysjobhistory h
+        JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+        LEFT JOIN RunsToDelete rtd 
+            ON h.job_id = rtd.job_id 
+           AND h.instance_id <= rtd.outcome_instance_id 
+           AND h.instance_id > rtd.prev_outcome_instance_id
+        WHERE (@JobId IS NULL OR j.job_id = @JobId)
+        GROUP BY j.name
+        ORDER BY TotalRows DESC;
+        
+        -- Notice: No RETURN statement here anymore, so the script naturally continues to the Delete phase if requested.
+    END
+
+    -- ==========================================
+    -- DELETION PHASE
+    -- ==========================================
+    IF @ExecuteDelete = 1
+    BEGIN
+        -- Cleanup logic Phase 1: Delete Fast Successes & Excess Failures in one pass
+        IF @DeleteSuccessUnderSeconds IS NOT NULL OR @KeepMaxFailures IS NOT NULL
+        BEGIN
+            ;WITH JobOutcomes AS (
+                SELECT job_id, 
+                       instance_id AS outcome_instance_id, 
+                       run_status, 
+                       run_duration,
+                       LAG(instance_id) OVER (PARTITION BY job_id ORDER BY instance_id) AS prev_outcome_instance_id,
+                       ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY instance_id DESC) AS execution_rn,
+                       ROW_NUMBER() OVER (PARTITION BY job_id, CASE WHEN run_status IN (0, 2, 3) THEN 1 ELSE 0 END ORDER BY instance_id DESC) AS status_group_rn
+                FROM msdb.dbo.sysjobhistory
+                WHERE step_id = 0
+                  AND (@JobId IS NULL OR job_id = @JobId)
+            ),
+            RunsToDelete AS (
+                SELECT job_id, 
+                       outcome_instance_id, 
+                       ISNULL(prev_outcome_instance_id, 0) AS prev_outcome_instance_id
+                FROM JobOutcomes
+                WHERE execution_rn > @KeepMinExecutions
+                  AND (
+                      (
+                          @DeleteSuccessUnderSeconds IS NOT NULL 
+                          AND run_status = 1 
+                          AND ( (run_duration / 10000) * 3600 + ((run_duration % 10000) / 100) * 60 + (run_duration % 100) ) < @DeleteSuccessUnderSeconds
+                      )
+                      OR
+                      (
+                          @KeepMaxFailures IS NOT NULL
+                          AND run_status IN (0, 2, 3) 
+                          AND status_group_rn > @KeepMaxFailures
+                      )
+                  )
+            )
+            DELETE h
+            FROM msdb.dbo.sysjobhistory h
+            INNER JOIN RunsToDelete rtd 
+                ON h.job_id = rtd.job_id 
+               AND h.instance_id <= rtd.outcome_instance_id 
+               AND h.instance_id > rtd.prev_outcome_instance_id;
+        END
+
+        -- Cleanup logic Phase 2: Enforce the KeepCount final limit on whatever rows remain 
         ;WITH OrderedHistory AS (
             SELECT 
                 instance_id,
                 ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY run_date DESC, run_time DESC) AS rn
             FROM msdb.dbo.sysjobhistory
+            WHERE (@JobId IS NULL OR job_id = @JobId)
         )
         DELETE FROM msdb.dbo.sysjobhistory
         WHERE instance_id IN (
