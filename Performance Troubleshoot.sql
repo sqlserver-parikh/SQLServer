@@ -8,6 +8,15 @@
             stalls) into a single, parameterized, section-by-section report.
             Optionally pulls Query Store data when a @DatabaseName is passed
             and Query Store is enabled for that database.
+            Also supports a "procedure deep-dive" mode: pass @ProcedureName
+            (+ @DatabaseName) to get a focused report on ONE stored procedure -
+            plan cache stats, statement-level CPU/IO breakdown, Query Store
+            history for that object, missing-index hints mined directly out
+            of its cached plan XML (with ready-to-run CREATE INDEX DDL),
+            every table/index it touches, index inventory + fragmentation +
+            usage stats + row counts for those tables, FKs, triggers, and
+            statistics freshness - the same checklist a DBA would work
+            through by hand when asked "why is this proc slow?".
 
   Notes   : - Created in tempdb to match the existing usp_CPUUsage /
               usp_SQLInformation / usp_IndexAnalysis convention in this repo.
@@ -36,6 +45,16 @@
            @DatabaseName = 'MyAppDB',
            @IncludeIndexFragment = 1,
            @IncludeLiveQueryPlans = 1;
+
+      -- Deep-dive a single procedure: plan cache, Query Store, missing
+      -- index hints, impacted tables/indexes, FKs, triggers, stats freshness
+      EXEC tempdb..usp_PerformanceTroubleshoot
+           @DatabaseName = 'MyAppDB',
+           @ProcedureName = 'dbo.usp_GetOrders',
+           @IncludeServerInfo = 0, @IncludeCPUHistory = 0, @IncludeSchedulerHealth = 0,
+           @IncludeWaitStats = 0, @IncludeActiveRequests = 0, @IncludeBlocking = 0,
+           @IncludeTopQueries = 0, @IncludeMissingIndexes = 0, @IncludeTempdbHealth = 0,
+           @IncludeMemoryHealth = 0, @IncludeIOStats = 0;   -- isolate section 14 only
 ============================================================================*/
 USE [tempdb];
 GO
@@ -63,7 +82,9 @@ CREATE OR ALTER PROCEDURE [dbo].[usp_PerformanceTroubleshoot]
     @IncludeTempdbHealth    BIT           = 1,
     @IncludeMemoryHealth    BIT           = 1,
     @IncludeIOStats         BIT           = 1,
-    @IncludeQueryStore      BIT           = 1        -- Only runs if @DatabaseName is passed AND Query Store is ON for that DB
+    @IncludeQueryStore      BIT           = 1,       -- Only runs if @DatabaseName is passed AND Query Store is ON for that DB
+    @ProcedureName          SYSNAME       = NULL,    -- Deep-dive a single procedure (requires @DatabaseName); schema-qualify if not dbo, e.g. 'sales.usp_GetOrders'
+    @IncludeProcedureAnalysis BIT         = 1        -- Master switch for the section 14 procedure deep-dive; only runs when @ProcedureName is supplied
 )
 AS
 BEGIN
@@ -76,6 +97,16 @@ BEGIN
     DECLARE @QSState      NVARCHAR(60);
     DECLARE @QSStartTime  DATETIME;
     DECLARE @QSStartTimeStr NVARCHAR(30);
+
+    -- Section 14 (procedure deep-dive) working variables
+    DECLARE @ProcDbId        INT;
+    DECLARE @ProcObjectId    INT;
+    DECLARE @ProcFullName    NVARCHAR(400);
+    DECLARE @ProcQSState     NVARCHAR(60);
+    DECLARE @TableFilter     NVARCHAR(MAX);
+    DECLARE @DbCursorName    SYSNAME;
+    DECLARE @ProcPlans       TABLE (plan_handle VARBINARY(64), query_plan XML);
+    DECLARE @ImpactedTables  TABLE (database_name SYSNAME, schema_name SYSNAME, table_name SYSNAME, index_name SYSNAME NULL, physical_op NVARCHAR(60) NULL);
 
     ----------------------------------------------------------------------
     -- 0. Run header
@@ -718,6 +749,376 @@ BEGIN
     ELSE IF @IncludeQueryStore = 1 AND @DatabaseName IS NULL
     BEGIN
         SELECT '13. QUERY STORE skipped - pass @DatabaseName to run this section.' AS QueryStoreStatus;
+    END;
+
+    ----------------------------------------------------------------------
+    -- 14. PROCEDURE DEEP-DIVE ANALYSIS (only when @ProcedureName is passed)
+    --     Everything a DBA would manually check for "why is this proc slow":
+    --     plan cache stats, statement-level hotspots, Query Store history,
+    --     missing-index hints mined from the plan XML, impacted tables,
+    --     index inventory/fragmentation/usage, row counts, FKs, triggers,
+    --     and statistics freshness.
+    ----------------------------------------------------------------------
+    IF @ProcedureName IS NOT NULL AND @IncludeProcedureAnalysis = 1
+    BEGIN
+        IF @DatabaseName IS NULL
+        BEGIN
+            SELECT '14. PROCEDURE DEEP-DIVE ANALYSIS' AS Section,
+                   'Pass @DatabaseName along with @ProcedureName so the procedure can be resolved.' AS Message;
+        END
+        ELSE
+        BEGIN
+            SET @ProcDbId = DB_ID(@DatabaseName);
+            IF @ProcDbId IS NULL
+            BEGIN
+                SELECT '14. PROCEDURE DEEP-DIVE ANALYSIS' AS Section,
+                       'Database ''' + @DatabaseName + ''' not found.' AS Message;
+            END
+            ELSE
+            BEGIN
+                SET @ProcFullName = QUOTENAME(@DatabaseName) + N'.' +
+                    CASE WHEN CHARINDEX('.', @ProcedureName) > 0 THEN @ProcedureName ELSE N'dbo.' + @ProcedureName END;
+                SET @ProcObjectId = OBJECT_ID(@ProcFullName);
+
+                IF @ProcObjectId IS NULL
+                BEGIN
+                    SELECT '14. PROCEDURE DEEP-DIVE ANALYSIS' AS Section,
+                           'Could not resolve procedure ''' + @ProcedureName + ''' in database ''' + @DatabaseName + '''. Schema-qualify it if not dbo (e.g. ''sales.usp_GetOrders'').' AS Message;
+                END
+                ELSE
+                BEGIN
+                    SELECT '14. PROCEDURE DEEP-DIVE ANALYSIS: ' + @ProcFullName AS Section;
+
+                    ------------------------------------------------------------------
+                    -- 14a. Plan-cache overview: executions, CPU/IO totals, plan stability
+                    ------------------------------------------------------------------
+                    BEGIN TRY
+                        SELECT '14a. PROCEDURE OVERVIEW & PLAN CACHE STATS' AS Section;
+                        SELECT
+                            @ProcFullName                                                      AS procedure_name,
+                            COUNT(DISTINCT ps.plan_handle)                                      AS cached_plan_count,
+                            COUNT(DISTINCT ps.query_plan_hash)                                   AS distinct_plan_shapes,
+                            SUM(ps.execution_count)                                              AS total_executions,
+                            MIN(ps.cached_time)                                                  AS oldest_plan_cached_time,
+                            MAX(ps.last_execution_time)                                          AS last_execution_time,
+                            CAST(SUM(ps.total_worker_time) / 1000.0 AS DECIMAL(18, 2))           AS total_cpu_ms,
+                            CAST(SUM(ps.total_worker_time) / 1000.0 / NULLIF(SUM(ps.execution_count), 0) AS DECIMAL(18, 2)) AS avg_cpu_ms_per_exec,
+                            CAST(MAX(ps.max_worker_time) / 1000.0 AS DECIMAL(18, 2))             AS worst_single_exec_cpu_ms,
+                            CAST(SUM(ps.total_elapsed_time) / 1000.0 AS DECIMAL(18, 2))          AS total_duration_ms,
+                            CAST(SUM(ps.total_elapsed_time) / 1000.0 / NULLIF(SUM(ps.execution_count), 0) AS DECIMAL(18, 2)) AS avg_duration_ms_per_exec,
+                            SUM(ps.total_logical_reads)                                          AS total_logical_reads,
+                            SUM(ps.total_logical_writes)                                         AS total_logical_writes,
+                            SUM(ps.total_physical_reads)                                          AS total_physical_reads,
+                            MAX(ps.plan_generation_num)                                          AS max_recompile_count,
+                            CASE WHEN COUNT(DISTINCT ps.query_plan_hash) > 1
+                                 THEN 'MULTIPLE PLAN SHAPES CACHED - possible parameter sniffing / plan instability'
+                                 ELSE 'Single plan shape' END                                     AS plan_stability_flag
+                        FROM sys.dm_exec_procedure_stats ps
+                        WHERE ps.object_id = @ProcObjectId AND ps.database_id = @ProcDbId;
+
+                        IF NOT EXISTS (SELECT 1 FROM sys.dm_exec_procedure_stats WHERE object_id = @ProcObjectId AND database_id = @ProcDbId)
+                            SELECT 'No cached plan found for this procedure right now (plan may have been evicted, or it has never run since last recompile/restart).' AS Note;
+                    END TRY
+                    BEGIN CATCH
+                        SELECT ERROR_MESSAGE() AS ProcOverviewError;
+                    END CATCH;
+
+                    ------------------------------------------------------------------
+                    -- 14b. Statement-level breakdown - which statement inside the proc is hot
+                    ------------------------------------------------------------------
+                    BEGIN TRY
+                        SELECT '14b. STATEMENT-LEVEL BREAKDOWN (which statement inside the proc is expensive)' AS Section;
+                        SELECT TOP (@TopN)
+                            qs.plan_handle,
+                            SUBSTRING(st.text,
+                                (qs.statement_start_offset / 2) + 1,
+                                ((CASE qs.statement_end_offset WHEN -1 THEN DATALENGTH(st.text) ELSE qs.statement_end_offset END - qs.statement_start_offset) / 2) + 1
+                            )                                                                    AS statement_text,
+                            qs.execution_count,
+                            CAST(qs.total_worker_time / 1000.0 AS DECIMAL(18, 2))                AS total_cpu_ms,
+                            CAST(qs.total_worker_time / 1000.0 / NULLIF(qs.execution_count, 0) AS DECIMAL(18, 2)) AS avg_cpu_ms,
+                            CAST(qs.total_elapsed_time / 1000.0 AS DECIMAL(18, 2))                AS total_duration_ms,
+                            qs.total_logical_reads,
+                            qs.total_logical_reads / NULLIF(qs.execution_count, 0)                 AS avg_logical_reads,
+                            qs.last_execution_time
+                        FROM sys.dm_exec_procedure_stats ps
+                            INNER JOIN sys.dm_exec_query_stats qs ON qs.plan_handle = ps.plan_handle
+                            CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+                        WHERE ps.object_id = @ProcObjectId AND ps.database_id = @ProcDbId
+                        ORDER BY qs.total_worker_time DESC;
+                    END TRY
+                    BEGIN CATCH
+                        SELECT ERROR_MESSAGE() AS StatementBreakdownError;
+                    END CATCH;
+
+                    ------------------------------------------------------------------
+                    -- 14c. Query Store history for this procedure (if QS is enabled)
+                    ------------------------------------------------------------------
+                    IF @IncludeQueryStore = 1
+                    BEGIN
+                        BEGIN TRY
+                            SET @sql = N'SELECT @state = actual_state_desc FROM ' + QUOTENAME(@DatabaseName) + N'.sys.database_query_store_options;';
+                            EXEC sp_executesql @sql, N'@state NVARCHAR(60) OUTPUT', @state = @ProcQSState OUTPUT;
+
+                            IF @ProcQSState IS NULL OR @ProcQSState = 'OFF'
+                            BEGIN
+                                SELECT '14c. QUERY STORE for this procedure is OFF (or inaccessible) in ' + @DatabaseName AS QueryStoreStatus;
+                            END
+                            ELSE
+                            BEGIN
+                                SELECT '14c. QUERY STORE HISTORY FOR THIS PROCEDURE (' + @DatabaseName + ', last ' + @QueryStoreTimeRange + ')' AS Section;
+
+                                SET @sql = N'USE ' + QUOTENAME(@DatabaseName) + N';
+                                SELECT
+                                    q.query_id,
+                                    p.plan_id,
+                                    qt.query_sql_text,
+                                    SUM(rs.count_executions)                                             AS total_executions,
+                                    CAST(SUM(rs.avg_cpu_time * rs.count_executions) / 1000.0 AS DECIMAL(18,2))  AS total_cpu_ms,
+                                    CAST(AVG(rs.avg_cpu_time) / 1000.0 AS DECIMAL(18,2))                  AS avg_cpu_ms,
+                                    CAST(MAX(rs.max_duration) / 1000.0 AS DECIMAL(18,2))                  AS worst_duration_ms,
+                                    CAST(AVG(rs.avg_duration) / 1000.0 AS DECIMAL(18,2))                  AS avg_duration_ms,
+                                    CAST(MAX(rs.max_duration) / NULLIF(AVG(rs.avg_duration), 0) AS DECIMAL(18,2)) AS worst_vs_avg_duration_ratio,
+                                    CAST(AVG(rs.avg_logical_io_reads) AS DECIMAL(18,2))                   AS avg_logical_reads,
+                                    MAX(rs.last_execution_time)                                           AS last_execution_time
+                                FROM sys.query_store_query q
+                                    INNER JOIN sys.query_store_query_text qt ON q.query_text_id = qt.query_text_id
+                                    INNER JOIN sys.query_store_plan p ON q.query_id = p.query_id
+                                    INNER JOIN sys.query_store_runtime_stats rs ON p.plan_id = rs.plan_id
+                                WHERE q.object_id = ' + CAST(@ProcObjectId AS NVARCHAR(20)) + N'
+                                GROUP BY q.query_id, p.plan_id, qt.query_sql_text
+                                ORDER BY total_cpu_ms DESC;';
+                                EXEC (@sql);
+
+                                SELECT '14c-note. A worst_vs_avg_duration_ratio much greater than 1 across many executions suggests PARAMETER SNIFFING (same plan, wildly different runtimes per parameter value).' AS Note;
+                            END;
+                        END TRY
+                        BEGIN CATCH
+                            SELECT ERROR_MESSAGE() AS ProcQueryStoreError;
+                        END CATCH
+                    END;
+
+                    ------------------------------------------------------------------
+                    -- 14d/14e. Fetch this procedure's cached plan XML once, reuse for
+                    --          missing-index mining and impacted-table discovery
+                    ------------------------------------------------------------------
+                    BEGIN TRY
+                        INSERT INTO @ProcPlans (plan_handle, query_plan)
+                        SELECT DISTINCT ps.plan_handle, qp.query_plan
+                        FROM sys.dm_exec_procedure_stats ps
+                            CROSS APPLY sys.dm_exec_query_plan(ps.plan_handle) qp
+                        WHERE ps.object_id = @ProcObjectId AND ps.database_id = @ProcDbId
+                            AND qp.query_plan IS NOT NULL;
+                    END TRY
+                    BEGIN CATCH
+                        SELECT ERROR_MESSAGE() AS PlanFetchError;
+                    END CATCH;
+
+                    BEGIN TRY
+                        IF EXISTS (SELECT 1 FROM @ProcPlans)
+                        BEGIN
+                            SELECT '14d. MISSING INDEX HINTS FROM THIS PROCEDURE''S PLAN(S)' AS Section;
+
+                            ;WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
+                            SELECT
+                                pp.plan_handle,
+                                mig.value('(@Impact)[1]', 'float')                        AS impact_pct,
+                                mi.value('(@Database)[1]', 'nvarchar(128)')               AS database_name,
+                                mi.value('(@Schema)[1]', 'nvarchar(128)')                 AS schema_name,
+                                mi.value('(@Table)[1]', 'nvarchar(128)')                  AS table_name,
+                                eq.cols   AS equality_columns,
+                                ineq.cols AS inequality_columns,
+                                inc.cols  AS included_columns,
+                                N'CREATE NONCLUSTERED INDEX [IX_' +
+                                    REPLACE(REPLACE(mi.value('(@Table)[1]', 'nvarchar(128)'), '[', ''), ']', '') +
+                                    N'_Missing] ON ' + mi.value('(@Schema)[1]', 'nvarchar(128)') + N'.' + mi.value('(@Table)[1]', 'nvarchar(128)') +
+                                    N' (' + ISNULL(eq.cols, '') +
+                                    CASE WHEN eq.cols IS NOT NULL AND ineq.cols IS NOT NULL THEN N', ' ELSE N'' END +
+                                    ISNULL(ineq.cols, '') + N')' +
+                                    CASE WHEN inc.cols IS NOT NULL THEN N' INCLUDE (' + inc.cols + N')' ELSE N'' END AS suggested_create_index_ddl
+                            FROM @ProcPlans pp
+                                CROSS APPLY pp.query_plan.nodes('//MissingIndexGroup') AS t1(mig)
+                                CROSS APPLY mig.nodes('MissingIndex') AS t2(mi)
+                                OUTER APPLY (
+                                    SELECT STUFF((SELECT ',' + c.value('(@Name)[1]', 'nvarchar(128)')
+                                                  FROM mi.nodes('ColumnGroup[@Usage="EQUALITY"]/Column') AS cc(c)
+                                                  FOR XML PATH('')), 1, 1, '') AS cols) eq
+                                OUTER APPLY (
+                                    SELECT STUFF((SELECT ',' + c.value('(@Name)[1]', 'nvarchar(128)')
+                                                  FROM mi.nodes('ColumnGroup[@Usage="INEQUALITY"]/Column') AS cc(c)
+                                                  FOR XML PATH('')), 1, 1, '') AS cols) ineq
+                                OUTER APPLY (
+                                    SELECT STUFF((SELECT ',' + c.value('(@Name)[1]', 'nvarchar(128)')
+                                                  FROM mi.nodes('ColumnGroup[@Usage="INCLUDE"]/Column') AS cc(c)
+                                                  FOR XML PATH('')), 1, 1, '') AS cols) inc
+                            ORDER BY impact_pct DESC;
+                        END
+                        ELSE
+                        BEGIN
+                            SELECT '14d. MISSING INDEX HINTS' AS Section,
+                                   'No cached plan XML available - run the procedure once, then re-run this analysis.' AS Message;
+                        END;
+                    END TRY
+                    BEGIN CATCH
+                        SELECT ERROR_MESSAGE() AS MissingIndexXmlError;
+                    END CATCH;
+
+                    BEGIN TRY
+                        ;WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
+                        INSERT INTO @ImpactedTables (database_name, schema_name, table_name, index_name, physical_op)
+                        SELECT DISTINCT
+                            REPLACE(REPLACE(obj.value('(@Database)[1]', 'nvarchar(128)'), '[', ''), ']', ''),
+                            REPLACE(REPLACE(obj.value('(@Schema)[1]', 'nvarchar(128)'), '[', ''), ']', ''),
+                            REPLACE(REPLACE(obj.value('(@Table)[1]', 'nvarchar(128)'), '[', ''), ']', ''),
+                            REPLACE(REPLACE(obj.value('(@Index)[1]', 'nvarchar(128)'), '[', ''), ']', ''),
+                            obj.value('(../../@PhysicalOp)[1]', 'nvarchar(60)')
+                        FROM @ProcPlans pp
+                            CROSS APPLY pp.query_plan.nodes('//Object') AS t(obj)
+                        WHERE obj.value('(@Table)[1]', 'nvarchar(128)') IS NOT NULL;
+
+                        SELECT '14e. TABLES / OBJECTS ACCESSED BY THIS PROCEDURE (from cached plan)' AS Section;
+                        SELECT
+                            database_name, schema_name, table_name,
+                            COUNT(DISTINCT index_name)                        AS distinct_indexes_touched,
+                            STRING_AGG(DISTINCT index_name, ', ')             AS indexes_touched,
+                            STRING_AGG(DISTINCT physical_op, ', ')            AS access_operations
+                        FROM @ImpactedTables
+                        GROUP BY database_name, schema_name, table_name
+                        ORDER BY database_name, schema_name, table_name;
+                    END TRY
+                    BEGIN CATCH
+                        SELECT ERROR_MESSAGE() AS ImpactedTablesError;
+                    END CATCH;
+
+                    ------------------------------------------------------------------
+                    -- 14f. Engine-tracked missing indexes on the impacted tables
+                    --      (independent, server-wide cross-check vs. the plan-XML hints above)
+                    ------------------------------------------------------------------
+                    BEGIN TRY
+                        IF EXISTS (SELECT 1 FROM @ImpactedTables)
+                        BEGIN
+                            SELECT '14f. ENGINE-TRACKED MISSING INDEXES ON IMPACTED TABLES (dm_db_missing_index_*, all queries - not just this proc)' AS Section;
+                            SELECT DISTINCT
+                                it.database_name, it.schema_name, it.table_name,
+                                migs.avg_total_user_cost, migs.avg_user_impact,
+                                migs.user_seeks, migs.user_scans,
+                                mid.equality_columns, mid.inequality_columns, mid.included_columns,
+                                CAST((migs.avg_total_user_cost * migs.avg_user_impact * (migs.user_seeks + migs.user_scans)) AS DECIMAL(18, 2)) AS improvement_measure
+                            FROM @ImpactedTables it
+                                CROSS APPLY (SELECT OBJECT_ID(QUOTENAME(it.database_name) + N'.' + QUOTENAME(it.schema_name) + N'.' + QUOTENAME(it.table_name)) AS obj_id) r
+                                INNER JOIN sys.dm_db_missing_index_details mid ON mid.object_id = r.obj_id AND mid.database_id = DB_ID(it.database_name)
+                                INNER JOIN sys.dm_db_missing_index_groups mig ON mig.index_handle = mid.index_handle
+                                INNER JOIN sys.dm_db_missing_index_group_stats migs ON migs.group_handle = mig.index_group_handle
+                            ORDER BY improvement_measure DESC;
+                        END;
+                    END TRY
+                    BEGIN CATCH
+                        SELECT ERROR_MESSAGE() AS EngineMissingIndexError;
+                    END CATCH;
+
+                    ------------------------------------------------------------------
+                    -- 14g-14k. Per-table deep dive: index inventory, fragmentation,
+                    --          usage stats, row counts, FKs, triggers, stats freshness.
+                    --          Looped per distinct database referenced by the plan
+                    --          (normally just @DatabaseName) via dynamic SQL, since
+                    --          sys.indexes/sys.stats/sys.triggers are catalog views
+                    --          scoped to the current database context.
+                    ------------------------------------------------------------------
+                    IF EXISTS (SELECT 1 FROM @ImpactedTables)
+                    BEGIN
+                        DECLARE proc_db_cursor CURSOR LOCAL FAST_FORWARD FOR
+                            SELECT DISTINCT database_name FROM @ImpactedTables WHERE database_name IS NOT NULL AND DB_ID(database_name) IS NOT NULL;
+                        OPEN proc_db_cursor;
+                        FETCH NEXT FROM proc_db_cursor INTO @DbCursorName;
+                        WHILE @@FETCH_STATUS = 0
+                        BEGIN
+                            BEGIN TRY
+                                SET @TableFilter = NULL;
+                                SELECT @TableFilter = ISNULL(@TableFilter + N' UNION ALL ', N'') +
+                                    N'SELECT ' + QUOTENAME(schema_name, '''') + N' AS sch, ' + QUOTENAME(table_name, '''') + N' AS tbl'
+                                FROM (SELECT DISTINCT schema_name, table_name FROM @ImpactedTables WHERE database_name = @DbCursorName) x;
+
+                                IF @TableFilter IS NOT NULL
+                                BEGIN
+                                    SET @sql = N'
+USE ' + QUOTENAME(@DbCursorName) + N';
+
+SELECT ''14g. INDEX INVENTORY - FRAGMENTATION - USAGE STATS (db: ' + @DbCursorName + N')'' AS Section;
+SELECT
+    tgt.sch AS schema_name, tgt.tbl AS table_name,
+    i.name AS index_name, i.index_id, i.type_desc,
+    i.is_unique, i.is_primary_key, i.is_unique_constraint, i.fill_factor,
+    STUFF((SELECT '','' + c.name + CASE WHEN ic.is_descending_key = 1 THEN '' DESC'' ELSE '''' END
+           FROM sys.index_columns ic JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+           WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+           ORDER BY ic.key_ordinal FOR XML PATH('''')), 1, 1, '''') AS key_columns,
+    STUFF((SELECT '','' + c.name
+           FROM sys.index_columns ic JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+           WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1
+           FOR XML PATH('''')), 1, 1, '''') AS included_columns,
+    ips.avg_fragmentation_in_percent, ips.page_count,
+    ius.user_seeks, ius.user_scans, ius.user_lookups, ius.user_updates,
+    ius.last_user_seek, ius.last_user_scan, ius.last_user_update
+FROM (' + @TableFilter + N') tgt
+    JOIN sys.tables tbl ON tbl.name = tgt.tbl AND SCHEMA_NAME(tbl.schema_id) = tgt.sch
+    JOIN sys.indexes i ON i.object_id = tbl.object_id AND i.type > 0
+    OUTER APPLY (SELECT TOP 1 avg_fragmentation_in_percent, page_count FROM sys.dm_db_index_physical_stats(DB_ID(), i.object_id, i.index_id, NULL, ''LIMITED'')) ips
+    LEFT JOIN sys.dm_db_index_usage_stats ius ON ius.database_id = DB_ID() AND ius.object_id = i.object_id AND ius.index_id = i.index_id
+ORDER BY tgt.sch, tgt.tbl, i.index_id;
+
+SELECT ''14h. ROW COUNTS / TABLE AGE (db: ' + @DbCursorName + N')'' AS Section;
+SELECT
+    tgt.sch AS schema_name, tgt.tbl AS table_name,
+    SUM(p.rows) AS row_count_approx,
+    tbl.create_date, tbl.modify_date
+FROM (' + @TableFilter + N') tgt
+    JOIN sys.tables tbl ON tbl.name = tgt.tbl AND SCHEMA_NAME(tbl.schema_id) = tgt.sch
+    JOIN sys.partitions p ON p.object_id = tbl.object_id AND p.index_id IN (0, 1)
+GROUP BY tgt.sch, tgt.tbl, tbl.create_date, tbl.modify_date;
+
+SELECT ''14i. FOREIGN KEYS TOUCHING IMPACTED TABLES (db: ' + @DbCursorName + N')'' AS Section;
+SELECT
+    OBJECT_SCHEMA_NAME(fk.parent_object_id) + ''.'' + OBJECT_NAME(fk.parent_object_id)         AS parent_table,
+    OBJECT_SCHEMA_NAME(fk.referenced_object_id) + ''.'' + OBJECT_NAME(fk.referenced_object_id)  AS referenced_table,
+    fk.name AS fk_name, fk.is_disabled, fk.is_not_trusted
+FROM sys.foreign_keys fk
+WHERE fk.parent_object_id IN (SELECT tbl.object_id FROM (' + @TableFilter + N') tgt JOIN sys.tables tbl ON tbl.name = tgt.tbl AND SCHEMA_NAME(tbl.schema_id) = tgt.sch)
+   OR fk.referenced_object_id IN (SELECT tbl.object_id FROM (' + @TableFilter + N') tgt JOIN sys.tables tbl ON tbl.name = tgt.tbl AND SCHEMA_NAME(tbl.schema_id) = tgt.sch);
+
+SELECT ''14j. TRIGGERS ON IMPACTED TABLES (db: ' + @DbCursorName + N')'' AS Section;
+SELECT
+    tgt.sch AS schema_name, tgt.tbl AS table_name,
+    tr.name AS trigger_name, tr.is_disabled, tr.is_instead_of_trigger
+FROM (' + @TableFilter + N') tgt
+    JOIN sys.tables tbl ON tbl.name = tgt.tbl AND SCHEMA_NAME(tbl.schema_id) = tgt.sch
+    JOIN sys.triggers tr ON tr.parent_id = tbl.object_id;
+
+SELECT ''14k. STATISTICS FRESHNESS ON IMPACTED TABLES (db: ' + @DbCursorName + N')'' AS Section;
+SELECT
+    tgt.sch AS schema_name, tgt.tbl AS table_name,
+    s.name AS stats_name,
+    sp.last_updated, sp.rows, sp.rows_sampled, sp.modification_counter
+FROM (' + @TableFilter + N') tgt
+    JOIN sys.tables tbl ON tbl.name = tgt.tbl AND SCHEMA_NAME(tbl.schema_id) = tgt.sch
+    JOIN sys.stats s ON s.object_id = tbl.object_id
+    OUTER APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) sp
+ORDER BY sp.modification_counter DESC;
+';
+                                    EXEC (@sql);
+                                END;
+                            END TRY
+                            BEGIN CATCH
+                                SELECT ERROR_MESSAGE() AS PerTableDeepDiveError, @DbCursorName AS FailedDatabase;
+                            END CATCH;
+
+                            FETCH NEXT FROM proc_db_cursor INTO @DbCursorName;
+                        END;
+                        CLOSE proc_db_cursor;
+                        DEALLOCATE proc_db_cursor;
+                    END;
+                END;
+            END;
+        END;
     END;
 
     SELECT '=== usp_PerformanceTroubleshoot complete ===' AS RunInfo;
