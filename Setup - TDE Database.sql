@@ -4,7 +4,7 @@ GO
 CREATE OR ALTER PROCEDURE dbo.usp_ManageTDE
     -- Core Parameters - NOTE: Default values below are for example/testing purposes.
     @DatabaseName NVARCHAR(128) = 'TDETest',
-    @TDEAction NVARCHAR(10) = 'enable', -- Valid Actions: 'Enable', 'Disable', 'Status', 'DropDEK'
+    @TDEAction NVARCHAR(10) = 'Status', -- Valid Actions: 'Enable', 'Disable', 'Status', 'DropDEK', 'Pause', 'Resume'
     @CertificateName NVARCHAR(128) = 'TDE Certificate',
     
     -- TDE supports: AES_128, AES_192, AES_256, TRIPLE_DES_3KEY. AES_256 is recommended.
@@ -159,13 +159,22 @@ BEGIN
         -- ====================================================================================
         IF @TDEAction = 'STATUS'
         BEGIN
+            -- Trace flag 5004 (instance-wide) freezes the encryption scanner: encryption_state
+            -- stays at 2 (in progress) but percent_complete drops to 0. Surface whether it is on
+            -- so DBAs can tell "stalled" apart from "intentionally paused".
+            DECLARE @TF5004Status TABLE (TraceFlag INT, [Status] INT, [Global] INT, [Session] INT);
+            INSERT INTO @TF5004Status EXEC('DBCC TRACESTATUS(5004) WITH NO_INFOMSGS');
+            DECLARE @TF5004Enabled BIT = CASE WHEN EXISTS (SELECT 1 FROM @TF5004Status WHERE [Status] = 1) THEN 1 ELSE 0 END;
+
             SET @SQL = '
                 SELECT
                     d.name AS [DatabaseName],
                     ISNULL(dek.encryption_state_desc, ''NOT ENCRYPTED'') AS [TDE_Status],
                     ISNULL(dek.percent_complete, 0) AS [Progress_%],
                     dek.key_algorithm AS [Algorithm],
-                    c.name AS [Certificate_Name]
+                    c.name AS [Certificate_Name],
+                    CASE WHEN dek.encryption_state = 2 AND ' + CAST(@TF5004Enabled AS VARCHAR(1)) + ' = 1
+                         THEN ''YES (Trace Flag 5004 ON)'' ELSE ''NO'' END AS [Scanner_Paused]
                 FROM sys.databases d
                 LEFT JOIN sys.dm_database_encryption_keys dek ON d.database_id = dek.database_id
                 LEFT JOIN master.sys.certificates c ON dek.encryptor_thumbprint = c.thumbprint
@@ -241,6 +250,70 @@ BEGIN
                         WAITFOR DELAY '00:00:30';
                     END
                     IF @DisableEncryptionState != 1 PRINT '--TDE decryption is still in progress. Monitor using the Status action.';
+                END
+            END
+        END
+        ELSE IF @TDEAction = 'PAUSE'
+        BEGIN
+            -- Pauses the TDE encryption/decryption scanner via trace flag 5004 (instance-wide).
+            -- SQL Server keeps encryption_state unchanged but reports percent_complete = 0 while
+            -- paused, so the T-Log can be safely truncated during the pause window.
+            IF @DatabaseName = '' BEGIN RAISERROR('DatabaseName is required for the PAUSE action.', 16, 1); RETURN; END
+
+            DECLARE @PauseEncryptionState INT;
+            SELECT @PauseEncryptionState = encryption_state FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID(@DatabaseName);
+
+            IF @PauseEncryptionState IS NULL BEGIN PRINT '--No Database Encryption Key found for ''' + @DatabaseName + '''. Nothing to pause.'; RETURN; END
+            IF @PauseEncryptionState NOT IN (2, 5) BEGIN PRINT '--No active encryption/decryption scan on ''' + @DatabaseName + ''' to pause (current encryption_state = ' + CAST(@PauseEncryptionState AS VARCHAR(10)) + ').'; RETURN; END
+
+            SET @SQL = 'DBCC TRACEON(5004, -1);';
+            IF @Print = 1 PRINT '--Pausing TDE scanner (instance-wide trace flag):' + CHAR(10) + @SQL + CHAR(10);
+            IF @Execute = 1
+            BEGIN
+                EXEC(@SQL);
+                PRINT '--Trace Flag 5004 enabled. TDE scanner on ''' + @DatabaseName + ''' is now paused (percent_complete will read 0 while encryption_state stays ' + CAST(@PauseEncryptionState AS VARCHAR(10)) + ').';
+                PRINT '--NOTE: Trace Flag 5004 is instance-wide and pauses the scanner for ALL databases, not just ''' + @DatabaseName + '''.';
+                PRINT '--The transaction log can now be truncated/backed up safely while paused. Use @TDEAction=''Resume'' to continue.';
+            END
+        END
+        ELSE IF @TDEAction = 'RESUME'
+        BEGIN
+            -- Resumes a scan paused via trace flag 5004: disable the flag, then re-issue the
+            -- SET ENCRYPTION statement so the scanner picks back up where it left off.
+            IF @DatabaseName = '' BEGIN RAISERROR('DatabaseName is required for the RESUME action.', 16, 1); RETURN; END
+
+            DECLARE @ResumeEncryptionState INT, @ResumeCurrentPercent FLOAT;
+            SELECT @ResumeEncryptionState = encryption_state, @ResumeCurrentPercent = percent_complete FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID(@DatabaseName);
+
+            IF @ResumeEncryptionState IS NULL BEGIN PRINT '--No Database Encryption Key found for ''' + @DatabaseName + '''. Nothing to resume.'; RETURN; END
+            IF @ResumeEncryptionState NOT IN (2, 5) BEGIN PRINT '--No paused encryption/decryption scan on ''' + @DatabaseName + ''' to resume (current encryption_state = ' + CAST(@ResumeEncryptionState AS VARCHAR(10)) + ').'; RETURN; END
+
+            IF @Print = 1 PRINT '--Resuming TDE scanner for ''' + @DatabaseName + ''':' + CHAR(10) +
+                'DBCC TRACEOFF(5004, -1);' + CHAR(10) +
+                'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + ' SET ENCRYPTION ' + (CASE WHEN @ResumeEncryptionState = 2 THEN 'ON' ELSE 'OFF' END) + ';' + CHAR(10);
+
+            IF @Execute = 1
+            BEGIN
+                EXEC('DBCC TRACEOFF(5004, -1);');
+                -- Re-issuing the same direction (ON for encrypt-in-progress, OFF for decrypt-in-progress)
+                -- is what actually kicks the scanner back into motion; disabling the trace flag alone does not.
+                SET @SQL = 'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + ' SET ENCRYPTION ' + (CASE WHEN @ResumeEncryptionState = 2 THEN 'ON' ELSE 'OFF' END) + ';';
+                EXEC sp_executesql @SQL;
+                PRINT '--Trace Flag 5004 disabled and scanner resumed for ''' + @DatabaseName + '''.';
+
+                IF @WaitForCompletion = 1
+                BEGIN
+                    DECLARE @ResumeTargetState INT = CASE WHEN @ResumeEncryptionState = 2 THEN 3 ELSE 1 END;
+                    PRINT 'Waiting for TDE scan to complete...';
+                    SET @WaitStart = GETDATE();
+                    WHILE DATEDIFF(MINUTE, @WaitStart, GETDATE()) < @MaxWaitMinutes
+                    BEGIN
+                        SELECT @ResumeEncryptionState = encryption_state, @ResumeCurrentPercent = percent_complete FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID(@DatabaseName);
+                        IF @ResumeEncryptionState = @ResumeTargetState BEGIN PRINT 'TDE scan completed successfully.'; BREAK; END
+                        PRINT 'Scan progress: ' + CAST(ISNULL(@ResumeCurrentPercent, 0) AS VARCHAR(10)) + '%';
+                        WAITFOR DELAY '00:00:30';
+                    END
+                    IF @ResumeEncryptionState != @ResumeTargetState PRINT 'TDE scan is still in progress. Monitor using the Status action.';
                 END
             END
         END
