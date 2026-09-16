@@ -1,4 +1,47 @@
-# Set working location to standard C:\ filesystem to avoid SQLSERVER:\ provider issues
+USE [msdb]
+GO
+
+/****** Object:  Job [DBA - HotFix Data]     ******/
+IF  EXISTS (SELECT job_id FROM msdb.dbo.sysjobs_view WHERE name = N'DBA - HotFix Data')
+EXEC msdb.dbo.sp_delete_job @job_name=N'DBA - HotFix Data', @delete_unused_schedule=1
+GO
+
+/****** Object:  Job [DBA - HotFix Data]     ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]     ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA - HotFix Data', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=0, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'No description available.', 
+		@category_name=N'[Uncategorized (Local)]', 
+		@owner_login_name=N'CentralDB', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Hotfix]    Script Date: 9/16/2026 10:58:34 AM ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Hotfix', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'PowerShell', 
+		@command=N'# Set working location to standard C:\ filesystem to avoid SQLSERVER:\ provider issues
 Set-Location -Path "C:\"
 
 # Target database
@@ -8,9 +51,9 @@ $serverName =  "$(ESCAPE_SQUOTE(SRVR))"
 # Retrieve default backup directory or data path using SERVERPROPERTY
 $backupDirectory = Invoke-Sqlcmd -Query "
 SELECT COALESCE(
-    CAST(SERVERPROPERTY('InstanceDefaultBackupPath') AS NVARCHAR(4000)),
-    CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS NVARCHAR(4000)),
-    'C:\Temp'
+    CAST(SERVERPROPERTY(''InstanceDefaultBackupPath'') AS NVARCHAR(4000)),
+    CAST(SERVERPROPERTY(''InstanceDefaultDataPath'') AS NVARCHAR(4000)),
+    ''C:\Temp''
 ) AS DefaultBackupDirectory;
 " -ServerInstance $serverName -Database "master" | Select-Object -ExpandProperty DefaultBackupDirectory
 
@@ -58,20 +101,20 @@ $regUninstallPaths = @(
 )
 
 $appUpdates = Get-ItemProperty -Path $regUninstallPaths -ErrorAction SilentlyContinue | Where-Object {
-    ($_.DisplayName -match 'SQL Server' -or $_.DisplayName -match 'KB\d+') -and
-    ($_.DisplayName -match 'Update|Hotfix|CU\d+|Cumulative Update|GDR|Service Pack')
+    ($_.DisplayName -match ''SQL Server'' -or $_.DisplayName -match ''KB\d+'') -and
+    ($_.DisplayName -match ''Update|Hotfix|CU\d+|Cumulative Update|GDR|Service Pack'')
 }
 
 foreach ($app in $appUpdates) {
     # Extract KB number from DisplayName or Key Name
-    $kb = if ($app.DisplayName -match 'KB\d+') { $matches[0] } else { $null }
-    if (-not $kb -and $app.PSChildName -match 'KB\d+') { $kb = $matches[0] }
+    $kb = if ($app.DisplayName -match ''KB\d+'') { $matches[0] } else { $null }
+    if (-not $kb -and $app.PSChildName -match ''KB\d+'') { $kb = $matches[0] }
     if (-not $kb) { $kb = "SQL-Patch" }
 
     # Parse registry InstallDate (typically formatted as yyyyMMdd)
     $parsedDate = $null
-    if ($app.InstallDate -and $app.InstallDate -match '^\d{8}$') {
-        try { $parsedDate = [datetime]::ParseExact($app.InstallDate, 'yyyyMMdd', $null) } catch { }
+    if ($app.InstallDate -and $app.InstallDate -match ''^\d{8}$'') {
+        try { $parsedDate = [datetime]::ParseExact($app.InstallDate, ''yyyyMMdd'', $null) } catch { }
     } elseif ($app.InstallDate) {
         try { $parsedDate = [datetime]$app.InstallDate } catch { }
     }
@@ -96,9 +139,9 @@ foreach ($app in $appUpdates) {
 # -------------------------------------------------------------------------
 $sqlInfo = Invoke-Sqlcmd -Query "
 SELECT 
-    CAST(SERVERPROPERTY('MachineName') AS NVARCHAR(255)) AS PSComputerName,
-    CAST(SERVERPROPERTY('ProductUpdateReference') AS NVARCHAR(50)) AS HotFixID,
-    CAST(SERVERPROPERTY('ProductUpdateLevel') AS NVARCHAR(50)) + ' (' + CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(50)) + ')' AS Description
+    CAST(SERVERPROPERTY(''MachineName'') AS NVARCHAR(255)) AS PSComputerName,
+    CAST(SERVERPROPERTY(''ProductUpdateReference'') AS NVARCHAR(50)) AS HotFixID,
+    CAST(SERVERPROPERTY(''ProductUpdateLevel'') AS NVARCHAR(50)) + '' ('' + CAST(SERVERPROPERTY(''ProductVersion'') AS NVARCHAR(50)) + '')'' AS Description
 " -ServerInstance $serverName -Database "master"
 
 if ($sqlInfo -and $sqlInfo.HotFixID) {
@@ -106,7 +149,7 @@ if ($sqlInfo -and $sqlInfo.HotFixID) {
     $alreadyExists = $patchList | Where-Object { $_.HotFixID -eq $sqlInfo.HotFixID }
 
     if (-not $alreadyExists) {
-        # Only add if we didn't find the installer registry entry for this KB
+        # Only add if we didn''t find the installer registry entry for this KB
         $patchList.Add([PSCustomObject]@{
             PSComputerName = [string]$sqlInfo.PSComputerName
             InstalledOn    = (Get-Date).ToString("yyyy-MM-dd 00:00:00")
@@ -118,13 +161,13 @@ if ($sqlInfo -and $sqlInfo.HotFixID) {
 }
 
 # Export all patches to CSV
-$patchList | Export-Csv -Path $csvPath -NoTypeInformation -Delimiter ','
+$patchList | Export-Csv -Path $csvPath -NoTypeInformation -Delimiter '',''
 
 # -------------------------------------------------------------------------
 # 4. IMPORT INTO SQL SERVER, FORMAT & DEDUPLICATE
 # -------------------------------------------------------------------------
 Invoke-Sqlcmd -Query "
-IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblHotfixDetails]') AND type in (N'U'))
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N''[dbo].[tblHotfixDetails]'') AND type in (N''U''))
 BEGIN
     CREATE TABLE [dbo].[tblHotfixDetails](
         [PSComputerName] [nvarchar](255) NULL,
@@ -138,27 +181,27 @@ GO
 
 -- Empty the table first or insert new entries
 BULK INSERT [dbo].[tblHotfixDetails]
-FROM '$csvPath'
+FROM ''$csvPath''
 WITH (
-    FIELDTERMINATOR = ',',
-    ROWTERMINATOR = '\n',
+    FIELDTERMINATOR = '','',
+    ROWTERMINATOR = ''\n'',
     FIRSTROW = 2,
-    FORMAT = 'CSV'
+    FORMAT = ''CSV''
 );
 
 -- Standardize Date strings to ISO Format
 UPDATE [dbo].[tblHotfixDetails]
 SET [InstalledOn] = CONVERT(VARCHAR(19), TRY_CONVERT(DATETIME, [InstalledOn]), 120)
 WHERE TRY_CONVERT(DATETIME, [InstalledOn]) IS NOT NULL
-  AND [InstalledOn] NOT LIKE '____-__-__ __:__:__';
+  AND [InstalledOn] NOT LIKE ''____-__-__ __:__:__'';
 
--- Clean up any existing legacy duplicates (merges today's placeholder run with the historical registry run)
+-- Clean up any existing legacy duplicates (merges today''s placeholder run with the historical registry run)
 ;WITH CTE AS (
     SELECT 
         *,
         ROW_NUMBER() OVER (
             PARTITION BY PSComputerName, HotFixID 
-            ORDER BY CASE WHEN InstalledOn LIKE '2026-09-16%' THEN 2 ELSE 1 END ASC, InstalledOn ASC
+            ORDER BY CASE WHEN InstalledOn LIKE ''2026-09-16%'' THEN 2 ELSE 1 END ASC, InstalledOn ASC
         ) AS RowNum
     FROM 
         [dbo].[tblHotfixDetails]
@@ -177,7 +220,20 @@ WHERE TRY_CONVERT(DATETIME, InstalledOn) IS NOT NULL
 if (Test-Path -Path $csvPath) {
     Remove-Item -Path $csvPath -Force
 }
-
+', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+GO
 
 /*
 IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[SqlServerVersionReference]') AND type in (N'U'))
