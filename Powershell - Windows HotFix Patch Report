@@ -2,7 +2,7 @@
 Set-Location -Path "C:\"
 
 # Target database
-$databaseName = "tempdb"
+$databaseName = "DBAdmin"
 $serverName =  "$(ESCAPE_SQUOTE(SRVR))"
 
 # Retrieve default backup directory or data path using SERVERPROPERTY
@@ -92,7 +92,7 @@ foreach ($app in $appUpdates) {
 }
 
 # -------------------------------------------------------------------------
-# 3. DIRECT SQL INSTANCE LEVEL CHECK (Guarantees current active SQL CU is recorded)
+# 3. DIRECT SQL INSTANCE LEVEL CHECK (With Smart Merging to prevent duplicates)
 # -------------------------------------------------------------------------
 $sqlInfo = Invoke-Sqlcmd -Query "
 SELECT 
@@ -102,20 +102,26 @@ SELECT
 " -ServerInstance $serverName -Database "master"
 
 if ($sqlInfo -and $sqlInfo.HotFixID) {
-    $patchList.Add([PSCustomObject]@{
-        PSComputerName = [string]$sqlInfo.PSComputerName
-        InstalledOn    = (Get-Date).ToString("yyyy-MM-dd 00:00:00")
-        Description    = "SQL Server Update " + [string]$sqlInfo.Description
-        HotFixID       = [string]$sqlInfo.HotFixID
-        InstalledBy    = "SQL Engine Setup"
-    })
+    # Check if this specific SQL HotFixID is already retrieved with a real date from the registry scan
+    $alreadyExists = $patchList | Where-Object { $_.HotFixID -eq $sqlInfo.HotFixID }
+
+    if (-not $alreadyExists) {
+        # Only add if we didn't find the installer registry entry for this KB
+        $patchList.Add([PSCustomObject]@{
+            PSComputerName = [string]$sqlInfo.PSComputerName
+            InstalledOn    = (Get-Date).ToString("yyyy-MM-dd 00:00:00")
+            Description    = "SQL Server Update " + [string]$sqlInfo.Description
+            HotFixID       = [string]$sqlInfo.HotFixID
+            InstalledBy    = "SQL Engine Setup"
+        })
+    }
 }
 
 # Export all patches to CSV
 $patchList | Export-Csv -Path $csvPath -NoTypeInformation -Delimiter ','
 
 # -------------------------------------------------------------------------
-# 4. IMPORT INTO SQL SERVER & DEDUPLICATE
+# 4. IMPORT INTO SQL SERVER, FORMAT & DEDUPLICATE
 # -------------------------------------------------------------------------
 Invoke-Sqlcmd -Query "
 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblHotfixDetails]') AND type in (N'U'))
@@ -130,6 +136,7 @@ BEGIN
 END
 GO
 
+-- Empty the table first or insert new entries
 BULK INSERT [dbo].[tblHotfixDetails]
 FROM '$csvPath'
 WITH (
@@ -139,19 +146,19 @@ WITH (
     FORMAT = 'CSV'
 );
 
--- FIX FOR DUPLICATES: Standardize existing date formats (converts '8/1/2026 12:00:00 AM' -> '2026-08-01 00:00:00')
+-- Standardize Date strings to ISO Format
 UPDATE [dbo].[tblHotfixDetails]
 SET [InstalledOn] = CONVERT(VARCHAR(19), TRY_CONVERT(DATETIME, [InstalledOn]), 120)
 WHERE TRY_CONVERT(DATETIME, [InstalledOn]) IS NOT NULL
   AND [InstalledOn] NOT LIKE '____-__-__ __:__:__';
 
--- Deduplicate across same Computer, Patch ID, and Date (collapses format discrepancies)
+-- Clean up any existing legacy duplicates (merges today's placeholder run with the historical registry run)
 ;WITH CTE AS (
     SELECT 
         *,
         ROW_NUMBER() OVER (
-            PARTITION BY PSComputerName, HotFixID, TRY_CONVERT(DATE, InstalledOn) 
-            ORDER BY InstalledOn DESC
+            PARTITION BY PSComputerName, HotFixID 
+            ORDER BY CASE WHEN InstalledOn LIKE '2026-09-16%' THEN 2 ELSE 1 END ASC, InstalledOn ASC
         ) AS RowNum
     FROM 
         [dbo].[tblHotfixDetails]
@@ -170,3 +177,288 @@ WHERE TRY_CONVERT(DATETIME, InstalledOn) IS NOT NULL
 if (Test-Path -Path $csvPath) {
     Remove-Item -Path $csvPath -Force
 }
+
+
+/*
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[SqlServerVersionReference]') AND type in (N'U'))
+ALTER TABLE [dbo].[SqlServerVersionReference] DROP CONSTRAINT IF EXISTS [DF__SqlServer__IsWit__5CA1C101]
+GO
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[SqlServerVersionReference]') AND type in (N'U'))
+ALTER TABLE [dbo].[SqlServerVersionReference] DROP CONSTRAINT IF EXISTS [DF__SqlServer__IsSec__5BAD9CC8]
+GO
+/****** Object:  Index [IX_SqlServerVersionReference_Major_ReleaseDate]     ******/
+DROP INDEX IF EXISTS [IX_SqlServerVersionReference_Major_ReleaseDate] ON [dbo].[SqlServerVersionReference]
+GO
+/****** Object:  Index [IX_SqlServerVersionReference_KbArticleNumber]     ******/
+DROP INDEX IF EXISTS [IX_SqlServerVersionReference_KbArticleNumber] ON [dbo].[SqlServerVersionReference]
+GO
+/****** Object:  Table [dbo].[SqlServerVersionReference]     ******/
+DROP TABLE IF EXISTS [dbo].[SqlServerVersionReference]
+GO
+/****** Object:  Table [dbo].[SqlServerVersionReference]     ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[SqlServerVersionReference](
+	[VersionId] [int] IDENTITY(1,1) NOT NULL,
+	[MajorVersionNumber] [tinyint] NOT NULL,
+	[MajorVersionName] [varchar](30) NOT NULL,
+	[MinorVersionNumber] [int] NOT NULL,
+	[FullProductVersion] [varchar](25) NOT NULL,
+	[Branch] [varchar](35) NOT NULL,
+	[ReleaseType] [varchar](25) NOT NULL,
+	[MinorVersionName] [varchar](255) NOT NULL,
+	[KbArticleNumber] [varchar](15) NULL,
+	[KbArticleUrl] [varchar](255) NULL,
+	[ReleaseDate] [date] NOT NULL,
+	[IsSecurityUpdate] [bit] NOT NULL,
+	[IsWithdrawn] [bit] NOT NULL,
+ CONSTRAINT [PK_SqlServerVersionReference] PRIMARY KEY CLUSTERED 
+(
+	[VersionId] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+SET IDENTITY_INSERT [dbo].[SqlServerVersionReference] ON 
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (1, 17, N'SQL Server 2025', 5005, N'17.0.5005.3', N'CU9', N'CU', N'Cumulative update 9 (CU9) for SQL Server 2025', N'5122048', N'https://support.microsoft.com/en-us/help/5122048', CAST(N'2026-09-15' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (2, 17, N'SQL Server 2025', 4085, N'17.0.4085.5', N'CU8 GDR', N'GDR', N'Security update for SQL Server 2025 CU8: September 8, 2026', N'5122769', N'https://support.microsoft.com/en-us/help/5122769', CAST(N'2026-09-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (3, 17, N'SQL Server 2025', 4075, N'17.0.4075.5', N'CU8', N'CU', N'Cumulative update 8 (CU8) for SQL Server 2025', N'5104822', N'https://support.microsoft.com/en-us/help/5104822', CAST(N'2026-08-13' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (4, 17, N'SQL Server 2025', 4065, N'17.0.4065.4', N'CU7', N'CU', N'Cumulative update 7 (CU7) for SQL Server 2025', N'5096981', N'https://support.microsoft.com/en-us/help/5096981', CAST(N'2026-07-16' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (5, 17, N'SQL Server 2025', 4060, N'17.0.4060.2', N'CU6 GDR', N'GDR', N'Security update for SQL Server 2025 CU6: July 14, 2026', N'5101346', N'https://support.microsoft.com/en-us/help/5101346', CAST(N'2026-07-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (6, 17, N'SQL Server 2025', 4055, N'17.0.4055.5', N'CU6', N'CU', N'Cumulative update 6 (CU6) for SQL Server 2025', N'5093421', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2025/cumulativeupdate6', CAST(N'2026-06-17' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (7, 17, N'SQL Server 2025', 4045, N'17.0.4045.5', N'CU5', N'CU', N'Cumulative update 5 (CU5) for SQL Server 2025', N'5084896', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2025/cumulativeupdate5', CAST(N'2026-05-20' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (8, 17, N'SQL Server 2025', 4040, N'17.0.4040.1', N'CU4 GDR', N'GDR', N'Security update for SQL Server 2025 CU4: May 12, 2026', N'5089899', N'https://support.microsoft.com/en-us/help/5089899', CAST(N'2026-05-12' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (9, 17, N'SQL Server 2025', 4035, N'17.0.4035.5', N'CU4', N'CU', N'Cumulative update 4 (CU4) for SQL Server 2025', N'5081495', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2025/cumulativeupdate4', CAST(N'2026-04-16' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (10, 17, N'SQL Server 2025', 4030, N'17.0.4030.1', N'CU3 GDR', N'GDR', N'Security update for SQL Server 2025 CU3: April 14, 2026', N'5083245', N'https://support.microsoft.com/en-us/help/5083245', CAST(N'2026-04-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (11, 17, N'SQL Server 2025', 4025, N'17.0.4025.3', N'CU3', N'CU', N'Cumulative update 3 (CU3) for SQL Server 2025', N'5077896', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2025/cumulativeupdate3', CAST(N'2026-03-12' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (12, 17, N'SQL Server 2025', 4020, N'17.0.4020.2', N'CU2 GDR', N'GDR', N'Security update for SQL Server 2025 CU2: March 10, 2026', N'5077466', N'https://support.microsoft.com/en-us/help/5077466', CAST(N'2026-03-10' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (13, 17, N'SQL Server 2025', 4015, N'17.0.4015.4', N'CU2', N'CU', N'Cumulative update 2 (CU2) for SQL Server 2025', N'5075211', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2025/cumulativeupdate2', CAST(N'2026-02-12' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (14, 17, N'SQL Server 2025', 4006, N'17.0.4006.2', N'CU1 v2', N'CU', N'Cumulative update 1 (CU1) for SQL Server 2025 (Rereleased)', N'5078298', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2025/cumulativeupdate1', CAST(N'2026-01-29' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (15, 17, N'SQL Server 2025', 4005, N'17.0.4005.7', N'CU1', N'CU', N'Withdrawn Cumulative update 1 (CU1) for SQL Server 2025', NULL, NULL, CAST(N'2026-01-15' AS Date), 0, 1)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (16, 17, N'SQL Server 2025', 1135, N'17.0.1135.8', N'GDR', N'GDR', N'Security update for SQL Server 2025 GDR: September 8, 2026', N'5122770', N'https://support.microsoft.com/en-us/help/5122770', CAST(N'2026-09-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (17, 17, N'SQL Server 2025', 1125, N'17.0.1125.2', N'GDR', N'GDR', N'Security update for SQL Server 2025 GDR: July 14, 2026', N'5102333', N'https://support.microsoft.com/en-us/help/5102333', CAST(N'2026-07-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (18, 17, N'SQL Server 2025', 1115, N'17.0.1115.1', N'GDR', N'GDR', N'Security update for SQL Server 2025 GDR: May 12, 2026', N'5091223', N'https://support.microsoft.com/en-us/help/5091223', CAST(N'2026-05-12' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (19, 17, N'SQL Server 2025', 1110, N'17.0.1110.1', N'GDR', N'GDR', N'Security update for SQL Server 2025 GDR: April 14, 2026', N'5084814', N'https://support.microsoft.com/en-us/help/5084814', CAST(N'2026-04-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (20, 17, N'SQL Server 2025', 1105, N'17.0.1105.2', N'GDR', N'GDR', N'Security update for SQL Server 2025 GDR: March 10, 2026', N'5077468', N'https://support.microsoft.com/en-us/help/5077468', CAST(N'2026-03-10' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (21, 17, N'SQL Server 2025', 1050, N'17.0.1050.2', N'GDR', N'GDR', N'Security update for SQL Server 2025 GDR: January 13, 2026', N'5073177', N'https://support.microsoft.com/en-us/help/5073177', CAST(N'2026-01-13' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (22, 17, N'SQL Server 2025', 1000, N'17.0.1000.7', N'RTM', N'RTM', N'Microsoft SQL Server 2025 RTM', NULL, N'https://www.microsoft.com/en-us/sql-server/', CAST(N'2025-11-18' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (23, 16, N'SQL Server 2022', 4295, N'16.0.4295.3', N'CU27', N'CU', N'Cumulative update 27 (CU27) for SQL Server 2022', N'5104824', N'https://support.microsoft.com/en-us/help/5104824', CAST(N'2026-09-15' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (24, 16, N'SQL Server 2022', 4275, N'16.0.4275.2', N'CU26 GDR', N'GDR', N'Security update for SQL Server 2022 CU26: September 8, 2026', N'5122768', N'https://support.microsoft.com/en-us/help/5122768', CAST(N'2026-09-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (25, 16, N'SQL Server 2022', 4265, N'16.0.4265.3', N'CU26', N'CU', N'Cumulative update 26 (CU26) for SQL Server 2022', N'5093420', N'https://support.microsoft.com/en-us/help/5093420', CAST(N'2026-07-16' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (26, 16, N'SQL Server 2022', 4262, N'16.0.4262.2', N'CU25 GDR', N'GDR', N'Security update for SQL Server 2022 CU25: July 14, 2026', N'5101347', N'https://support.microsoft.com/en-us/help/5101347', CAST(N'2026-07-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (27, 16, N'SQL Server 2022', 4255, N'16.0.4255.1', N'CU25', N'CU', N'Cumulative update 25 (CU25) for SQL Server 2022', N'5081477', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate25', CAST(N'2026-05-20' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (28, 16, N'SQL Server 2022', 4252, N'16.0.4252.3', N'CU24 GDR', N'GDR', N'Security update for SQL Server 2022 CU24: May 12, 2026', N'5089900', N'https://support.microsoft.com/en-us/help/5089900', CAST(N'2026-05-12' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (29, 16, N'SQL Server 2022', 4250, N'16.0.4250.1', N'CU24 GDR', N'GDR', N'Security update for SQL Server 2022 CU24: April 14, 2026', N'5083252', N'https://support.microsoft.com/en-us/help/5083252', CAST(N'2026-04-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (30, 16, N'SQL Server 2022', 4245, N'16.0.4245.2', N'CU24', N'CU', N'Cumulative update 24 (CU24) for SQL Server 2022', N'5080999', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate24', CAST(N'2026-03-12' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (31, 16, N'SQL Server 2022', 4240, N'16.0.4240.4', N'CU23 GDR', N'GDR', N'Security update for SQL Server 2022 CU23: March 10, 2026', N'5077464', N'https://support.microsoft.com/en-us/help/5077464', CAST(N'2026-03-10' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (32, 16, N'SQL Server 2022', 4236, N'16.0.4236.2', N'CU23 v2', N'CU', N'Cumulative update 23 (CU23) for SQL Server 2022 (Rereleased)', N'5078297', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate23', CAST(N'2026-01-29' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (33, 16, N'SQL Server 2022', 4235, N'16.0.4235.2', N'CU23', N'CU', N'Withdrawn Cumulative update 23 (CU23) for SQL Server 2022', N'5074819', NULL, CAST(N'2026-01-15' AS Date), 0, 1)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (34, 16, N'SQL Server 2022', 4230, N'16.0.4230.2', N'CU22 GDR', N'GDR', N'Security update for SQL Server 2022 CU22: January 13, 2026', N'5072936', N'https://support.microsoft.com/en-us/help/5072936', CAST(N'2026-01-13' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (35, 16, N'SQL Server 2022', 4225, N'16.0.4225.2', N'CU22', N'CU', N'Cumulative update 22 (CU22) for SQL Server 2022', N'5068450', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate22', CAST(N'2025-11-13' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (36, 16, N'SQL Server 2022', 4222, N'16.0.4222.2', N'CU21 GDR', N'GDR', N'Security update for SQL Server 2022 CU21: November 11, 2025', N'5068406', N'https://support.microsoft.com/en-us/help/5068406', CAST(N'2025-11-11' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (37, 16, N'SQL Server 2022', 4215, N'16.0.4215.2', N'CU21', N'CU', N'Cumulative update 21 (CU21) for SQL Server 2022', N'5065865', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate21', CAST(N'2025-09-11' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (38, 16, N'SQL Server 2022', 4212, N'16.0.4212.1', N'CU20 GDR', N'GDR', N'Security update for SQL Server 2022 CU20: September 9, 2025', N'5065220', N'https://support.microsoft.com/en-us/help/5065220', CAST(N'2025-09-09' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (39, 16, N'SQL Server 2022', 4210, N'16.0.4210.1', N'CU20 GDR', N'GDR', N'Security update for SQL Server 2022 CU20: August 12, 2025', N'5063814', N'https://support.microsoft.com/en-us/help/5063814', CAST(N'2025-08-12' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (40, 16, N'SQL Server 2022', 4205, N'16.0.4205.1', N'CU20', N'CU', N'Cumulative update 20 (CU20) for SQL Server 2022', N'5059390', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate20', CAST(N'2025-07-10' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (41, 16, N'SQL Server 2022', 4200, N'16.0.4200.1', N'CU19 GDR', N'GDR', N'Security update for SQL Server 2022 CU19: July 8, 2025', N'5058721', N'https://support.microsoft.com/en-us/help/5058721', CAST(N'2025-07-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (42, 16, N'SQL Server 2022', 4195, N'16.0.4195.2', N'CU19', N'CU', N'Cumulative update 19 (CU19) for SQL Server 2022', N'5054531', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate19', CAST(N'2025-05-15' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (43, 16, N'SQL Server 2022', 4185, N'16.0.4185.3', N'CU18', N'CU', N'Cumulative update 18 (CU18) for SQL Server 2022', N'5050771', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate18', CAST(N'2025-03-13' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (44, 16, N'SQL Server 2022', 4175, N'16.0.4175.1', N'CU17', N'CU', N'Cumulative update 17 (CU17) for SQL Server 2022', N'5048038', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate17', CAST(N'2025-01-16' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (45, 16, N'SQL Server 2022', 4165, N'16.0.4165.4', N'CU16', N'CU', N'Cumulative update 16 (CU16) for SQL Server 2022', N'5048033', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2022/cumulativeupdate16', CAST(N'2024-11-14' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (46, 16, N'SQL Server 2022', 1200, N'16.0.1200.5', N'GDR', N'GDR', N'Security update for SQL Server 2022 GDR: September 8, 2026', N'5122771', N'https://support.microsoft.com/en-us/help/5122771', CAST(N'2026-09-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (47, 16, N'SQL Server 2022', 1190, N'16.0.1190.2', N'GDR', N'GDR', N'Security update for SQL Server 2022 GDR: July 14, 2026', N'5102334', N'https://support.microsoft.com/en-us/help/5102334', CAST(N'2026-07-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (48, 16, N'SQL Server 2022', 1000, N'16.0.1000.6', N'RTM', N'RTM', N'Microsoft SQL Server 2022 RTM', NULL, N'https://www.microsoft.com/en-us/sql-server/sql-server-2022', CAST(N'2022-11-16' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (49, 15, N'SQL Server 2019', 4490, N'15.0.4490.9', N'CU32 GDR', N'GDR', N'Security update for SQL Server 2019 CU32: September 8, 2026', N'5122772', N'https://support.microsoft.com/en-us/help/5122772', CAST(N'2026-09-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (50, 15, N'SQL Server 2019', 4480, N'15.0.4480.2', N'CU32 GDR', N'GDR', N'Security update for SQL Server 2019 CU32: July 14, 2026', N'5102335', N'https://support.microsoft.com/en-us/help/5102335', CAST(N'2026-07-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (51, 15, N'SQL Server 2019', 4470, N'15.0.4470.1', N'CU32 GDR', N'GDR', N'Security update for SQL Server 2019 CU32: May 12, 2026', N'5090407', N'https://support.microsoft.com/en-us/help/5090407', CAST(N'2026-05-12' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (52, 15, N'SQL Server 2019', 4465, N'15.0.4465.1', N'CU32 GDR', N'GDR', N'Security update for SQL Server 2019 CU32: April 14, 2026', N'5084816', N'https://support.microsoft.com/en-us/help/5084816', CAST(N'2026-04-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (53, 15, N'SQL Server 2019', 4460, N'15.0.4460.4', N'CU32 GDR', N'GDR', N'Security update for SQL Server 2019 CU32: March 10, 2026', N'5077469', N'https://support.microsoft.com/en-us/help/5077469', CAST(N'2026-03-10' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (54, 15, N'SQL Server 2019', 4455, N'15.0.4455.2', N'CU32 GDR', N'GDR', N'Security update for SQL Server 2019 CU32: November 11, 2025', N'5068404', N'https://support.microsoft.com/en-us/help/5068404', CAST(N'2025-11-11' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (55, 15, N'SQL Server 2019', 4445, N'15.0.4445.1', N'CU32 GDR', N'GDR', N'Security update for SQL Server 2019 CU32: September 9, 2025', N'5065222', N'https://support.microsoft.com/en-us/help/5065222', CAST(N'2025-09-09' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (56, 15, N'SQL Server 2019', 4440, N'15.0.4440.1', N'CU32 GDR', N'GDR', N'Security update for SQL Server 2019 CU32: August 12, 2025', N'5063757', N'https://support.microsoft.com/en-us/help/5063757', CAST(N'2025-08-12' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (57, 15, N'SQL Server 2019', 4435, N'15.0.4435.7', N'CU32 GDR', N'GDR', N'Security update for SQL Server 2019 CU32: July 8, 2025', N'5058722', N'https://support.microsoft.com/en-us/help/5058722', CAST(N'2025-07-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (58, 15, N'SQL Server 2019', 4430, N'15.0.4430.1', N'CU32', N'CU', N'Cumulative update 32 (CU32) for SQL Server 2019', N'5054833', N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2019/cumulativeupdate32', CAST(N'2025-02-27' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (59, 15, N'SQL Server 2019', 2190, N'15.0.2190.7', N'GDR', N'GDR', N'Security update for SQL Server 2019 GDR: September 8, 2026', N'5122773', N'https://support.microsoft.com/en-us/help/5122773', CAST(N'2026-09-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (60, 15, N'SQL Server 2019', 2180, N'15.0.2180.2', N'GDR', N'GDR', N'Security update for SQL Server 2019 GDR: July 14, 2026', N'5102336', N'https://support.microsoft.com/en-us/help/5102336', CAST(N'2026-07-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (61, 15, N'SQL Server 2019', 2000, N'15.0.2000.5', N'RTM', N'RTM', N'Microsoft SQL Server 2019 RTM', NULL, N'https://www.microsoft.com/en-us/sql-server/sql-server-2019', CAST(N'2019-11-04' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (62, 14, N'SQL Server 2017', 3550, N'14.0.3550.4', N'CU31 GDR', N'GDR', N'Security update for SQL Server 2017 CU31: September 8, 2026', N'5122774', N'https://support.microsoft.com/en-us/help/5122774', CAST(N'2026-09-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (63, 14, N'SQL Server 2017', 3540, N'14.0.3540.1', N'CU31 GDR', N'GDR', N'Security update for SQL Server 2017 CU31: July 14, 2026', N'5102337', N'https://support.microsoft.com/en-us/help/5102337', CAST(N'2026-07-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (64, 14, N'SQL Server 2017', 3456, N'14.0.3456.2', N'CU31', N'CU', N'Cumulative update 31 (CU31) for SQL Server 2017', NULL, N'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/sqlserver-2017/cumulativeupdate31', CAST(N'2022-09-20' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (65, 14, N'SQL Server 2017', 2130, N'14.0.2130.4', N'GDR', N'GDR', N'Security update for SQL Server 2017 GDR: September 8, 2026', N'5122775', N'https://support.microsoft.com/en-us/help/5122775', CAST(N'2026-09-08' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (66, 14, N'SQL Server 2017', 1000, N'14.0.1000.169', N'RTM', N'RTM', N'Microsoft SQL Server 2017 RTM', NULL, N'https://www.microsoft.com/en-us/sql-server/sql-server-2017', CAST(N'2017-10-02' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (67, 13, N'SQL Server 2016', 7095, N'13.0.7095.1', N'SP3 Azure GDR', N'GDR', N'Security update for SQL Server 2016 SP3 Azure Connect Feature Pack: July 14, 2026', N'5102339', N'https://support.microsoft.com/en-us/help/5102339', CAST(N'2026-07-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (68, 13, N'SQL Server 2016', 6500, N'13.0.6500.1', N'SP3 GDR', N'GDR', N'Security update for SQL Server 2016 SP3 GDR: July 14, 2026', N'5102340', N'https://support.microsoft.com/en-us/help/5102340', CAST(N'2026-07-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (69, 13, N'SQL Server 2016', 6300, N'13.0.6300.2', N'SP3', N'Service Pack', N'Microsoft SQL Server 2016 Service Pack 3 (SP3)', N'5003279', N'https://support.microsoft.com/en-us/help/5003279', CAST(N'2021-09-15' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (70, 13, N'SQL Server 2016', 5888, N'13.0.5888.11', N'SP2 CU17', N'CU', N'Cumulative update 17 (CU17) for SQL Server 2016 Service Pack 2', N'5001092', N'https://support.microsoft.com/en-us/help/5001092', CAST(N'2021-03-29' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (71, 13, N'SQL Server 2016', 5026, N'13.0.5026.0', N'SP2', N'Service Pack', N'Microsoft SQL Server 2016 Service Pack 2 (SP2)', N'4052908', N'https://support.microsoft.com/en-us/help/4052908', CAST(N'2018-04-24' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (72, 13, N'SQL Server 2016', 4001, N'13.0.4001.0', N'SP1', N'Service Pack', N'Microsoft SQL Server 2016 Service Pack 1 (SP1)', N'3182545', N'https://support.microsoft.com/en-us/help/3182545', CAST(N'2016-11-16' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (73, 13, N'SQL Server 2016', 1601, N'13.0.1601.5', N'RTM', N'RTM', N'Microsoft SQL Server 2016 RTM', NULL, N'https://docs.microsoft.com/en-us/sql/sql-server/?view=sql-server-2016', CAST(N'2016-06-01' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (74, 12, N'SQL Server 2014', 6449, N'12.0.6449.1', N'SP3 CU4 GDR', N'GDR', N'Security update for SQL Server 2014 SP3 CU4: October 10, 2023', N'5029185', N'https://support.microsoft.com/en-us/help/5029185', CAST(N'2023-10-10' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (75, 12, N'SQL Server 2014', 6329, N'12.0.6329.1', N'SP3 CU4', N'CU', N'Cumulative update package 4 (CU4) for SQL Server 2014 Service Pack 3', N'4500181', N'https://support.microsoft.com/en-us/help/4500181', CAST(N'2019-07-29' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (76, 12, N'SQL Server 2014', 6024, N'12.0.6024.0', N'SP3', N'Service Pack', N'SQL Server 2014 Service Pack 3 (SP3)', N'4022619', N'https://support.microsoft.com/en-us/help/4022619', CAST(N'2018-10-30' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (77, 12, N'SQL Server 2014', 5000, N'12.0.5000.0', N'SP2', N'Service Pack', N'SQL Server 2014 Service Pack 2 (SP2)', NULL, N'https://www.microsoft.com/en-us/download/details.aspx?id=53168', CAST(N'2016-07-11' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (78, 12, N'SQL Server 2014', 4100, N'12.0.4100.1', N'SP1', N'Service Pack', N'SQL Server 2014 Service Pack 1 (SP1)', NULL, N'http://www.microsoft.com/en-us/download/details.aspx?id=46694', CAST(N'2015-05-14' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (79, 12, N'SQL Server 2014', 2000, N'12.0.2000.8', N'RTM', N'RTM', N'SQL Server 2014 RTM', NULL, N'http://technet.microsoft.com/en-us/sqlserver/dn135309', CAST(N'2014-04-01' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (80, 11, N'SQL Server 2012', 7512, N'11.0.7512.11', N'SP4 GDR', N'GDR', N'Security update for SQL Server 2012 SP4 GDR: February 14, 2023', N'5021123', N'https://support.microsoft.com/en-us/help/5021123', CAST(N'2023-02-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (81, 11, N'SQL Server 2012', 7001, N'11.0.7001.0', N'SP4', N'Service Pack', N'SQL Server 2012 Service Pack 4 (SP4)', NULL, N'https://www.microsoft.com/en-us/download/details.aspx?id=56040', CAST(N'2017-10-05' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (82, 11, N'SQL Server 2012', 6020, N'11.0.6020.0', N'SP3', N'Service Pack', N'SQL Server 2012 Service Pack 3 (SP3)', NULL, N'https://www.microsoft.com/en-us/download/details.aspx?id=49996', CAST(N'2015-11-23' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (83, 11, N'SQL Server 2012', 5058, N'11.0.5058.0', N'SP2', N'Service Pack', N'SQL Server 2012 Service Pack 2 (SP2)', NULL, N'http://www.microsoft.com/en-us/download/details.aspx?id=43340', CAST(N'2014-06-10' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (84, 11, N'SQL Server 2012', 3000, N'11.0.3000.0', N'SP1', N'Service Pack', N'SQL Server 2012 Service Pack 1 (SP1)', NULL, N'http://www.microsoft.com/en-us/download/details.aspx?id=35575', CAST(N'2012-11-06' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (85, 11, N'SQL Server 2012', 2100, N'11.0.2100.60', N'RTM', N'RTM', N'SQL Server 2012 RTM', NULL, NULL, CAST(N'2012-03-06' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (86, 10, N'SQL Server 2008 R2', 6785, N'10.50.6785.2', N'SP3 GDR', N'GDR', N'Security update for SQL Server 2008 R2 SP3 GDR: February 14, 2023', N'5021112', N'https://support.microsoft.com/en-us/help/5021112', CAST(N'2023-02-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (87, 10, N'SQL Server 2008 R2', 6000, N'10.50.6000.34', N'SP3', N'Service Pack', N'SQL Server 2008 R2 Service Pack 3 (SP3)', NULL, N'http://www.microsoft.com/en-us/download/details.aspx?id=44271', CAST(N'2014-09-26' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (88, 10, N'SQL Server 2008 R2', 4000, N'10.50.4000.0', N'SP2', N'Service Pack', N'SQL Server 2008 R2 Service Pack 2 (SP2)', NULL, N'http://www.microsoft.com/en-us/download/details.aspx?id=30437', CAST(N'2012-07-26' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (89, 10, N'SQL Server 2008 R2', 2500, N'10.50.2500.0', N'SP1', N'Service Pack', N'SQL Server 2008 R2 Service Pack 1 (SP1)', NULL, N'http://www.microsoft.com/download/en/details.aspx?id=26727', CAST(N'2011-07-11' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (90, 10, N'SQL Server 2008 R2', 1600, N'10.50.1600.1', N'RTM', N'RTM', N'SQL Server 2008 R2 RTM', NULL, NULL, CAST(N'2010-04-21' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (91, 10, N'SQL Server 2008', 6814, N'10.0.6814.4', N'SP4 GDR', N'GDR', N'Security update for SQL Server 2008 SP4 GDR: February 14, 2023', N'5020863', N'https://support.microsoft.com/en-us/help/5020863', CAST(N'2023-02-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (92, 10, N'SQL Server 2008', 6000, N'10.0.6000.29', N'SP4', N'Service Pack', N'SQL Server 2008 Service Pack 4 (SP4)', NULL, N'http://www.microsoft.com/en-us/download/details.aspx?id=44278', CAST(N'2014-09-30' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (93, 10, N'SQL Server 2008', 5500, N'10.0.5500.0', N'SP3', N'Service Pack', N'SQL Server 2008 Service Pack 3 (SP3)', NULL, N'http://www.microsoft.com/download/en/details.aspx?id=27594', CAST(N'2011-10-06' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (94, 10, N'SQL Server 2008', 4000, N'10.0.4000.0', N'SP2', N'Service Pack', N'SQL Server 2008 Service Pack 2 (SP2)', NULL, N'https://www.microsoft.com/en-us/download/details.aspx?id=12548', CAST(N'2010-09-29' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (95, 10, N'SQL Server 2008', 2531, N'10.0.2531.0', N'SP1', N'Service Pack', N'SQL Server 2008 Service Pack 1 (SP1)', NULL, N'https://www.microsoft.com/en-us/download/details.aspx?id=20302', CAST(N'2009-04-07' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (96, 10, N'SQL Server 2008', 1600, N'10.0.1600.22', N'RTM', N'RTM', N'SQL Server 2008 RTM', NULL, N'http://msdn.microsoft.com/en-us/subscriptions/downloads/details/default.aspx?pm=pid%3a334', CAST(N'2008-08-07' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (97, 9, N'SQL Server 2005', 5324, N'9.0.5324', N'SP4 QFE', N'GDR', N'MS12-070: Description of the security update for SQL Server 2005 Service Pack 4 QFE', N'2716427', N'https://support.microsoft.com/en-us/help/2716427', CAST(N'2012-10-09' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (98, 9, N'SQL Server 2005', 5000, N'9.0.5000', N'SP4', N'Service Pack', N'SQL Server 2005 Service Pack 4 (SP4)', N'2463332', N'https://support.microsoft.com/en-us/help/2463332', CAST(N'2010-12-17' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (99, 9, N'SQL Server 2005', 4035, N'9.0.4035', N'SP3', N'Service Pack', N'SQL Server 2005 Service Pack 3 (SP3)', N'955706', N'https://support.microsoft.com/en-us/help/955706', CAST(N'2008-12-15' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (100, 9, N'SQL Server 2005', 2047, N'9.0.2047', N'SP2', N'Service Pack', N'SQL Server 2005 Service Pack 2 (SP2)', NULL, N'http://www.microsoft.com/downloads/details.aspx?FamilyId=d07219b2-1e23-49c8-8f0c-63fa18f26d3a', CAST(N'2007-02-19' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (101, 9, N'SQL Server 2005', 2047, N'9.0.2047', N'SP1', N'Service Pack', N'SQL Server 2005 Service Pack 1 (SP1)', NULL, N'http://www.microsoft.com/downloads/details.aspx?FamilyID=CB6C71EA-D649-47FF-9176-E7CAC58FD4BC', CAST(N'2006-04-18' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (102, 9, N'SQL Server 2005', 1399, N'9.0.1399', N'RTM', N'RTM', N'SQL Server 2005 RTM', NULL, NULL, CAST(N'2005-11-07' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (103, 8, N'SQL Server 2000', 2305, N'8.0.2305', N'SP4 QFE', N'GDR', N'MS12-060: Description of the security update for SQL Server 2000 Service Pack 4 QFE: August 14, 2012', N'983811', N'https://support.microsoft.com/en-us/help/983811', CAST(N'2012-08-14' AS Date), 1, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (104, 8, N'SQL Server 2000', 2039, N'8.0.2039', N'SP4', N'Service Pack', N'SQL Server 2000 Service Pack 4 (SP4)', NULL, N'http://www.microsoft.com/downloads/details.aspx?FamilyId=8E2DFC8D-C20E-4446-99A9-B7F0213F8BC5', CAST(N'2005-05-06' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (105, 8, N'SQL Server 2000', 760, N'8.0.760', N'SP3', N'Service Pack', N'SQL Server 2000 Service Pack 3 (SP3 / SP3a)', NULL, N'https://www.microsoft.com/en-us/download/details.aspx?id=17155', CAST(N'2003-08-27' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (106, 8, N'SQL Server 2000', 532, N'8.0.532', N'SP2', N'Service Pack', N'SQL Server 2000 Service Pack 2 (SP2)', NULL, N'http://www.microsoft.com/downloads/details.aspx?FamilyID=75672496-af8e-40dc-853e-ad2c9fe96882', CAST(N'2003-02-04' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (107, 8, N'SQL Server 2000', 384, N'8.0.384', N'SP1', N'Service Pack', N'SQL Server 2000 Service Pack 1 (SP1)', NULL, N'http://www.microsoft.com/downloads/details.aspx?FamilyID=DFF43C50-51DF-4FE0-9717-DE41FB48556E', CAST(N'2001-06-11' AS Date), 0, 0)
+GO
+INSERT [dbo].[SqlServerVersionReference] ([VersionId], [MajorVersionNumber], [MajorVersionName], [MinorVersionNumber], [FullProductVersion], [Branch], [ReleaseType], [MinorVersionName], [KbArticleNumber], [KbArticleUrl], [ReleaseDate], [IsSecurityUpdate], [IsWithdrawn]) VALUES (108, 8, N'SQL Server 2000', 194, N'8.0.194', N'RTM', N'RTM', N'SQL Server 2000 RTM (no SP)', NULL, NULL, CAST(N'2000-11-30' AS Date), 0, 0)
+GO
+SET IDENTITY_INSERT [dbo].[SqlServerVersionReference] OFF
+GO
+SET ANSI_PADDING ON
+GO
+/****** Object:  Index [IX_SqlServerVersionReference_KbArticleNumber]    Script Date: 9/16/2026 10:55:16 AM ******/
+CREATE NONCLUSTERED INDEX [IX_SqlServerVersionReference_KbArticleNumber] ON [dbo].[SqlServerVersionReference]
+(
+	[KbArticleNumber] ASC
+)
+INCLUDE([MajorVersionNumber],[MinorVersionNumber],[FullProductVersion],[MajorVersionName],[Branch]) WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, SORT_IN_TEMPDB = OFF, DROP_EXISTING = OFF, ONLINE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+GO
+/****** Object:  Index [IX_SqlServerVersionReference_Major_ReleaseDate]    Script Date: 9/16/2026 10:55:16 AM ******/
+CREATE NONCLUSTERED INDEX [IX_SqlServerVersionReference_Major_ReleaseDate] ON [dbo].[SqlServerVersionReference]
+(
+	[MajorVersionNumber] ASC,
+	[ReleaseDate] DESC
+)
+INCLUDE([MinorVersionNumber],[FullProductVersion],[Branch],[ReleaseType]) WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, SORT_IN_TEMPDB = OFF, DROP_EXISTING = OFF, ONLINE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+GO
+ALTER TABLE [dbo].[SqlServerVersionReference] ADD  DEFAULT ((0)) FOR [IsSecurityUpdate]
+GO
+ALTER TABLE [dbo].[SqlServerVersionReference] ADD  DEFAULT ((0)) FOR [IsWithdrawn]
+GO
+*/
