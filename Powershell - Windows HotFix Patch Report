@@ -1,42 +1,136 @@
-# Pass server name and database name where tblHotfixDetails will be created
+# Set working location to standard C:\ filesystem to avoid SQLSERVER:\ provider issues
+Set-Location -Path "C:\"
 
+# Target database
 $databaseName = "tempdb"
 $serverName =  "$(ESCAPE_SQUOTE(SRVR))"
 
-# Retrieve the default backup directory
-
+# Retrieve default backup directory or data path using SERVERPROPERTY
 $backupDirectory = Invoke-Sqlcmd -Query "
-DECLARE @BackupDirectory NVARCHAR(4000);
-EXEC master.dbo.xp_instance_regread 
-    N'HKEY_LOCAL_MACHINE', 
-    N'Software\Microsoft\MSSQLServer\MSSQLServer', 
-    N'BackupDirectory', 
-    @BackupDirectory OUTPUT;
-SELECT @BackupDirectory AS DefaultBackupDirectory;
-"  -ServerInstance $serverName  -Database "master" | Select-Object -ExpandProperty DefaultBackupDirectory
+SELECT COALESCE(
+    CAST(SERVERPROPERTY('InstanceDefaultBackupPath') AS NVARCHAR(4000)),
+    CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS NVARCHAR(4000)),
+    'C:\Temp'
+) AS DefaultBackupDirectory;
+" -ServerInstance $serverName -Database "master" | Select-Object -ExpandProperty DefaultBackupDirectory
 
-# Define the path for the CSV file
-$csvPath = "$backupDirectory\HotFix.csv"
+# Fallback to Windows TEMP directory if directory does not exist
+if ([string]::IsNullOrWhiteSpace($backupDirectory) -or !(Test-Path -Path $backupDirectory)) {
+    $backupDirectory = $env:TEMP
+}
 
-# Export hotfix details to CSV
-Get-Hotfix | Where-Object { $_.InstalledOn -gt (Get-Date).AddMonths(-3) } | 
-    Select-Object PSComputerName, InstalledOn, Description, HotFixID, InstalledBy | 
-    Export-Csv -Path $csvPath -NoTypeInformation -Delimiter ','
+# Construct CSV Path
+$csvPath = Join-Path -Path $backupDirectory -ChildPath "HotFix.csv"
+$oneYearAgo = (Get-Date).AddYears(-1)
+$patchList = [System.Collections.Generic.List[PSObject]]::new()
 
-# Import CSV data into SQL Server table
+# -------------------------------------------------------------------------
+# 1. OS HOTFIXES (Component-Based Servicing / Windows Update)
+# -------------------------------------------------------------------------
+$osHotfixes = Get-Hotfix -ErrorAction SilentlyContinue | Where-Object { 
+    if ($_.InstalledOn) {
+        try { ([datetime]$_.InstalledOn) -ge $oneYearAgo } catch { $true }
+    } else {
+        $true
+    }
+}
+
+foreach ($patch in $osHotfixes) {
+    $instDateStr = if ($patch.InstalledOn) {
+        try { ([datetime]$patch.InstalledOn).ToString("yyyy-MM-dd HH:mm:ss") } catch { $null }
+    } else { $null }
+
+    $patchList.Add([PSCustomObject]@{
+        PSComputerName = [string]$patch.PSComputerName
+        InstalledOn    = $instDateStr
+        Description    = [string]$patch.Description
+        HotFixID       = [string]$patch.HotFixID
+        InstalledBy    = [string]$patch.InstalledBy
+    })
+}
+
+# -------------------------------------------------------------------------
+# 2. SQL SERVER & APPLICATION PATCHES (Windows Installer Registry Hive)
+# -------------------------------------------------------------------------
+$regUninstallPaths = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+    "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+)
+
+$appUpdates = Get-ItemProperty -Path $regUninstallPaths -ErrorAction SilentlyContinue | Where-Object {
+    ($_.DisplayName -match 'SQL Server' -or $_.DisplayName -match 'KB\d+') -and
+    ($_.DisplayName -match 'Update|Hotfix|CU\d+|Cumulative Update|GDR|Service Pack')
+}
+
+foreach ($app in $appUpdates) {
+    # Extract KB number from DisplayName or Key Name
+    $kb = if ($app.DisplayName -match 'KB\d+') { $matches[0] } else { $null }
+    if (-not $kb -and $app.PSChildName -match 'KB\d+') { $kb = $matches[0] }
+    if (-not $kb) { $kb = "SQL-Patch" }
+
+    # Parse registry InstallDate (typically formatted as yyyyMMdd)
+    $parsedDate = $null
+    if ($app.InstallDate -and $app.InstallDate -match '^\d{8}$') {
+        try { $parsedDate = [datetime]::ParseExact($app.InstallDate, 'yyyyMMdd', $null) } catch { }
+    } elseif ($app.InstallDate) {
+        try { $parsedDate = [datetime]$app.InstallDate } catch { }
+    }
+
+    # Only include if within 1 year or if date is not specified
+    if (-not $parsedDate -or $parsedDate -ge $oneYearAgo) {
+        $instDateStr = if ($parsedDate) { $parsedDate.ToString("yyyy-MM-dd HH:mm:ss") } else { $null }
+        $installer = if ($app.InstalledBy) { [string]$app.InstalledBy } else { "NT AUTHORITY\SYSTEM" }
+
+        $patchList.Add([PSCustomObject]@{
+            PSComputerName = $env:COMPUTERNAME
+            InstalledOn    = $instDateStr
+            Description    = [string]$app.DisplayName
+            HotFixID       = $kb
+            InstalledBy    = $installer
+        })
+    }
+}
+
+# -------------------------------------------------------------------------
+# 3. DIRECT SQL INSTANCE LEVEL CHECK (Guarantees current active SQL CU is recorded)
+# -------------------------------------------------------------------------
+$sqlInfo = Invoke-Sqlcmd -Query "
+SELECT 
+    CAST(SERVERPROPERTY('MachineName') AS NVARCHAR(255)) AS PSComputerName,
+    CAST(SERVERPROPERTY('ProductUpdateReference') AS NVARCHAR(50)) AS HotFixID,
+    CAST(SERVERPROPERTY('ProductUpdateLevel') AS NVARCHAR(50)) + ' (' + CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(50)) + ')' AS Description
+" -ServerInstance $serverName -Database "master"
+
+if ($sqlInfo -and $sqlInfo.HotFixID) {
+    $patchList.Add([PSCustomObject]@{
+        PSComputerName = [string]$sqlInfo.PSComputerName
+        InstalledOn    = (Get-Date).ToString("yyyy-MM-dd 00:00:00")
+        Description    = "SQL Server Update " + [string]$sqlInfo.Description
+        HotFixID       = [string]$sqlInfo.HotFixID
+        InstalledBy    = "SQL Engine Setup"
+    })
+}
+
+# Export all patches to CSV
+$patchList | Export-Csv -Path $csvPath -NoTypeInformation -Delimiter ','
+
+# -------------------------------------------------------------------------
+# 4. IMPORT INTO SQL SERVER & DEDUPLICATE
+# -------------------------------------------------------------------------
 Invoke-Sqlcmd -Query "
 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[tblHotfixDetails]') AND type in (N'U'))
 BEGIN
-CREATE TABLE [dbo].[tblHotfixDetails](
-	[PSComputerName] [nvarchar](255) NULL,
-	[InstalledOn] [nvarchar](50) NULL,
-	[Description] [nvarchar](255) NULL,
-	[HotFixID] [nvarchar](50) NULL,
-	[InstalledBy] [nvarchar](255) NULL
-) ON [PRIMARY]
+    CREATE TABLE [dbo].[tblHotfixDetails](
+        [PSComputerName] [nvarchar](255) NULL,
+        [InstalledOn] [nvarchar](50) NULL,
+        [Description] [nvarchar](255) NULL,
+        [HotFixID] [nvarchar](50) NULL,
+        [InstalledBy] [nvarchar](255) NULL
+    ) ON [PRIMARY]
 END
 GO
-BULK INSERT [tblHotfixDetails]
+
+BULK INSERT [dbo].[tblHotfixDetails]
 FROM '$csvPath'
 WITH (
     FIELDTERMINATOR = ',',
@@ -45,34 +139,34 @@ WITH (
     FORMAT = 'CSV'
 );
 
+-- FIX FOR DUPLICATES: Standardize existing date formats (converts '8/1/2026 12:00:00 AM' -> '2026-08-01 00:00:00')
+UPDATE [dbo].[tblHotfixDetails]
+SET [InstalledOn] = CONVERT(VARCHAR(19), TRY_CONVERT(DATETIME, [InstalledOn]), 120)
+WHERE TRY_CONVERT(DATETIME, [InstalledOn]) IS NOT NULL
+  AND [InstalledOn] NOT LIKE '____-__-__ __:__:__';
+
+-- Deduplicate across same Computer, Patch ID, and Date (collapses format discrepancies)
 ;WITH CTE AS (
     SELECT 
         *,
-        ROW_NUMBER() OVER (PARTITION BY PSComputerName, InstalledOn, Description, HotFixID, InstalledBy ORDER BY (SELECT NULL)) AS RowNum
+        ROW_NUMBER() OVER (
+            PARTITION BY PSComputerName, HotFixID, TRY_CONVERT(DATE, InstalledOn) 
+            ORDER BY InstalledOn DESC
+        ) AS RowNum
     FROM 
-        tblHotfixDetails
+        [dbo].[tblHotfixDetails]
 )
 DELETE FROM CTE
 WHERE RowNum > 1;
+
+-- 2-year retention cleanup
 DELETE FROM [dbo].[tblHotfixDetails]
-WHERE InstalledOn < DATEADD(MONTH, -6, GETDATE());
+WHERE TRY_CONVERT(DATETIME, InstalledOn) IS NOT NULL
+  AND TRY_CONVERT(DATETIME, InstalledOn) < DATEADD(YEAR, -2, GETDATE());
 
-" -ServerInstance $serverName  -Database $databaseName 
+" -ServerInstance $serverName -Database $databaseName
 
-# Delete the CSV file from disk
-Remove-Item -Path $csvPath -Force
-
-
-<#
--- Get the maximum PatchDate
-DECLARE @MaxPatchDate DATETIME;
-SELECT @MaxPatchDate = MAX(installedon) FROM tblHotfixDetails;
-
--- Get all patches done on the maximum PatchDate
-SELECT 
-    convert(varchar(16), @MaxPatchDate,121) + '(Total: ' + convert(varchar(5), COUNT(*) ) + ' [' +   STRING_AGG(HotFixID + '('+ Description, '), ') + '])'  LastPatchDate
-FROM 
-    tblHotfixDetails
-WHERE 
-    installedon = @MaxPatchDate;
-#>
+# Clean up CSV file from disk
+if (Test-Path -Path $csvPath) {
+    Remove-Item -Path $csvPath -Force
+}
