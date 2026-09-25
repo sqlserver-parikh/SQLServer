@@ -52,6 +52,8 @@ CREATE  PROCEDURE dbo.usp_RunDatabaseIntegrityCheck
     , @RetryCPUCheck            INT            = 5
     , @SplitGroups              INT            = 7  -- Ignored if @RunTimeMtoS is passed, 7 will make it run in 7 equal groups to complete CheCKDB in 7 runs.
     , @DatabaseOrder            NVARCHAR(128)   = 'DATABASE_SIZE_ASC' -- Specify the database order (e.g., 'DATABASE_NAME_ASC', 'DATABASE_SIZE_DESC') -- If single database is taking 80% of total CHECKDB run time on server then that database will be always first.
+    , @OverdueAlertDays         INT            = 20  -- Alert if last successful CHECKDB is this many days or older (or never)
+    , @OverdueAlertEmail        NVARCHAR(256)  = N'dba@company.com' -- Recipients for overdue CHECKDB HTML mail
 AS
 BEGIN
 
@@ -133,24 +135,37 @@ Valid Values:
     - DATABASE_NAME_ASC / DATABASE_NAME_DESC: Alphabetical order.
     - DATABASE_SIZE_ASC / DATABASE_SIZE_DESC: Order by data volume.
     - DATABASE_RUNTIME_DESC: Order by longest historical execution time.
-Note: If a single database's historical runtime exceeds 80% of the available daily window, it is automatically moved to the front of the queue to ensure it gets started immediately.
+Note: If a single database's historical runtime exceeds 80% of the available daily window, it is automatically moved to the front of the queue to ensure it gets started immediately. This boost is disabled when any database is overdue per @OverdueAlertDays; execution order is then forced to DATABASE_SIZE_ASC so remaining databases can be covered.
+
+@OverdueAlertDays
+Data Type: INT
+Default: 20
+Description: Number of days since the last successful CHECKDB after which a database is considered overdue (including databases never checked).
+Usage: If any database has LastGoodCheckDbTime NULL or older than this many days, a SELECT of overdue databases is returned immediately and an HTML alert is sent immediately to @OverdueAlertEmail. CHECKDB execution order is forced to smallest-first (DATABASE_SIZE_ASC) without the 80% runtime boost.
+Valid Range: 0 or greater.
+
+@OverdueAlertEmail
+Data Type: NVARCHAR(256)
+Default: myteamemail@company.com
+Description: Recipient list for the overdue CHECKDB HTML email (Database Mail).
+Usage: Mail is sent immediately when overdue databases are found (independent of @Execute). Mail uses the instance default Database Mail profile; CHECKDB continues if mail cannot be sent.
 
 ----------------------------------------------------------------------------------------------------
 EXAMPLES
 ----------------------------------------------------------------------------------------------------
 Example A: Standard Weekly Cycle
 Run with default settings (7-day cycle, CPU throttling enabled, auto-calculating 7 equal groups).
-    EXEC dbo.usp_RunDatabaseIntegrityCheck;
+    EXEC dbo.usp_RunDatabaseIntegrityCheckV2;
 
 Example B: Strict 2-Hour Maintenance Window
 Run for exactly 120 minutes every night, skipping CPU checks on Sundays.
-    EXEC dbo.usp_RunDatabaseIntegrityCheck
+    EXEC dbo.usp_RunDatabaseIntegrityCheckV2
         @RunTimeMtoS = '120,120,120,120,120,120,120',
         @CPUCheckMtoS = 'Y,Y,Y,Y,Y,Y,N';
 
 Example C: Dry Run / Preview Plan
 Preview which databases are due and the order they will run without executing.
-    EXEC dbo.usp_RunDatabaseIntegrityCheck @Execute = 'N';
+    EXEC dbo.usp_RunDatabaseIntegrityCheckV2 @Execute = 'N';
 ----------------------------------------------------------------------------------------------------
 */
     SET NOCOUNT ON;
@@ -183,6 +198,13 @@ Preview which databases are due and the order they will run without executing.
     IF @MinCheckDBDays < 0
     BEGIN
         SET @ErrorMessage = 'Parameter @MinCheckDBDays cannot be negative. Please provide a non-negative integer.';
+        RAISERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END
+
+    IF @OverdueAlertDays < 0
+    BEGIN
+        SET @ErrorMessage = 'Parameter @OverdueAlertDays cannot be negative. Please provide a non-negative integer.';
         RAISERROR(@ErrorMessage, 16, 1);
         RETURN;
     END
@@ -466,12 +488,186 @@ IF @RunTimeMtoS IS NULL
     PRINT '  @RunTimeMtoS         : ' + @RunTimeMtoS + ' (max minutes for Mon-Sun)'; -- Changed to minutes
     PRINT '  @WaitForMin          : ' + CAST(@WaitForMin AS VARCHAR(2)) + ' minutes (wait time if CPU is high)';
     PRINT '  @DatabaseOrder       : ' + @DatabaseOrder + ' (order for processing databases)';
+    PRINT '  @OverdueAlertDays    : ' + CAST(@OverdueAlertDays AS VARCHAR(5)) + ' days (alert if last successful CHECKDB is this old or never)';
+    PRINT '  @OverdueAlertEmail   : ' + ISNULL(@OverdueAlertEmail, '(NULL)');
     PRINT '----------------------------------------------------------------------------------------------------';
     PRINT 'Derived Configuration for Today:';
     PRINT '  CPU Check Enabled   : ' + @ShouldPerformCPUCheck;
     PRINT '  Configured Run Minutes: ' + CAST(@ConfiguredRunMinutes AS VARCHAR(10)) + ' minutes (Max ' + CAST(@MaxAllowedRunMinutes AS NVARCHAR(10)) + ' minutes)'; -- Changed to minutes
     PRINT '  Overall Job End Time: ' + CONVERT(VARCHAR(19), @OverallJobEndTime, 120);
     PRINT '====================================================================================================';
+
+    -------------------------------------------------------------------------
+    -- 1) Retrieve "last good CHECKDB" time using DATABASEPROPERTYEX
+    --    This helps identify databases that are due for a check.
+    -------------------------------------------------------------------------
+    IF OBJECT_ID('tempdb..#LastCkTemp') IS NOT NULL DROP TABLE #LastCkTemp;
+    CREATE TABLE #LastCkTemp (
+        DatabaseName SYSNAME,
+        LastKnownGoodDate DATETIME NULL
+    );
+    INSERT INTO #LastCkTemp (DatabaseName, LastKnownGoodDate)
+    SELECT
+        d.name AS DatabaseName,
+        CAST(DATABASEPROPERTYEX(d.name, 'LastGoodCheckDbTime') AS DATETIME) AS LastKnownGoodDate
+    FROM sys.databases AS d WITH (NOLOCK)
+    WHERE d.state_desc = 'ONLINE'
+      AND d.user_access_desc IN ('MULTI_USER', 'SINGLE_USER')
+      AND d.is_read_only = 0
+      AND d.name NOT IN ('tempdb') -- Exclude system databases that typically don't need CHECKDB
+    ;
+    PRINT 'Step 1: Identified last good CHECKDB times for user databases.';
+
+    -------------------------------------------------------------------------
+    -- 2) Calculate current sizes (MB) for all user databases
+    --    Used to categorize databases as "small", "medium" or "large" for different CHECKDB modes.
+    -------------------------------------------------------------------------
+    IF OBJECT_ID('tempdb..#AllUserDbSizes') IS NOT NULL DROP TABLE #AllUserDbSizes;
+    CREATE TABLE #AllUserDbSizes (
+        DatabaseName SYSNAME,
+        TotalSizeMB DECIMAL(18,2)
+    );
+    INSERT INTO #AllUserDbSizes (DatabaseName, TotalSizeMB)
+    SELECT
+        d.name AS DatabaseName,
+        CAST(SUM(CAST(mf.size AS BIGINT)) * 8.0 / 1024 AS DECIMAL(18,2)) AS TotalSizeMB -- Convert pages to MB
+    FROM sys.databases AS d WITH (NOLOCK)
+    JOIN sys.master_files AS mf WITH (NOLOCK) ON d.database_id = mf.database_id
+    WHERE d.name NOT IN ('tempdb')
+      AND d.state_desc = 'ONLINE'
+      AND d.user_access_desc IN ('MULTI_USER', 'SINGLE_USER')
+      AND d.is_read_only = 0
+    GROUP BY d.name;
+    PRINT 'Step 2: Calculated current sizes for user databases.';
+
+    -------------------------------------------------------------------------
+    -- 2.1) Detect overdue CHECKDB DBs, return SELECT, and send mail immediately
+    -------------------------------------------------------------------------
+    IF OBJECT_ID('tempdb..#OverdueAlertDBs') IS NOT NULL DROP TABLE #OverdueAlertDBs;
+    CREATE TABLE #OverdueAlertDBs (
+        DatabaseName SYSNAME,
+        SizeGB DECIMAL(18,2),
+        LastCheckDbDate DATETIME NULL,
+        LastRuntimeMinutes DECIMAL(18,2) NULL,
+        DaysSinceLastCheck INT NULL
+    );
+    INSERT INTO #OverdueAlertDBs (DatabaseName, SizeGB, LastCheckDbDate, LastRuntimeMinutes, DaysSinceLastCheck)
+    SELECT
+        ck.DatabaseName,
+        CAST(sz.TotalSizeMB / 1024.0 AS DECIMAL(18,2)) AS SizeGB,
+        ck.LastKnownGoodDate,
+        CASE WHEN qr.TimeTakenSeconds IS NULL THEN NULL ELSE CAST(qr.TimeTakenSeconds / 60.0 AS DECIMAL(18,2)) END,
+        CASE WHEN ck.LastKnownGoodDate IS NULL THEN NULL ELSE DATEDIFF(DAY, ck.LastKnownGoodDate, @CurrentDate) END
+    FROM #LastCkTemp ck
+    JOIN #AllUserDbSizes sz ON sz.DatabaseName = ck.DatabaseName
+    LEFT JOIN #QueryRunTimeData qr ON qr.DatabaseName = ck.DatabaseName
+    WHERE ck.LastKnownGoodDate IS NULL
+       OR DATEDIFF(DAY, ck.LastKnownGoodDate, @CurrentDate) >= @OverdueAlertDays;
+
+    DECLARE @HasOverdueDBs BIT = CASE WHEN EXISTS (SELECT 1 FROM #OverdueAlertDBs) THEN 1 ELSE 0 END;
+    DECLARE @OverdueCount INT = (SELECT COUNT(*) FROM #OverdueAlertDBs);
+
+    IF @HasOverdueDBs = 1
+    BEGIN
+        PRINT 'Overdue CHECKDB alert path is active (' + CAST(@OverdueCount AS VARCHAR(10))
+            + ' database(s) with no successful CHECKDB for '
+            + CAST(@OverdueAlertDays AS VARCHAR(10))
+            + '+ days or never). Execution order is forced to DATABASE_SIZE_ASC. The 80% runtime first-priority boost is disabled so remaining databases can be covered.';
+
+        SELECT
+            DatabaseName AS [Database],
+            SizeGB AS [Size (GB)],
+            CASE WHEN LastCheckDbDate IS NULL THEN N'Never' ELSE CONVERT(NVARCHAR(19), LastCheckDbDate, 120) END AS [Last CHECKDB Date],
+            CASE WHEN LastRuntimeMinutes IS NULL THEN N'N/A' ELSE CONVERT(NVARCHAR(20), LastRuntimeMinutes) END AS [Last CHECKDB Runtime (mins)],
+            CASE WHEN DaysSinceLastCheck IS NULL THEN N'Never' ELSE CAST(DaysSinceLastCheck AS NVARCHAR(10)) END AS [Days Since Last CHECKDB]
+        FROM #OverdueAlertDBs
+        ORDER BY
+            CASE WHEN LastCheckDbDate IS NULL THEN 0 ELSE 1 END ASC,
+            DaysSinceLastCheck DESC,
+            SizeGB ASC,
+            DatabaseName ASC;
+
+        DECLARE @MailProfile SYSNAME;
+        DECLARE @MailSubject NVARCHAR(255);
+        DECLARE @HtmlBody NVARCHAR(MAX);
+        DECLARE @OverdueDbName SYSNAME;
+        DECLARE @OverdueSizeGB DECIMAL(18,2);
+        DECLARE @OverdueLastDate DATETIME;
+        DECLARE @OverdueRuntimeMins DECIMAL(18,2);
+        DECLARE @OverdueDays INT;
+        DECLARE @EscapedDbName NVARCHAR(512);
+
+        SET @MailSubject = N'CHECKDB overdue ' + CAST(@OverdueAlertDays AS NVARCHAR(10)) + N'+ days on '
+            + CONVERT(NVARCHAR(128), @@SERVERNAME) + N' (' + CAST(@OverdueCount AS NVARCHAR(10)) + N' database(s))';
+
+        SET @HtmlBody = N'<html><body>'
+            + N'<p>These databases on this instance have not had a successful CHECKDB for '
+            + CAST(@OverdueAlertDays AS NVARCHAR(10)) + N'+ days.</p>'
+            + N'<table border="1" cellpadding="4" cellspacing="0">'
+            + N'<tr style="background-color:#d9e1f2;font-weight:bold;">'
+            + N'<th>Database</th>'
+            + N'<th>Size (GB)</th>'
+            + N'<th>Last CHECKDB Date</th>'
+            + N'<th>Last CHECKDB Runtime (mins)</th>'
+            + N'<th>Days Since Last CHECKDB</th>'
+            + N'</tr>';
+
+        DECLARE overdue_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT DatabaseName, SizeGB, LastCheckDbDate, LastRuntimeMinutes, DaysSinceLastCheck
+            FROM #OverdueAlertDBs
+            ORDER BY
+                CASE WHEN LastCheckDbDate IS NULL THEN 0 ELSE 1 END ASC,
+                DaysSinceLastCheck DESC,
+                SizeGB ASC,
+                DatabaseName ASC;
+
+        OPEN overdue_cur;
+        FETCH NEXT FROM overdue_cur INTO @OverdueDbName, @OverdueSizeGB, @OverdueLastDate, @OverdueRuntimeMins, @OverdueDays;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            SET @EscapedDbName = REPLACE(REPLACE(REPLACE(@OverdueDbName, N'&', N'&amp;'), N'<', N'&lt;'), N'>', N'&gt;');
+            SET @HtmlBody = @HtmlBody
+                + N'<tr><td>' + @EscapedDbName
+                + N'</td><td>' + CONVERT(NVARCHAR(20), @OverdueSizeGB)
+                + N'</td><td>' + CASE WHEN @OverdueLastDate IS NULL THEN N'Never' ELSE CONVERT(NVARCHAR(19), @OverdueLastDate, 120) END
+                + N'</td><td>' + CASE WHEN @OverdueRuntimeMins IS NULL THEN N'N/A' ELSE CONVERT(NVARCHAR(20), @OverdueRuntimeMins) END
+                + N'</td><td>' + CASE WHEN @OverdueDays IS NULL THEN N'Never' ELSE CAST(@OverdueDays AS NVARCHAR(10)) END
+                + N'</td></tr>';
+            FETCH NEXT FROM overdue_cur INTO @OverdueDbName, @OverdueSizeGB, @OverdueLastDate, @OverdueRuntimeMins, @OverdueDays;
+        END
+        CLOSE overdue_cur;
+        DEALLOCATE overdue_cur;
+
+        SET @HtmlBody = @HtmlBody + N'</table></body></html>';
+
+        SET @MailProfile = NULL;
+        SELECT TOP (1) @MailProfile = p.name
+        FROM msdb.dbo.sysmail_principalprofile AS pp
+        INNER JOIN msdb.dbo.sysmail_profile AS p
+            ON p.profile_id = pp.profile_id
+        WHERE pp.is_default = 1
+        ORDER BY CASE WHEN pp.principal_sid = 0x00 THEN 0 ELSE 1 END, p.profile_id;
+
+        IF @MailProfile IS NULL
+        BEGIN
+            PRINT 'WARNING: No default Database Mail profile found. Skipping overdue CHECKDB alert email. CHECKDB will continue.';
+        END
+        ELSE
+        BEGIN
+            BEGIN TRY
+                EXEC msdb.dbo.sp_send_dbmail
+                    @profile_name = @MailProfile,
+                    @recipients = @OverdueAlertEmail,
+                    @subject = @MailSubject,
+                    @body = @HtmlBody,
+                    @body_format = 'HTML';
+                PRINT 'Overdue CHECKDB alert email sent immediately to ' + @OverdueAlertEmail + ' using profile ' + @MailProfile + '.';
+            END TRY
+            BEGIN CATCH
+                PRINT 'Failed to send overdue CHECKDB alert email: ' + ERROR_MESSAGE() + '. CHECKDB will continue.';
+            END CATCH
+        END
+    END
 
     -------------------------------------------------------------------------
     -- 0.1) Initial CPU Threshold Check before starting any work
@@ -537,49 +733,6 @@ IF @RunTimeMtoS IS NULL
     END
 
     -------------------------------------------------------------------------
-    -- 1) Retrieve "last good CHECKDB" time using DATABASEPROPERTYEX
-    --    This helps identify databases that are due for a check.
-    -------------------------------------------------------------------------
-    IF OBJECT_ID('tempdb..#LastCkTemp') IS NOT NULL DROP TABLE #LastCkTemp;
-    CREATE TABLE #LastCkTemp (
-        DatabaseName SYSNAME,
-        LastKnownGoodDate DATETIME NULL
-    );
-    INSERT INTO #LastCkTemp (DatabaseName, LastKnownGoodDate)
-    SELECT
-        d.name AS DatabaseName,
-        CAST(DATABASEPROPERTYEX(d.name, 'LastGoodCheckDbTime') AS DATETIME) AS LastKnownGoodDate
-    FROM sys.databases AS d WITH (NOLOCK)
-    WHERE d.state_desc = 'ONLINE'
-      AND d.user_access_desc IN ('MULTI_USER', 'SINGLE_USER')
-      AND d.is_read_only = 0
-      AND d.name NOT IN ('tempdb') -- Exclude system databases that typically don't need CHECKDB
-    ;
-    PRINT 'Step 1: Identified last good CHECKDB times for user databases.';
-
-    -------------------------------------------------------------------------
-    -- 2) Calculate current sizes (MB) for all user databases
-    --    Used to categorize databases as "small", "medium" or "large" for different CHECKDB modes.
-    -------------------------------------------------------------------------
-    IF OBJECT_ID('tempdb..#AllUserDbSizes') IS NOT NULL DROP TABLE #AllUserDbSizes;
-    CREATE TABLE #AllUserDbSizes (
-        DatabaseName SYSNAME,
-        TotalSizeMB DECIMAL(18,2)
-    );
-    INSERT INTO #AllUserDbSizes (DatabaseName, TotalSizeMB)
-    SELECT
-        d.name AS DatabaseName,
-        CAST(SUM(CAST(mf.size AS BIGINT)) * 8.0 / 1024 AS DECIMAL(18,2)) AS TotalSizeMB -- Convert pages to MB
-    FROM sys.databases AS d WITH (NOLOCK)
-    JOIN sys.master_files AS mf WITH (NOLOCK) ON d.database_id = mf.database_id
-    WHERE d.name NOT IN ('tempdb')
-      AND d.state_desc = 'ONLINE'
-      AND d.user_access_desc IN ('MULTI_USER', 'SINGLE_USER')
-      AND d.is_read_only = 0
-    GROUP BY d.name;
-    PRINT 'Step 2: Calculated current sizes for user databases.';
-
-    -------------------------------------------------------------------------
     -- 3) Build "due" list (based on @MinCheckDBDays), ordered by longest unchecked
     --    This table will hold the prioritized list of databases to process.
     -------------------------------------------------------------------------
@@ -607,11 +760,15 @@ JOIN #AllUserDbSizes sz ON sz.DatabaseName = ck.DatabaseName
 LEFT JOIN #QueryRunTimeData qr ON ck.DatabaseName = qr.DatabaseName
 WHERE (ck.LastKnownGoodDate IS NULL OR DATEDIFF(DAY, ck.LastKnownGoodDate, @CurrentDate) >= @MinCheckDBDays)
 ORDER BY
+    -- Overdue path: ignore 80% runtime boost; cover remaining DBs smallest-first.
+    CASE WHEN @HasOverdueDBs = 1 THEN sz.TotalSizeMB ELSE NULL END ASC,
+    CASE WHEN @HasOverdueDBs = 1 THEN ck.DatabaseName ELSE NULL END ASC,
     -- PRIMARY PRIORITY: Any single database estimated to take longer than the TOTAL CONFIGURED JOB RUN MINUTES.
     -- These are the critical ones that could overrun the entire window if not run immediately.
-    CASE WHEN ISNULL(qr.TimeTakenSeconds, 0) > ((@ConfiguredRunMinutes * 60)*0.80) THEN 0 ELSE 1 END ASC,
+    -- Disabled when overdue DBs exist so one large/corrupt DB does not starve the rest.
+    CASE WHEN @HasOverdueDBs = 0 AND ISNULL(qr.TimeTakenSeconds, 0) > ((@ConfiguredRunMinutes * 60)*0.80) THEN 0 ELSE 1 END ASC,
     -- If multiple such databases exist, break ties by longest runtime first.
-    CASE WHEN ISNULL(qr.TimeTakenSeconds, 0) > (@ConfiguredRunMinutes * 60) THEN ISNULL(qr.TimeTakenSeconds, 0) ELSE NULL END DESC,
+    CASE WHEN @HasOverdueDBs = 0 AND ISNULL(qr.TimeTakenSeconds, 0) > (@ConfiguredRunMinutes * 60) THEN ISNULL(qr.TimeTakenSeconds, 0) ELSE NULL END DESC,
 
     -- SECONDARY PRIORITY: Apply @DatabaseOrder options.
     -- If @DatabaseOrder is 'DATABASE_RUNTIME_DESC', order by longest estimated runtime first.
@@ -696,11 +853,15 @@ OPTION (RECOMPILE);
             JOIN #AllUserDbSizes sz ON sz.DatabaseName = dp.DatabaseName
             LEFT JOIN #QueryRunTimeData qr ON dp.DatabaseName = qr.DatabaseName
             ORDER BY
+                -- Overdue path: ignore 80% runtime boost; cover remaining DBs smallest-first.
+                CASE WHEN @HasOverdueDBs = 1 THEN sz.TotalSizeMB ELSE NULL END ASC,
+                CASE WHEN @HasOverdueDBs = 1 THEN dp.DatabaseName ELSE NULL END ASC,
                 -- PRIMARY PRIORITY: Any single database estimated to take longer than the TOTAL CONFIGURED JOB RUN MINUTES.
                 -- These are the critical ones that could overrun the entire window if not run immediately.
-                CASE WHEN ISNULL(dp.EstimatedRunTimeSeconds, 0) > ((@ConfiguredRunMinutes * 60)*0.80) THEN 0 ELSE 1 END ASC,
+                -- Disabled when overdue DBs exist so one large/corrupt DB does not starve the rest.
+                CASE WHEN @HasOverdueDBs = 0 AND ISNULL(dp.EstimatedRunTimeSeconds, 0) > ((@ConfiguredRunMinutes * 60)*0.80) THEN 0 ELSE 1 END ASC,
                 -- If multiple such databases exist, break ties by longest runtime first.
-                CASE WHEN ISNULL(dp.EstimatedRunTimeSeconds, 0) > (@ConfiguredRunMinutes * 60) THEN ISNULL(dp.EstimatedRunTimeSeconds, 0) ELSE NULL END DESC,
+                CASE WHEN @HasOverdueDBs = 0 AND ISNULL(dp.EstimatedRunTimeSeconds, 0) > (@ConfiguredRunMinutes * 60) THEN ISNULL(dp.EstimatedRunTimeSeconds, 0) ELSE NULL END DESC,
 
                 -- SECONDARY PRIORITY: Apply @DatabaseOrder options.
                 -- If @DatabaseOrder is 'DATABASE_RUNTIME_DESC', order by longest estimated runtime first.
@@ -727,6 +888,7 @@ OPTION (RECOMPILE);
             OPTION (RECOMPILE);
         END
     END
+
     -------------------------------------------------------------------------
     -- 6) Execute Ola Hallengren's DatabaseIntegrityCheck (one by one with CPU/Time checks)
     --    This section iterates through the prioritized list and executes CHECKDB.
@@ -873,6 +1035,7 @@ OPTION (RECOMPILE);
     IF OBJECT_ID('tempdb..#AllUserDbSizes') IS NOT NULL DROP TABLE #AllUserDbSizes;
     IF OBJECT_ID('tempdb..#LastCkTemp') IS NOT NULL DROP TABLE #LastCkTemp;
     IF OBJECT_ID('tempdb..#QueryRunTimeData') IS NOT NULL DROP TABLE #QueryRunTimeData;
+    IF OBJECT_ID('tempdb..#OverdueAlertDBs') IS NOT NULL DROP TABLE #OverdueAlertDBs;
     PRINT '====================================================================================================';
     PRINT 'Job Finished At: ' + CONVERT(VARCHAR(19), GETDATE(), 120);
     PRINT '====================================================================================================';
