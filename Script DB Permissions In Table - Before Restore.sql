@@ -19,7 +19,7 @@ ALTER PROCEDURE [dbo].[usp_ScriptPermission]
 AS
 /*********************************************************************************
 Name:       usp_ScriptPermission
-Version:    2.1 (SQL 2014+ Compatible | Ola-style Logging)
+Version:    2.2 (SQL 2014+ Compatible | Ola-style Logging)
 Description: 
     Scripts database-level permissions.
     If @LogToTable = 'Y', stores them persistently in [dbo].[tbl_DBPermission].
@@ -70,13 +70,24 @@ BEGIN
     SET @InnerScript = N'
         SELECT ''-- [-- DB CONTEXT --] --'' AS [ScriptLine], 1 AS [SortOrder]
         UNION ALL
-        SELECT  ''USE '' + QUOTENAME(DB_NAME()) + '';'', 1
+        SELECT  ''USE '' + QUOTENAME(DB_NAME()) + '';'', 2
         UNION ALL SELECT ''-- [-- DB USERS --] --'', 3
         UNION ALL
-        SELECT  ''IF NOT EXISTS (SELECT [name] FROM sys.database_principals WHERE [name] = '' + N'''''''' + [name] + N'''''''' + '') BEGIN CREATE USER '' + QUOTENAME([name]) + '' FOR LOGIN '' + QUOTENAME([name]) + '' WITH DEFAULT_SCHEMA = '' + ISNULL(QUOTENAME([default_schema_name]), ''[dbo]'') + '' END; '', 4
+        SELECT  ''IF NOT EXISTS (SELECT [name] FROM sys.database_principals WHERE [name] = '' + N'''''''' + dp.[name] + N'''''''' + '') BEGIN CREATE USER '' + QUOTENAME(dp.[name]) 
+                + CASE WHEN sp.[name] IS NOT NULL THEN '' FOR LOGIN '' + QUOTENAME(sp.[name]) ELSE '' WITHOUT LOGIN'' END
+                + CASE WHEN dp.[type] = ''G'' THEN '''' ELSE '' WITH DEFAULT_SCHEMA = '' + ISNULL(QUOTENAME(dp.[default_schema_name]), ''[dbo]'') END
+                + '' END; '', 4
+        FROM    sys.database_principals AS dp
+        LEFT JOIN sys.server_principals AS sp ON dp.[sid] = sp.[sid]
+        WHERE   dp.[type] IN (''U'', ''S'', ''G'') 
+          AND   dp.[name] NOT IN (''dbo'', ''sys'', ''INFORMATION_SCHEMA'', ''guest'')
+          AND   dp.[name] NOT LIKE ''##%''
+        UNION ALL SELECT ''-- [-- CUSTOM DB ROLES --] --'', 5
+        UNION ALL
+        SELECT  ''IF NOT EXISTS (SELECT [name] FROM sys.database_principals WHERE [name] = '' + N'''''''' + [name] + N'''''''' + '' AND [type] = ''''R'''') BEGIN CREATE ROLE '' + QUOTENAME([name]) + '' END;'', 5
         FROM    sys.database_principals
-        WHERE [type] IN (''U'', ''S'', ''G'') AND [name] NOT IN (''sys'', ''INFORMATION_SCHEMA'', ''guest'')
-        UNION ALL SELECT ''-- [-- DB ROLES --] --'', 6
+        WHERE   [type] = ''R'' AND [is_fixed_role] = 0 AND [principal_id] > 0 AND [name] <> ''public''
+        UNION ALL SELECT ''-- [-- DB ROLE MEMBERS --] --'', 6
         UNION ALL
         SELECT  ''EXEC sp_addrolemember @rolename = '' + ISNULL(QUOTENAME(USER_NAME(rm.role_principal_id)), ''[UnknownRole]'') + '', @membername = '' + ISNULL(QUOTENAME(USER_NAME(rm.member_principal_id)), ''[UnknownUser]'') + '';'', 7
         FROM    sys.database_role_members AS rm
@@ -92,6 +103,7 @@ BEGIN
         INNER JOIN sys.objects AS obj ON perm.major_id = obj.[object_id]
         INNER JOIN sys.database_principals AS usr ON perm.grantee_principal_id = usr.principal_id
         LEFT JOIN sys.columns AS cl ON cl.column_id = perm.minor_id AND cl.[object_id] = perm.major_id
+        WHERE   obj.is_ms_shipped = 0
         UNION ALL SELECT ''-- [--DB LEVEL PERMISSIONS --] --'', 12
         UNION ALL
         SELECT  CASE WHEN perm.state <> ''W'' THEN perm.state_desc ELSE ''GRANT'' END
@@ -99,7 +111,7 @@ BEGIN
                 + CASE WHEN perm.state <> ''W'' THEN '''' ELSE '' WITH GRANT OPTION'' END, 13
         FROM    sys.database_permissions AS perm
         INNER JOIN sys.database_principals AS usr ON perm.grantee_principal_id = usr.principal_id
-        WHERE   [perm].[major_id] = 0 AND [usr].[principal_id] > 4 AND [usr].[type] IN (''G'', ''S'', ''U'') 
+        WHERE   [perm].[major_id] = 0 AND [usr].[principal_id] > 4 AND [usr].[type] IN (''G'', ''S'', ''U'', ''R'') 
         UNION ALL SELECT ''-- [--DB LEVEL SCHEMA PERMISSIONS --] --'', 15
         UNION ALL
         SELECT  CASE WHEN perm.state <> ''W'' THEN perm.state_desc ELSE ''GRANT'' END
@@ -210,18 +222,17 @@ END
 GO
 
 ALTER PROCEDURE [dbo].[usp_RestorePermission]
-    @CurrentDBName NVARCHAR(128),       -- Made required (removed 'lIVEBACKUP' typo)
-    @NewDBName     NVARCHAR(128) = NULL, 
+    @CurrentDBName NVARCHAR(128) = 'CA40091753',
+    @NewDBName     NVARCHAR(128) = 'CA40089097', 
     @DBSnapID      INT = NULL,            
     @Print         BIT = 1,              
     @Execute       BIT = 1                
 AS
 /*********************************************************************************
 Name:       usp_RestorePermission
-Version:    2.0 (SQL 2014+ Compatible)
+Version:    2.2 (SQL 2014+ Compatible)
 Description: 
     Restores permissions from [dbo].[tbl_DBPermission] to a target database.
-    Utilizes SAVE TRANSACTION to gracefully handle individual statement failures.
 *********************************************************************************/
 BEGIN
     SET NOCOUNT ON;
@@ -287,16 +298,19 @@ BEGIN
             BEGIN
                 SET @DynamicSQL = N'USE ' + QUOTENAME(@NewDBName) + N'; ' + @ScriptLine;
                 
-                -- Create a savepoint for this specific statement
-                SAVE TRANSACTION PermRestorePoint;
+                -- Only create a savepoint if an outer transaction is active
+                IF @@TRANCOUNT > 0
+                    SAVE TRANSACTION PermRestorePoint;
 
                 BEGIN TRY
                     EXEC sp_executesql @DynamicSQL;
                     SET @SuccessCount = @SuccessCount + 1;
                 END TRY
                 BEGIN CATCH
-                    -- Rollback only the failed statement, keeping the rest of the batch alive
-                    ROLLBACK TRANSACTION PermRestorePoint;
+                    -- Rollback only the failed statement if inside a committable transaction
+                    IF @@TRANCOUNT > 0 AND XACT_STATE() = 1
+                        ROLLBACK TRANSACTION PermRestorePoint;
+
                     SET @FailCount = @FailCount + 1;
                     
                     PRINT 'EXECUTION ERROR on line: ' + @ScriptLine;
@@ -330,4 +344,19 @@ BEGIN
         PRINT '-------------------------------------------------------------';
     END
 END
+GO
+
+-- =========================================================================
+-- EXECUTE PERMISSION COPY FROM CA40091753 TO CA40089097
+-- =========================================================================
+EXEC dbo.usp_ScriptPermission 
+    @DBName     = 'DBName', 
+    @LogToTable = 'Y';
+GO
+
+EXEC dbo.usp_RestorePermission 
+    @CurrentDBName = 'DBName',
+    @NewDBName     = 'NewDBName',
+    @Print         = 1,
+    @Execute       = 1;
 GO
