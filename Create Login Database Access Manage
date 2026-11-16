@@ -7,9 +7,9 @@ SET QUOTED_IDENTIFIER ON
 GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_GrantAccess
-    @UserName               NVARCHAR(128) = 'test_user',
+    @UserName               NVARCHAR(128),
     @Print                  BIT           = 1,
-    @Execute                BIT           = 0,
+    @Execute                BIT           = 1,
     @Password               NVARCHAR(128) = NULL OUTPUT,
     @IsPasswordHashed       BIT           = 0,
     @SID                    VARBINARY(85) = NULL,
@@ -18,16 +18,19 @@ CREATE OR ALTER PROCEDURE dbo.usp_GrantAccess
     @IncludeSystemDBs       BIT           = 0,
     @Schema                 NVARCHAR(128) = NULL,
     @GrantRead              BIT           = 1,
-    @GrantWrite             BIT           = 0,
-    @GrantExecute           BIT           = 0,
+    @GrantWrite             BIT           = 1,
+    @GrantExecute           BIT           = 1,
     @GrantViewDefinition    BIT           = 0,
     @GrantViewServerState   BIT           = 0,
     @CustomRoles            NVARCHAR(MAX) = NULL,
     @Rollback               BIT           = 0,
-    @CleanupLogin           BIT           = 0
+    @CleanupLogin           BIT           = 0,
+    @CheckExpiration        BIT           = 1,
+    @MustChangePassword     BIT           = 0
 AS
 BEGIN
     SET NOCOUNT ON;
+    SET XACT_ABORT ON;
 
     /*******************************************************************************
 usp_GrantAccess
@@ -37,30 +40,39 @@ Description:
     and Database Users across multiple databases.
 
 Parameters:
-    @UserName               The target Login and User name.
+    @UserName               The target Login and User name. Required - no default.
     @Print                  Displays the generated T-SQL commands.
     @Execute                Executes the generated T-SQL commands.
     @Password               OUTPUT: The generated password for SQL Logins.
-    @IsPasswordHashed       Set to 1 if the @Password provided is already hashed.
+    @IsPasswordHashed       Set to 1 if the @Password provided is already hashed (hex string).
     @SID                    Specifies a fixed SID (useful for AG/Mirroring setups).
     @DBNames                Comma-separated list of databases. Empty string = All.
     @ExcludeDBs             Comma-separated list of databases to ignore.
     @IncludeSystemDBs       Include 'master', 'msdb', and 'model'.
-    @Schema                 If provided, grants permissions ONLY on this schema.
+    @Schema                 If provided, grants permissions ONLY on this schema. Validated to exist.
     @GrantRead              Grants db_datareader or SELECT on schema.
     @GrantWrite             Grants db_datawriter or INSERT/UPDATE/DELETE on schema.
     @GrantExecute           Grants EXECUTE at DB level or Schema level.
-    @GrantViewDefinition    Grants VIEW DEFINITION.
+                            NOTE: without @Schema this grants EXECUTE on ALL objects in the DB.
+    @GrantViewDefinition    Grants VIEW DEFINITION at DB level or Schema level.
     @GrantViewServerState   Grants VIEW SERVER STATE (Server-level permission).
     @CustomRoles            Comma-separated list of DB or Server roles to assign.
     @Rollback               1 = Decommissions the user (Revokes/Drops).
     @CleanupLogin           1 = Also drops the Server Login during Rollback.
+    @CheckExpiration        Applies CHECK_EXPIRATION to new SQL Logins (default ON).
+    @MustChangePassword     Applies MUST_CHANGE to new SQL Logins (default OFF).
 
 --------------------------------------------------------------------------------
 License: MIT
 --------------------------------------------------------------------------------
 *******************************************************************************/
-    
+
+    IF @UserName IS NULL OR LTRIM(RTRIM(@UserName)) = ''
+    BEGIN
+        RAISERROR('@UserName is required.', 16, 1);
+        RETURN;
+    END
+
     DECLARE @Results TABLE (
         UserName NVARCHAR(128),
         Scope NVARCHAR(128), 
@@ -69,7 +81,8 @@ License: MIT
         Message NVARCHAR(MAX)
     );
     DECLARE @SQL NVARCHAR(MAX);
-    DECLARE @IsSqlLogin BIT = IIF(CHARINDEX('\', @UserName) = 0, 1, 0);
+    -- Windows principals may be DOMAIN\user OR UPN-style user@domain.com; anything else is a SQL Login.
+    DECLARE @IsSqlLogin BIT = IIF(CHARINDEX('\', @UserName) = 0 AND CHARINDEX('@', @UserName) = 0, 1, 0);
 
     --------------------------------------------------------------------------------
     -- PHASE 0: PREPARATION
@@ -96,21 +109,51 @@ License: MIT
             -- CREATE LOGIN
             IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = @UserName)
             BEGIN
-                SET @SQL = IIF(@IsSqlLogin = 1, 
-                    N'CREATE LOGIN ' + QUOTENAME(@UserName) + N' WITH PASSWORD = ' + IIF(@IsPasswordHashed = 1, @Password + N' HASHED', N'''' + REPLACE(@Password, '''', '''''') + N'''') + ISNULL(N', SID = ' + CONVERT(NVARCHAR(100), @SID, 1), '') + N', CHECK_POLICY = ON;',
-                    N'CREATE LOGIN ' + QUOTENAME(@UserName) + N' FROM WINDOWS;');
-                IF @Print = 1 PRINT '-- Server Level: ' + @SQL; 
-                IF @Execute = 1 EXEC sp_executesql @SQL;
+                IF @IsSqlLogin = 1
+                BEGIN
+                    DECLARE @Options NVARCHAR(200) = ISNULL(N', SID = ' + CONVERT(NVARCHAR(100), @SID, 1), '')
+                        + N', CHECK_POLICY = ON'
+                        + N', CHECK_EXPIRATION = ' + IIF(@CheckExpiration = 1, N'ON', N'OFF')
+                        + IIF(@MustChangePassword = 1, N', MUST_CHANGE', N'');
+
+                    IF @IsPasswordHashed = 1
+                    BEGIN
+                        -- @Password is expected to be a hex-encoded hash string (e.g. '0x0200...').
+                        SET @SQL = N'CREATE LOGIN ' + QUOTENAME(@UserName) + N' WITH PASSWORD = @pwd HASHED' + @Options + N';';
+                        IF @Print = 1 PRINT '-- Server Level: ' + @SQL;
+                        IF @Execute = 1 EXEC sp_executesql @SQL, N'@pwd VARBINARY(256)', @pwd = CONVERT(VARBINARY(256), @Password, 1);
+                    END
+                    ELSE
+                    BEGIN
+                        SET @SQL = N'CREATE LOGIN ' + QUOTENAME(@UserName) + N' WITH PASSWORD = @pwd' + @Options + N';';
+                        IF @Print = 1 PRINT '-- Server Level: ' + @SQL;
+                        IF @Execute = 1 EXEC sp_executesql @SQL, N'@pwd NVARCHAR(128)', @pwd = @Password;
+                    END
+                END
+                ELSE
+                BEGIN
+                    SET @SQL = N'CREATE LOGIN ' + QUOTENAME(@UserName) + N' FROM WINDOWS;';
+                    IF @Print = 1 PRINT '-- Server Level: ' + @SQL;
+                    IF @Execute = 1 EXEC sp_executesql @SQL;
+                END
                 INSERT INTO @Results VALUES (@UserName, 'SERVER', 'CREATE_LOGIN', 'SUCCESS', 'Login ensured');
             END
             
-            -- SERVER ROLES
+            -- SERVER ROLES (idempotent: skip if already a member)
             DECLARE @SRole SYSNAME;
             DECLARE curSR CURSOR LOCAL FAST_FORWARD FOR SELECT RoleName FROM @CleanRoles WHERE IsServerRole = 1;
             OPEN curSR; FETCH NEXT FROM curSR INTO @SRole;
             WHILE @@FETCH_STATUS = 0 BEGIN
-                SET @SQL = N'ALTER SERVER ROLE ' + QUOTENAME(@SRole) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N';';
-                IF @Execute = 1 EXEC sp_executesql @SQL;
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.server_role_members rm
+                    JOIN sys.server_principals r ON rm.role_principal_id = r.principal_id
+                    JOIN sys.server_principals m ON rm.member_principal_id = m.principal_id
+                    WHERE r.name = @SRole AND m.name = @UserName)
+                BEGIN
+                    SET @SQL = N'ALTER SERVER ROLE ' + QUOTENAME(@SRole) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N';';
+                    IF @Print = 1 PRINT '-- Server Level: ' + @SQL;
+                    IF @Execute = 1 EXEC sp_executesql @SQL;
+                END
                 FETCH NEXT FROM curSR INTO @SRole;
             END
             CLOSE curSR; DEALLOCATE curSR;
@@ -120,6 +163,7 @@ License: MIT
         IF @GrantViewServerState = 1
         BEGIN
             SET @SQL = IIF(@Rollback = 0, N'GRANT ', N'REVOKE ') + N'VIEW SERVER STATE TO ' + QUOTENAME(@UserName) + N';';
+            IF @Print = 1 PRINT '-- Server Level: ' + @SQL;
             IF @Execute = 1 EXEC sp_executesql @SQL;
         END
     END TRY
@@ -130,6 +174,9 @@ License: MIT
     --------------------------------------------------------------------------------
     -- PHASE 2: DATABASE LEVEL OPERATIONS
     --------------------------------------------------------------------------------
+    IF @GrantExecute = 1 AND @Schema IS NULL AND @Rollback = 0
+        PRINT '-- WARNING: @GrantExecute=1 without @Schema grants EXECUTE on ALL objects in each database.';
+
     DECLARE @DBName SYSNAME;
     DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
         SELECT name FROM sys.databases
@@ -143,10 +190,21 @@ License: MIT
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
+        DECLARE @TranStarted BIT = 0;
         BEGIN TRY
             -- Check for Read-Only status before attempting any DB work
             IF DATABASEPROPERTYEX(@DBName, 'Updateability') = 'READ_ONLY'
                 THROW 50001, 'Database is READ_ONLY. Cannot modify users.', 1;
+
+            -- Validate the target schema exists before building any grants against it
+            IF @Schema IS NOT NULL
+            BEGIN
+                DECLARE @SchemaExists BIT = 0;
+                SET @SQL = N'SELECT @exists = CASE WHEN EXISTS (SELECT 1 FROM ' + QUOTENAME(@DBName) + N'.sys.schemas WHERE name = @schemaName) THEN 1 ELSE 0 END;';
+                EXEC sp_executesql @SQL, N'@schemaName SYSNAME, @exists BIT OUTPUT', @schemaName = @Schema, @exists = @SchemaExists OUTPUT;
+                IF @SchemaExists = 0
+                    THROW 50002, 'Specified @Schema does not exist in this database.', 1;
+            END
 
             DECLARE @InnerSQL NVARCHAR(MAX) = N'USE ' + QUOTENAME(@DBName) + N';' + CHAR(10);
             
@@ -157,8 +215,12 @@ License: MIT
                 IF @GrantRead = 1 SET @InnerSQL += IIF(@Schema IS NULL, N'ALTER ROLE db_datareader ADD MEMBER ', N'GRANT SELECT ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ') + QUOTENAME(@UserName) + N';' + CHAR(10);
                 IF @GrantWrite = 1 SET @InnerSQL += IIF(@Schema IS NULL, N'ALTER ROLE db_datawriter ADD MEMBER ', N'GRANT INSERT, UPDATE, DELETE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ') + QUOTENAME(@UserName) + N';' + CHAR(10);
                 IF @GrantExecute = 1 SET @InnerSQL += IIF(@Schema IS NULL, N'GRANT EXECUTE TO ', N'GRANT EXECUTE ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ') + QUOTENAME(@UserName) + N';' + CHAR(10);
+                IF @GrantViewDefinition = 1 SET @InnerSQL += IIF(@Schema IS NULL, N'GRANT VIEW DEFINITION TO ', N'GRANT VIEW DEFINITION ON SCHEMA::' + QUOTENAME(@Schema) + N' TO ') + QUOTENAME(@UserName) + N';' + CHAR(10);
                 
-                SELECT @InnerSQL += N'IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ' + QUOTENAME(RoleName, '''') + N' AND type = ''R'') ALTER ROLE ' + QUOTENAME(RoleName) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N';' + CHAR(10)
+                -- Custom DB roles (idempotent: skip if already a member)
+                SELECT @InnerSQL += N'IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ' + QUOTENAME(RoleName, '''') + N' AND type = ''R'') AND NOT EXISTS ('
+                    + N'SELECT 1 FROM sys.database_role_members rm JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id JOIN sys.database_principals m ON rm.member_principal_id = m.principal_id '
+                    + N'WHERE r.name = ' + QUOTENAME(RoleName, '''') + N' AND m.name = ' + QUOTENAME(@UserName, '''') + N') ALTER ROLE ' + QUOTENAME(RoleName) + N' ADD MEMBER ' + QUOTENAME(@UserName) + N';' + CHAR(10)
                 FROM @CleanRoles WHERE IsServerRole = 0;
             END
             ELSE
@@ -172,10 +234,18 @@ License: MIT
             END
 
             IF @Print = 1 PRINT '-- DB: ' + @DBName + CHAR(10) + @InnerSQL;
-            IF @Execute = 1 EXEC sp_executesql @InnerSQL;
+            IF @Execute = 1
+            BEGIN
+                BEGIN TRANSACTION;
+                SET @TranStarted = 1;
+                EXEC sp_executesql @InnerSQL;
+                COMMIT TRANSACTION;
+                SET @TranStarted = 0;
+            END
             INSERT INTO @Results VALUES (@UserName, @DBName, 'DB_ACCESS', 'SUCCESS', IIF(@Rollback=0, 'Permissions Processed', 'User Dropped'));
         END TRY
         BEGIN CATCH
+            IF @TranStarted = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
             INSERT INTO @Results VALUES (@UserName, @DBName, 'DB_ACCESS', 'FAILED', ERROR_MESSAGE());
         END CATCH
         FETCH NEXT FROM db_cursor INTO @DBName;
@@ -207,4 +277,4 @@ License: MIT
     SELECT @UserName UserName, Scope, ActionTaken, Status, Message FROM @Results ORDER BY Scope ASC;
 END
 GO
-EXEC usp_GrantAccess
+-- EXEC usp_GrantAccess @UserName = 'domain\someuser';
